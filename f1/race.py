@@ -189,20 +189,28 @@ def apply_race_results(career, race_entries, points_dist):
         if d.get("best_pos") is None or pos < d["best_pos"]:
             d["best_pos"] = pos
         if pos <= len(points_dist):
+            # Championship points follow the driver; team_points are
+            # the points scored FOR this team (v0.2.1) — only these
+            # count toward the constructor total.
             d["points"] += points_dist[pos - 1]
+            d["team_points"] = d.get("team_points", 0) + points_dist[pos - 1]
         if pos == 1:
             d["season_wins"] += 1
         team["money"] += 1.95 - (0.025 * pos)
         race_rep = 5 - (pos / (n_teams * 2)) * 3.2
         d["rep"] = (race_rep + d["rep"] * 11) / 12
     for team in career["teams"]:
-        pts = team.get("points_kept", 0)  # v0.2: points scored for this
-        # team by drivers who have since left stay with the team.
+        # v0.2.1: a constructor total is points banked from departed
+        # drivers (points they scored FOR this team) plus the points
+        # its current drivers scored for THIS team — never a driver's
+        # championship total, which may include points scored for
+        # another team earlier in the season.
+        pts = team.get("points_kept", 0)
         for did in (team["driver1_id"], team["driver2_id"]):
             if did:
                 dd = next((x for x in career["drivers"] if x["id"] == did), None)
                 if dd:
-                    pts += dd["points"]
+                    pts += dd.get("team_points", 0)
         team["points"] = pts
         # team best pos = best of its drivers
         bps = [next((x for x in career["drivers"] if x["id"] == did), {}).get("best_pos")
