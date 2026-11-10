@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.1.1 (beta)
+# F1 Team Manager Online — v0.2 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.1.1 is a beta:
+for playing together at the same time (not pass-and-play). v0.2 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -160,6 +160,18 @@ The repo includes `render.yaml` for a free Web Service:
   only for ordering — results payloads and history carry gaps only
   (`LEADER` / `+x.xxxs`), never times. Qualifying keeps the original
   `lapSim` maths.
+- **Session form (v0.2 — randomness):** v0.1 was too predictable — the
+  per-lap noise (σ 0.12) averages out over 57 laps while the perf spread
+  is ~1.8s/lap, so the best driver+car combo won every race. v0.2 adds
+  one random pace offset per driver per session, drawn once (not per
+  lap): qualifying gets +N(0, 0.35s) on the single lap; the race gets
+  +N(0, 0.22s) per lap, the same offset every lap (total σ ~12.5s over
+  57 laps), drawn fresh for the race. Measured over 120 seeded races
+  with the 2026 grid: the best combo (Antonelli/Mercedes) wins 45%
+  (54/120) instead of ~100%, with 5 different winners (Russell 42,
+  Leclerc 11, Hamilton 7, Verstappen 6) and 9 different poles
+  (Antonelli 38%); qual P22 gap median 3.0s, race P22 gap median ~96s,
+  winner ~5,010s. No crashes/DNFs or weather — only lap-time randomness.
 - **Driver-name colour (v0.1):** surnames are bold, UPPERCASED, and coloured
   by team everywhere a driver name appears (results, standings, market,
   lineup, history, rumours), with a coloured `|` bar in classification
@@ -171,6 +183,10 @@ The repo includes `render.yaml` for a free Web Service:
   `race_history`. v0 saves (version 1) still load: the loader fills in the
   circuit for the saved round, marks old history entries as having no full
   tables, and strips any stored absolute times.
+- **Save format v3 (v0.2):** saves now also store `prev_driver_order`
+  (last season's driver finishing order) and each team's `points_kept`
+  (constructor points banked from departed drivers). v0/v0.1 saves still
+  load: the loader fills in both fields with safe defaults.
 - **Reliability** is a developed/displayed stat; the original race sim never
   used it for DNFs, so v0 does not either.
 - **Disconnected humans:** their team is AI-driven for that round so the
@@ -218,6 +234,37 @@ player clicks; and a double-click on Create/Join cannot create two
 rooms. Also fixed the premature Advance toast: it said "Race weekend
 complete" before the race results page had been shown — it now says
 "Qualifying complete — results are in."
+
+## v0.2 — session randomness, replacement rules, standings carry-over
+
+- **Randomness (the big one):** per-driver, per-session form — see
+  "Session form (v0.2)" above. The fastest combo still wins most often
+  (Antonelli/Mercedes 45% of 120 seeded races) but not every time.
+- **Mid-season replacement (revised):** the replaced driver KEEPS their
+  points and stays in the driver standings, like real F1. The
+  replacement driver begins at 0 points (points, wins, best finish all
+  reset on signing — this matters for a free agent with points from an
+  earlier stint). Constructor points stay with the team: when a driver
+  leaves, the points they scored for that team are banked on the team
+  (`points_kept`) and still count toward its constructor total after
+  the next race. Note the consequence of the two rules together: a
+  driver who leaves one team with points and is signed by another team
+  mid-season restarts at 0 for their new team — Matthew's stated rule
+  for incoming drivers, even though real F1 would let them keep their
+  points across the switch.
+- **Standings carry into the next season:** at season end the final
+  driver order is recorded (`prev_driver_order`) and used as the
+  tie-breaker in `driver_standings()` — so the new season opens in last
+  season's order with everyone on 0 points, and as the season
+  progresses points sort first and the old order only breaks ties.
+  Drivers with no previous order (promoted F2 drivers, new signings)
+  go after the carried-over drivers, ordered by best finish, then
+  driver perf, then name. Driver standings only — constructor
+  standings are unchanged (points, then best finish).
+- **Nickname placeholder:** the home nickname input now says
+  "e.g. [name]" instead of "e.g. Matthew".
+- **Save format v3:** see above — `prev_driver_order` and per-team
+  `points_kept`, with safe defaults when loading v0/v0.1 saves.
 
 ## Mobile + mouse
 
@@ -267,7 +314,13 @@ and driver-surname markup (bold/uppercase/team-coloured, free agents
 neutral) rendered in headless Chromium, and v0.1.1: Create Room succeeds
 even when the WebSocket handshake takes 1.5s (queued while connecting,
 exactly one room per player, double-click safe), plus the corrected
-Advance toast wording.
+Advance toast wording, and v0.2: winner/pole diversity over 120 seeded
+races (best combo wins ~45%, not every race), mid-season replacement
+(outgoing keeps points and stays in the standings, incoming starts at 0,
+constructor total keeps the banked points), standings carry-over into
+the next season (exact order before round 1, points sort takes over),
+old saves still loading with the new fields defaulted, and the nickname
+placeholder reading exactly "e.g. [name]".
 
 ## Known limits
 

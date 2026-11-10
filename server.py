@@ -295,7 +295,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.1.1"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.2"}
 
 
 @app.get("/api/saves")
