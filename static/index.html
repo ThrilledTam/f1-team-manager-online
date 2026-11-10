@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 Team Manager Online — v0</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { overflow-x: hidden; }
+  body { font-family: system-ui, -apple-system, sans-serif; background:#0d1117; color:#e6edf3; margin:0; padding:0; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 28px; margin: 8px 0; }
+  h2 { font-size: 20px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
+  h3 { font-size: 16px; margin: 14px 0 6px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:14px; margin:12px 0; min-width: 0; }
+  /* Tap targets: every button is at least 44px tall (mouse click and touch tap
+     both fire the same standard click handler; touch-action avoids double-tap
+     zoom / double-firing on mobile). */
+  button { background:#238636; color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:16px; cursor:pointer; margin:4px 4px 4px 0; min-height:44px; min-width:44px; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  button.secondary { background:#30363d; }
+  button.danger { background:#da3633; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:8px; padding:8px 10px; font-size:16px; margin:4px 4px 4px 0; min-height:44px; }
+  input[type="checkbox"] { min-height:24px; width:24px; min-width:24px; vertical-align:middle; }
+  input[type="file"] { font-size:14px; }
+  .colour-dot { display:inline-block; width:14px; height:14px; border-radius:50%; vertical-align:middle; margin-right:6px; border:1px solid #555; }
+  .swatch { display:inline-block; width:40px; height:40px; border-radius:8px; margin:3px; cursor:pointer; border:2px solid transparent; touch-action:manipulation; }
+  .swatch.sel { border-color:#fff; }
+  table { border-collapse: collapse; width:100%; font-size:14px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #21262d; }
+  th { color:#8b949e; }
+  .table-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; max-width:100%; }
+  .pill { display:inline-block; background:#30363d; border-radius:20px; padding:6px 12px; font-size:14px; margin:3px; min-height:32px; }
+  .pill.adv { background:#238636; }
+  .pill.wait { background:#9e6a03; }
+  .note { color:#8b949e; font-size:14px; }
+  .err { background:#3d1113; border:1px solid #da3633; color:#ffb3b0; border-radius:8px; padding:10px; margin:10px 0; }
+  .ok { background:#0e2a18; border:1px solid #238636; color:#a9e8bd; border-radius:8px; padding:10px; margin:10px 0; }
+  .bar-row { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:14px; flex-wrap:wrap; }
+  .bar-track { flex:1; background:#21262d; border-radius:6px; height:18px; overflow:hidden; min-width:80px; }
+  .bar-fill { height:100%; background:#58a6ff; }
+  .tabs { display:flex; overflow-x:auto; gap:4px; padding-bottom:4px; -webkit-overflow-scrolling:touch; }
+  .tabs button { background:#21262d; flex:0 0 auto; white-space:nowrap; }
+  .tabs button.sel { background:#1f6feb; }
+  .hidden { display:none; }
+  .mono { font-family: ui-monospace, monospace; }
+  @media (max-width: 600px) {
+    .wrap { padding:12px; }
+    h1 { font-size:22px; }
+    /* Full-width action buttons on phones so they are easy to hit. */
+    #screen-home button, #screen-lobby button, #advance-box button,
+    #winter-card button, #tab-research button, #tab-saves button,
+    #screen-game > p > button { width:100%; margin:4px 0; }
+    .tabs button { width:auto; margin:4px 4px 4px 0; }
+    table button { width:auto; }
+    input, select { width:100%; }
+    input[type="checkbox"] { width:24px; }
+    #home-code { width:100% !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ================= HOME ================= -->
+<div id="screen-home">
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0 beta</span></h1>
+  <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
+  pick a team, manage it through the season — and race your friends at the same time.</p>
+  <div class="card">
+    <label>Your nickname<br><input id="home-nick" placeholder="e.g. Matthew" maxlength="20"></label><br>
+    <label>Your colour</label>
+    <div id="home-colours"></div>
+    <div style="margin-top:10px">
+      <button id="btn-create">Create Room</button>
+      <button id="btn-join" class="secondary">Join Room</button>
+      <input id="home-code" placeholder="Room code" maxlength="6" style="width:110px; text-transform:uppercase">
+    </div>
+    <div style="margin-top:10px">
+      <button id="btn-settings" class="secondary">Settings</button>
+      <button id="btn-exit" class="secondary">Exit</button>
+    </div>
+    <div id="home-settings" class="hidden" style="margin-top:10px">
+      <label><input type="checkbox" id="set-chart" checked> Performance bar chart ON by default
+      <span class="note">(the host can change this in the lobby; when OFF, nobody sees perf numbers)</span></label>
+      <p class="note">Seasons: 2026 only in v0. 2027 / 2028 come later.</p>
+    </div>
+    <div id="home-exit-note" class="note hidden" style="margin-top:10px">
+      This game runs in a browser tab — there is nothing to close from inside the game.
+      Just close this tab when you are done. 👋
+    </div>
+  </div>
+  <div id="home-err"></div>
+</div>
+
+<!-- ================= LOBBY ================= -->
+<div id="screen-lobby" class="hidden">
+  <h1>🏁 Lobby <span id="lobby-code" class="mono"></span></h1>
+  <div class="card">
+    <div id="lobby-players"></div>
+    <p>
+      <button id="btn-copy-link" class="secondary">Copy join link</button>
+      <span class="note">Share the code or link with your cousin — they join with the same code.</span>
+    </p>
+    <div id="lobby-settings" class="hidden">
+      <h3>Host settings</h3>
+      <label><input type="checkbox" id="lobby-chart"> Show performance bar chart</label>
+      <span class="note">When OFF, perf numbers are hidden from everyone and bots decide on results only.</span>
+    </div>
+  </div>
+
+  <div class="card" id="career-setup">
+    <h2>Career setup</h2>
+    <div id="career-none">
+      <p class="note">The host starts a new career or continues a saved one.</p>
+      <div id="host-career-controls" class="hidden">
+        <input id="career-name" placeholder="Career name" value="My F1 Career" maxlength="40">
+        <button id="btn-new-career">Start New Career (2026)</button>
+        <p class="note">Season 2027 / 2028: coming later (disabled in v0).</p>
+        <h3>Or continue a saved career</h3>
+        <div id="saves-list"></div>
+        <p>
+          <button id="btn-refresh-saves" class="secondary">Refresh saves</button>
+          <button id="btn-view-saves" class="secondary">View saves (JSON)</button>
+          &nbsp;·&nbsp; <label class="note">Import a save file: <input type="file" id="import-file" accept=".json,application/json"></label>
+        </p>
+      </div>
+      <div id="wait-host" class="note">Waiting for the host to set up a career…</div>
+    </div>
+    <div id="career-ready" class="hidden">
+      <p id="career-summary"></p>
+      <h3>Pick your team</h3>
+      <div id="team-list"></div>
+      <div id="custom-team" class="hidden">
+        <h3>Create a custom team</h3>
+        <p class="note">Only for new careers. Pick 2 drivers from the free-agent / F2 pool.
+        Your car starts with perf = (best + 5 × worst) ÷ 6, $6M, reliability 90%.</p>
+        <input id="custom-name" placeholder="Team name" maxlength="30">
+        <div id="custom-colours"></div><br>
+        <select id="custom-d1"></select>
+        <select id="custom-d2"></select>
+        <button id="btn-create-custom">Create my team</button>
+      </div>
+      <div id="host-start" class="hidden" style="margin-top:12px">
+        <button id="btn-start-career">▶ Start the career</button>
+        <span class="note">Everyone needs a team first. Mid-career joiners take over an AI team.</span>
+      </div>
+    </div>
+  </div>
+  <div id="lobby-err"></div>
+</div>
+
+<!-- ================= GAME ================= -->
+<div id="screen-game" class="hidden">
+  <h1>🏎️ <span id="game-title"></span></h1>
+  <p class="note" id="game-sub"></p>
+  <div id="game-err"></div>
+
+  <div class="card" id="reg-card">
+    <b id="reg-line"></b>
+    <span class="note" id="reg-note"></span>
+  </div>
+
+  <div class="card hidden" id="winter-card">
+    <h2>❄️ Winter break</h2>
+    <p id="winter-text"></p>
+    <div id="winter-seats"></div>
+    <button id="btn-next-season">▶ Start next season</button>
+    <span class="note">Every human team must fill its empty seats first. AI teams fill theirs automatically.</span>
+  </div>
+
+  <div class="card">
+    <h2>My team</h2>
+    <div id="my-team"></div>
+    <div id="advance-box" style="margin-top:10px">
+      <button id="btn-advance">▶ Advance to Race Weekend</button>
+      <span id="advanced-list"></span>
+    </div>
+  </div>
+
+  <div class="card" id="results-card" class="hidden">
+    <h2>🏁 Race weekend results</h2>
+    <h3>Qualifying</h3>
+    <div id="qual-table"></div>
+    <h3>Race</h3>
+    <div id="race-table"></div>
+  </div>
+
+  <div class="card">
+    <div class="tabs">
+      <button data-tab="research" class="sel">Research</button>
+      <button data-tab="finances">Finances</button>
+      <button data-tab="market">Driver Market</button>
+      <button data-tab="standings">Standings</button>
+      <button data-tab="chart">Perf Chart</button>
+      <button data-tab="history">History &amp; Rumours</button>
+      <button data-tab="saves">Saves</button>
+    </div>
+    <div id="tab-research" class="tab">
+      <h3>Research (this round)</h3>
+      <p class="note">Performance research makes the car faster but dings reliability;
+      Reliability research does the opposite. Banked research is spent with Develop Parts ($1M).</p>
+      <select id="res-priority"><option value="perf">Performance</option><option value="reliability">Reliability</option></select>
+      <input id="res-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M
+      <button id="btn-research">Invest in research</button>
+      <button id="btn-develop" class="secondary">Develop Parts ($1M)</button>
+      <h3>Tuning (−3 to 3)</h3>
+      <p class="note">Tuning boosts Driver 1 and hurts Driver 2 (or the reverse when negative).</p>
+      <input id="tuning-val" type="number" min="-3" max="3" step="1" value="0" style="width:70px">
+      <button id="btn-tuning" class="secondary">Set tuning</button>
+      <h3>Regulation Research</h3>
+      <p class="note">Separate pool, carried to the next reg change. Invest now or take the full
+      regulation loss later — research can recover at most 70% of it.</p>
+      <input id="reg-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M
+      <button id="btn-reg-research">Invest in reg research</button>
+      <div id="my-pools"></div>
+    </div>
+    <div id="tab-finances" class="tab hidden"><div id="finances-box"></div></div>
+    <div id="tab-market" class="tab hidden"><div id="market-box"></div></div>
+    <div id="tab-standings" class="tab hidden"><div id="standings-box"></div></div>
+    <div id="tab-chart" class="tab hidden"><div id="chart-box"></div></div>
+    <div id="tab-history" class="tab hidden"><div id="history-box"></div></div>
+    <div id="tab-saves" class="tab hidden">
+      <h3>Save this career</h3>
+      <p class="note">Saves live on the server, but Render free wipes them on restart — use
+      Export to keep a durable copy, and Import to bring one back.</p>
+      <div id="save-host-only" class="hidden">
+        <input id="save-name" placeholder="Save name" maxlength="40">
+        <button id="btn-save">Save career</button>
+      </div>
+      <div id="saves-list-game"></div>
+      <p><label class="note">Import a save file: <input type="file" id="import-file-game" accept=".json,application/json"></label></p>
+    </div>
+  </div>
+  <p><button id="btn-leave" class="secondary">Leave room</button>
+  <span class="note">Your team becomes AI-driven while you are away — rejoin with the same room code to take it back.</span></p>
+</div>
+
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const PALETTE = ["#e74c3c","#e67e22","#f1c40f","#2ecc71","#1abc9c","#3498db","#9b59b6","#fd79a8","#00cec9","#6c5ce7"];
+let ws = null, myId = null, myCode = null, myColour = PALETTE[0], room = null, myTeam = null;
+let chartDefault = true, lastRound = null, lastPhase = null;
+
+function showErr(box, msg){ const el = $(box); if(!el) return; el.innerHTML = `<div class="err">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 6000); }
+function showOk(box, msg){ const el = $(box); if(!el) return; el.innerHTML = `<div class="ok">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 4000); }
+function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function money(v){ return "$" + (v ?? 0).toFixed(2) + "M"; }
+function driverById(id){ if(!room || !room.career) return null; return room.career.drivers.find(d => d.id === id) || null; }
+function teamById(id){ if(!room || !room.career) return null; return room.career.teams.find(t => t.id === id) || null; }
+
+function colourPicker(elId, current, onPick){
+  const el = $(elId); el.innerHTML = "";
+  PALETTE.forEach(c => {
+    const s = document.createElement("span");
+    s.className = "swatch" + (c === current ? " sel" : "");
+    s.style.background = c;
+    s.onclick = () => { onPick(c); colourPicker(elId, c, onPick); };
+    el.appendChild(s);
+  });
+}
+colourPicker("home-colours", myColour, c => myColour = c);
+colourPicker("custom-colours", myColour, c => myColour = c);
+
+function connect(){
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/ws");
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if(m.type === "joined"){
+      myId = m.player_id; myCode = m.code; room = m.room;
+      sessionStorage.setItem("f1code", myCode); sessionStorage.setItem("f1player", myId);
+      renderAll();
+    } else if(m.type === "room_state"){ room = m.room; renderAll();
+    } else if(m.type === "my_team"){ myTeam = m.team; renderMyTeam();
+    } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box) box.innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>` + m.rumours.map(r => `<tr><td>${esc(r.driver)}</td><td>${esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`).join("") + "</table></div>";
+    } else if(m.type === "saves_list"){ renderSaves(m.saves);
+    } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
+    } else if(m.type === "error"){ showErr(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
+    } else if(m.type === "kicked"){ alert(m.message); location.reload(); }
+  };
+  ws.onclose = () => { setTimeout(() => { if(myCode && myId){ connect(); setTimeout(() => send({type:"rejoin", code:myCode, player_id:myId}), 300); } }, 1500); };
+  setInterval(() => { if(ws && ws.readyState === 1) ws.send(JSON.stringify({type:"ping"})); }, 5000);
+}
+function send(obj){ if(ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); else showErr("home-err", "Not connected yet — try again in a second."); }
+
+function renderAll(){
+  if(!room) return;
+  const inGame = room.started;
+  $("screen-home").classList.toggle("hidden", true);
+  $("screen-lobby").classList.toggle("hidden", inGame);
+  $("screen-game").classList.toggle("hidden", !inGame);
+  if(!inGame) renderLobby(); else renderGame();
+}
+
+function renderLobby(){
+  $("lobby-code").textContent = "· " + room.code;
+  const isHost = myId === room.host_id;
+  $("lobby-settings").classList.toggle("hidden", !isHost);
+  $("lobby-chart").checked = room.chart_on;
+  $("lobby-players").innerHTML = "<h3>Players</h3>" + room.players.map(p => {
+    const kick = (isHost && p.player_id !== myId) ? ` <button class="danger" data-kick="${p.player_id}">Kick</button>` : "";
+    return `<span class="pill"><span class="colour-dot" style="background:${p.colour}"></span>${esc(p.nickname)}${p.player_id === room.host_id ? " 👑" : ""}${p.connected ? "" : " (away)"}${p.team_name ? " — " + esc(p.team_name) : ""}</span>${kick}`;
+  }).join("");
+  document.querySelectorAll("[data-kick]").forEach(b => b.onclick = () => send({type:"kick_player", player_id: b.dataset.kick}));
+  $("host-career-controls").classList.toggle("hidden", !isHost);
+  $("wait-host").classList.toggle("hidden", isHost || !!room.career);
+  if(room.career){
+    $("career-none").classList.add("hidden");
+    $("career-ready").classList.remove("hidden");
+    const c = room.career;
+    $("career-summary").textContent = `${c.name} — ${c.year}, Round ${c.round}/12, ${c.teams.length} teams` +
+      (room.career_mode === "loaded" ? " (loaded career — take over an AI team; no custom teams)" : " (new career)");
+    renderTeamList();
+    $("host-start").classList.toggle("hidden", !isHost);
+  } else {
+    $("career-none").classList.remove("hidden");
+    $("career-ready").classList.add("hidden");
+    if(isHost) refreshSaves();
+  }
+}
+
+function renderTeamList(){
+  const c = room.career;
+  const myT = c.teams.find(t => t.owner_player_id === myId);
+  $("team-list").innerHTML = c.teams.map(t => {
+    const d1 = driverById(t.driver1_id), d2 = driverById(t.driver2_id);
+    const owned = t.owner_player_id ? " — taken" : "";
+    const btn = (!t.owner_player_id && !myT) ? ` <button data-team="${t.id}">Take this team</button>` : "";
+    const mine = t.owner_player_id === myId ? " 👈 yours" : "";
+    return `<div class="bar-row"><span class="colour-dot" style="background:${t.colour}"></span>
+      <b>${esc(t.name)}</b><span class="note">${d1 ? esc(d1.name) : "?"} / ${d2 ? esc(d2.name) : "?"}${owned}${mine}</span>${btn}</div>`;
+  }).join("");
+  document.querySelectorAll("[data-team]").forEach(b => b.onclick = () => send({type:"choose_team", team_id: b.dataset.team}));
+  const canCustom = room.career_mode === "new" && !myT;
+  $("custom-team").classList.toggle("hidden", !canCustom);
+  if(canCustom){
+    const pool = c.drivers.filter(d => d.status === "free" || d.status === "f2");
+    const opts = pool.map(d => `<option value="${d.id}">${esc(d.name)} (${d.status === "free" ? "Free agent" : "F2"}, ${d.age}, rep ${Number(d.rep).toFixed(2)})</option>`).join("");
+    $("custom-d1").innerHTML = opts; $("custom-d2").innerHTML = opts;
+    $("custom-d2").selectedIndex = Math.min(1, pool.length - 1);
+  }
+}
+
+function renderSaves(saves){
+  const html = (saves || []).length ? (saves || []).map(s =>
+    `<div class="bar-row"><b>${esc(s.name)}</b><span class="note">${s.year} · Round ${s.round} · saved ${String(s.saved_at || "").slice(0,10)}</span>
+     <button data-load="${s.save_id}">Load</button>
+     <button class="secondary" data-export="${s.save_id}">Export</button>
+     <button class="danger" data-del="${s.save_id}">Delete</button></div>`).join("")
+    : `<p class="note">No saves yet.</p>`;
+  if($("saves-list")) $("saves-list").innerHTML = html;
+  if($("saves-list-game")) $("saves-list-game").innerHTML = html;
+  document.querySelectorAll("[data-load]").forEach(b => b.onclick = () => send({type:"load_save", save_id: b.dataset.load}));
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { if(confirm("Delete this save?")) send({type:"delete_save", save_id: b.dataset.del}); });
+  document.querySelectorAll("[data-export]").forEach(b => b.onclick = () => window.open("/api/export/" + b.dataset.export, "_blank"));
+}
+function refreshSaves(){ send({type:"list_saves"}); }
+async function importFile(file, box){
+  const fd = new FormData(); fd.append("file", file);
+  const r = await fetch("/api/import", {method:"POST", body: fd});
+  const j = await r.json();
+  if(r.ok){ showOk(box, "Imported save: " + j.save.name); refreshSaves(); }
+  else showErr(box, j.error || "Import failed.");
+}
+
+function renderGame(){
+  const c = room.career;
+  $("game-title").textContent = c.name;
+  $("game-sub").textContent = `Room ${room.code} · ${c.year} · Season ${c.season_index + 1} of 30 · Round ${c.round} of 12 · ${c.phase === "winter_break" ? "Winter break" : c.phase === "finished" ? "Career finished" : "Racing"}`;
+  const nextKind = c.next_reg_kind || "Minor";
+  $("reg-line").textContent = `Next reg change: ${c.next_reg_year} (${nextKind})`;
+  $("reg-note").textContent = nextKind === "Major"
+    ? " — major shake-up every 4 years; reg research can recover at most 70% of the loss."
+    : " — minor change every year; reg research softens the loss.";
+  // Winter break
+  const wb = c.phase === "winter_break";
+  $("winter-card").classList.toggle("hidden", !wb);
+  $("save-host-only").classList.toggle("hidden", myId !== room.host_id);
+  if(wb && myTeam){
+    const retired = (c.retired_this_season || []).join(", ");
+    $("winter-text").textContent = `Season ${c.year - 1} is over.` + (retired ? ` Retired: ${retired}.` : " No retirements.") +
+      ` Your empty seats: ${myTeam.empty_seats.length ? myTeam.empty_seats.join(", ") : "none — you are ready."}`;
+    $("winter-seats").innerHTML = myTeam.empty_seats.length
+      ? myTeam.empty_seats.map(s => `<p>Empty seat ${s}: use the Driver Market tab to sign a driver into seat ${s}.</p>`).join("")
+      : `<p class="ok">All seats filled — you can start the next season.</p>`;
+  }
+  $("advance-box").style.display = (c.phase === "round") ? "" : "none";
+  if(c.phase === "round"){
+    const adv = c.advanced || [];
+    const humans = c.teams.filter(t => t.owner_player_id);
+    $("advanced-list").innerHTML = humans.map(t =>
+      `<span class="pill ${adv.includes(t.id) ? "adv" : "wait"}">${esc(t.name)}: ${adv.includes(t.id) ? "advanced ✓" : "not yet"}</span>`).join("");
+  }
+  // Results
+  const showRes = c.last_race && (c.round !== lastRound || c.phase !== lastPhase);
+  $("results-card").classList.toggle("hidden", !c.last_race);
+  if(c.last_race){
+    const table = rows => `<div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Time</th><th>Gap</th>${rows[0] && "points" in rows[0] ? "<th>Pts</th>" : ""}</tr>` +
+      rows.map(r => `<tr><td>${r.pos}</td><td>${esc(r.driver)}</td><td>${esc(r.team)}</td><td>${r.time}s</td><td>${esc(r.gap)}</td>${"points" in r ? `<td>${r.points}</td>` : ""}</tr>`).join("") + "</table></div>";
+    $("qual-table").innerHTML = c.last_qual ? table(c.last_qual) : "<p class='note'>No qualifying yet.</p>";
+    $("race-table").innerHTML = table(c.last_race);
+  }
+  lastRound = c.round; lastPhase = c.phase;
+  renderTabs();
+}
+
+function renderMyTeam(){
+  if(!myTeam){ $("my-team").innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby, or ask the host to restart the career setup.</p>"; return; }
+  const t = myTeam;
+  const drivers = (t.drivers || []).map(d => d ? `${esc(d.name)} (${d.age}, rep ${Number(d.rep).toFixed(2)}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)` : "[empty seat]").join("<br>");
+  const perfLine = room.chart_on && ("perf" in t) ? ` · Perf ${Number(t.perf).toFixed(1)} · Reliability ${(t.rel * 100).toFixed(1)}%` : "";
+  $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
+    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}`;
+  $("my-pools").innerHTML = `<p class="note">Banked research: Performance ${Number(t.perf_res || 0).toFixed(2)} · Reliability ${Number(t.reli_res || 0).toFixed(2)} · Reg research ${Number(t.reg_research || 0).toFixed(2)} $M</p>`;
+  if(t.finances){
+    const f = t.finances;
+    $("finances-box").innerHTML = `<p>Funds: <b>${money(f.money)}</b> · Constructor position: ${f.constructor_pos}</p>
+      <p>Estimated post-season injection: +${money(f.epsci)} · Estimated per-race gains: +${money(f.eprg)}</p>
+      <p>Per-race salary cost: ${money(f.salary_per_race)} (${f.driver_costs.map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")})</p>
+      <p class="note">Per-race gains are paid after each race; salaries are paid after each race; the post-season injection is paid at the end of the season.</p>`;
+  }
+}
+
+function renderTabs(){
+  const c = room.career; if(!c) return;
+  // Market
+  const market = [...c.drivers.filter(d => d.status === "free"), ...c.drivers.filter(d => d.status === "f2")];
+  const signBtns = d => [1,2].map(s => `<button data-sign="${d.id}" data-seat="${s}">Sign to seat ${s}</button>`).join(" ");
+  $("market-box").innerHTML = `<p class="note">Signing costs the driver's market value${myTeam ? ", plus a contract-break fee (1 + salary × years left) if the seat is occupied." : ""} New contract: 2 years. Driver perf is hidden when the chart is off.</p>` +
+    `<div class="table-scroll"><table><tr><th>Driver</th><th>Age</th><th>Rep</th><th>Titles</th><th>Status</th><th>MV</th><th></th></tr>` +
+    market.map(d => `<tr><td>${esc(d.name)}</td><td>${d.age}</td><td>${Number(d.rep).toFixed(2)}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.mv)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
+  document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => send({type:"sign_driver", driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat)}));
+  // Standings
+  const drv = [...c.drivers.filter(d => d.status === "f1")].sort((a,b) => b.points - a.points || (a.best_pos || 99) - (b.best_pos || 99));
+  const teams = [...c.teams].sort((a,b) => b.points - a.points);
+  $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
+    drv.map((d,i) => `<tr><td>${i+1}</td><td>${esc(d.name)}</td><td>${esc((teamById(d.team_id) || {}).name || "")}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`).join("") + "</table></div>" +
+    `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th></tr>` +
+    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="colour-dot" style="background:${t.colour}"></span>${esc(t.name)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
+  // Chart
+  if(room.chart_on){
+    const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
+    $("chart-box").innerHTML = `<p class="note">Team performance (car perf). Toggle it off in the lobby to hide perf from everyone.</p>` +
+      [...c.teams].sort((a,b) => (b.perf || 0) - (a.perf || 0)).map(t =>
+        `<div class="bar-row"><span style="width:130px">${esc(t.name)}</span><div class="bar-track"><div class="bar-fill" style="width:${(t.perf / max * 100).toFixed(1)}%"></div></div><span>${Number(t.perf).toFixed(1)}</span></div>`).join("");
+  } else {
+    $("chart-box").innerHTML = `<p class="note">The performance chart is OFF. No perf numbers are shown anywhere — judge teams on results only. The host can turn it back on in the lobby before the career starts.</p>`;
+  }
+  // History
+  const hist = (c.race_history || []).slice(-12).reverse().map(r =>
+    `<div>${r.year} R${r.round}: ${r.top3.map((x,i) => `${i+1}. ${esc(x.driver)} (${esc(x.team)})`).join(" · ")}</div>`).join("") || "<p class='note'>No races yet.</p>";
+  const champs = (c.champion_history || []).map(h => `<div>${h.year}: ${esc(h.driver)} (${esc(h.team)}) — ${h.points} pts</div>`).join("") || "<p class='note'>No champions yet.</p>";
+  $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`; 
+  const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
+  if(myTeam) renderMyTeam();
+}
+
+// ---- wiring ----
+$("btn-create").onclick = () => { const n = $("home-nick").value.trim() || "Player"; connect(); setTimeout(() => send({type:"create_room", nickname:n, colour:myColour}), 300); };
+$("btn-join").onclick = () => { const n = $("home-nick").value.trim() || "Player"; const code = $("home-code").value.trim().toUpperCase(); if(!code){ showErr("home-err", "Type a room code to join."); return; } connect(); setTimeout(() => send({type:"join_room", code, nickname:n, colour:myColour}), 300); };
+$("btn-settings").onclick = () => { $("home-settings").classList.toggle("hidden"); };
+$("set-chart").onchange = e => { chartDefault = e.target.checked; };
+$("btn-exit").onclick = () => { $("home-exit-note").classList.remove("hidden"); };
+$("btn-copy-link").onclick = () => { const url = location.origin + "/?code=" + room.code;
+  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(() => showOk("lobby-err", "Join link copied."), () => showOk("lobby-err", "Join link: " + url)); }
+  else showOk("lobby-err", "Join link: " + url); };
+$("btn-view-saves").onclick = () => window.open("/api/saves", "_blank");
+$("lobby-chart").onchange = e => send({type:"update_settings", chart_on: e.target.checked});
+$("btn-refresh-saves").onclick = refreshSaves;
+$("btn-new-career").onclick = () => send({type:"new_career", name: $("career-name").value.trim() || "My F1 Career"});
+$("btn-create-custom").onclick = () => send({type:"create_custom_team", name: $("custom-name").value.trim(), colour: myColour, driver1_id: $("custom-d1").value, driver2_id: $("custom-d2").value});
+$("btn-start-career").onclick = () => send({type:"start_career"});
+$("btn-advance").onclick = () => send({type:"advance"});
+$("btn-next-season").onclick = () => send({type:"start_next_season"});
+$("btn-research").onclick = () => send({type:"research", priority: $("res-priority").value, amount: parseFloat($("res-amount").value)});
+$("btn-develop").onclick = () => send({type:"develop"});
+$("btn-tuning").onclick = () => send({type:"tuning", value: parseInt($("tuning-val").value)});
+$("btn-reg-research").onclick = () => send({type:"reg_research", amount: parseFloat($("reg-amount").value)});
+$("btn-save").onclick = () => send({type:"save_career", name: $("save-name").value.trim() || undefined});
+$("btn-leave").onclick = () => { sessionStorage.removeItem("f1code"); sessionStorage.removeItem("f1player"); location.href = "/"; };
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("sel"));
+  b.classList.add("sel");
+  document.querySelectorAll(".tab").forEach(t => t.classList.add("hidden"));
+  $("tab-" + b.dataset.tab).classList.remove("hidden");
+});
+$("import-file").onchange = e => { if(e.target.files[0]) importFile(e.target.files[0], "lobby-err"); };
+$("import-file-game").onchange = e => { if(e.target.files[0]) importFile(e.target.files[0], "game-err"); };
+
+// Auto-join from ?code= or rejoin from a reload
+(function(){
+  const q = new URLSearchParams(location.search);
+  const code = (q.get("code") || "").toUpperCase();
+  const savedCode = sessionStorage.getItem("f1code"), savedPlayer = sessionStorage.getItem("f1player");
+  if(savedCode && savedPlayer){ connect(); setTimeout(() => send({type:"rejoin", code: savedCode, player_id: savedPlayer}), 400); }
+  else if(code){ $("home-code").value = code; }
+})();
+</script>
+</body>
+</html>
