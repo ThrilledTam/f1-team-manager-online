@@ -450,7 +450,7 @@ def advance_team(career, team_id, connected_player_ids, rng=None):
         career["advanced"].append(team["id"])
     if all_humans_advanced(career, connected_player_ids):
         run_race_weekend(career, connected_player_ids, rng=rng)
-        return True, True, "Race weekend complete — qualifying results are in."
+        return True, True, "Qualifying complete — results are in."
     return True, False, "Waiting for the other teams to advance."
 
 
