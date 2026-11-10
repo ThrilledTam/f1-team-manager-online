@@ -17,7 +17,7 @@ import copy
 import random
 
 from . import race as race_mod
-from .data import GRID_2026
+from .data import GRID_2026, circuit_for_round
 from .models import make_driver, make_team, new_career_dict
 from .rules import (
     SEASON_LENGTH, MAX_SEASONS, REG_MINOR_TARGET, REG_MAJOR_TARGET,
@@ -63,7 +63,35 @@ def build_new_career(name, host_nickname, chart_on=True):
         career["drivers"].append(make_driver(ddata, status="pool"))
     career["next_reg_year"] = 2027
     career["next_reg_kind"] = "Minor"
+    set_circuit_for_round(career)
     return career
+
+
+def set_circuit_for_round(career):
+    """Point the career at the current round's Grand Prix (v0.1)."""
+    gp = circuit_for_round(career["round"])
+    career["circuit"] = gp["name"]
+    career["circuit_laps"] = gp["laps"]
+
+
+def result_row(d, team, pos, gap, points=None, gl=None):
+    """One classification row (v0.1): gaps only, NEVER absolute times.
+    Server keeps qual_time/race_time on the driver dicts for ordering, but
+    those times are never put in a results payload."""
+    row = {
+        "pos": pos,
+        "driver": d["name"],
+        "driver_id": d["id"],
+        "team": team["name"],
+        "team_id": team["id"],
+        "cha": d["cha"],
+        "gap": gap,
+    }
+    if points is not None:
+        row["points"] = points
+    if gl is not None:
+        row["gl"] = gl
+    return row
 
 
 def get_team(career, team_id):
@@ -116,7 +144,7 @@ def choose_team(career, team_id, player_id):
         return False, "That team is already taken."
     team["is_ai"] = False
     team["owner_player_id"] = player_id
-    return True, "ok"
+    return True, f"You took over {team['name']} ✓"
 
 
 def create_custom_team(career, player_id, name, colour, d1_id, d2_id):
@@ -151,7 +179,7 @@ def create_custom_team(career, player_id, name, colour, d1_id, d2_id):
         d["team_id"] = team["id"]
         d["contract_left"] = 1
         team[slot] = d["id"]
-    return True, "ok", team
+    return True, f"Custom team {name} created ✓", team
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +209,9 @@ def do_research(career, team_id, priority, amount):
         team["perf_res"] -= amount / 5.0
         team["reli_res"] += amount
     team["money"] -= amount
-    return True, "ok"
+    label = "Performance" if priority == "perf" else "Reliability"
+    pool = team["perf_res"] if priority == "perf" else team["reli_res"]
+    return True, f"Invested ${amount:.2f}M in {label} research ✓ (pool now {pool:.2f})"
 
 
 def do_develop(career, team_id):
@@ -192,13 +222,16 @@ def do_develop(career, team_id):
         return False, "No such team."
     if team["money"] < 1.0:
         return False, "Need at least $1M to develop parts."
-    team["perf"] += add_perf_gain(team["perf"], team["perf_res"])
-    team["rel"] += add_rel_gain(team["reli_res"])
+    perf_gain = add_perf_gain(team["perf"], team["perf_res"])
+    rel_gain = add_rel_gain(team["reli_res"])
+    team["perf"] += perf_gain
+    team["rel"] += rel_gain
     team["rel"] = max(0.5, min(0.99, team["rel"]))
     team["perf_res"] = 0.0
     team["reli_res"] = 0.0
     team["money"] -= 1.0
-    return True, "ok"
+    return True, (f"Parts developed ✓ — Perf {team['perf']:.1f} (+{perf_gain:.1f}), "
+                  f"Reliability {team['rel']:.2f} (+{rel_gain:.2f}), $1M spent")
 
 
 def do_tuning(career, team_id, value):
@@ -212,7 +245,7 @@ def do_tuning(career, team_id, value):
     if not -3 <= value <= 3:
         return False, "Tuning must be between -3 and 3."
     team["tuning"] = value
-    return True, "ok"
+    return True, f"Tuning set to {value:+d} ✓"
 
 
 def do_reg_research(career, team_id, amount):
@@ -231,7 +264,8 @@ def do_reg_research(career, team_id, amount):
         return False, "Not enough money."
     team["reg_research"] += amount
     team["money"] -= amount
-    return True, "ok"
+    return True, (f"Invested ${amount:.2f}M in regulation research ✓ "
+                  f"(total ${team['reg_research']:.2f}M)")
 
 
 def sign_driver(career, team_id, driver_id, seat):
@@ -269,7 +303,7 @@ def sign_driver(career, team_id, driver_id, seat):
     d["contract_left"] = SIGNING_CONTRACT_YEARS
     team[slot] = d["id"]
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
-    return True, "ok"
+    return True, f"{d['name']} signed for {team['name']} ✓ (Seat {seat})"
 
 
 # ---------------------------------------------------------------------------
@@ -416,12 +450,100 @@ def advance_team(career, team_id, connected_player_ids, rng=None):
         career["advanced"].append(team["id"])
     if all_humans_advanced(career, connected_player_ids):
         run_race_weekend(career, connected_player_ids, rng=rng)
-        return True, True, "Race weekend complete."
+        return True, True, "Race weekend complete — qualifying results are in."
     return True, False, "Waiting for the other teams to advance."
 
 
+def results_voters(career, connected_player_ids):
+    """Player ids that must vote NEXT at the current results stage: the
+    owners of human teams who are still connected. Disconnected humans are
+    excluded (their teams are AI-driven); bots never vote."""
+    return [t["owner_player_id"] for t in human_teams(career)
+            if t["owner_player_id"] in connected_player_ids]
+
+
+def all_results_voted(career, connected_player_ids):
+    """True when every required voter has voted — or when nobody is left
+    connected to vote (then the stage must not get stuck)."""
+    voters = results_voters(career, connected_player_ids)
+    voted = set(career.get("results_vote") or [])
+    return all(v in voted for v in voters)
+
+
+def advance_results_stage(career, connected_player_ids, rng=None):
+    """Move one results stage forward. qual -> race results page;
+    race -> back to dashboards (next round, or winter break at season end).
+    Returns True if the stage actually advanced."""
+    if career.get("phase") == "qual_results":
+        career["phase"] = "race_results"
+        career["results_stage"] = "race"
+        career["results_vote"] = []
+        return True
+    if career.get("phase") == "race_results":
+        career["results_vote"] = []
+        career["results_stage"] = None
+        complete_race_weekend(career, rng=rng)
+        return True
+    return False
+
+
+def check_results_vote(career, connected_player_ids, rng=None):
+    """Advance the results stage if the vote is complete. Returns True if
+    it advanced. Called after every vote, host skip, and disconnect."""
+    if career.get("phase") not in ("qual_results", "race_results"):
+        return False
+    if all_results_voted(career, connected_player_ids):
+        return advance_results_stage(career, connected_player_ids, rng=rng)
+    return False
+
+
+def vote_next(career, player_id, connected_player_ids, rng=None):
+    """A human votes NEXT on the current results page. Returns
+    (ok, advanced, message). Votes are stored by player_id, so a
+    reconnecting player keeps their vote."""
+    if career.get("phase") not in ("qual_results", "race_results"):
+        return False, False, "There is no results vote right now."
+    if player_id not in results_voters(career, connected_player_ids):
+        return False, False, "You have no team in this career, so you cannot vote."
+    if player_id in (career.get("results_vote") or []):
+        return True, False, "Your NEXT vote is already recorded."
+    career.setdefault("results_vote", []).append(player_id)
+    advanced = check_results_vote(career, connected_player_ids, rng=rng)
+    total = len(results_voters(career, connected_player_ids))
+    voted = len(career.get("results_vote") or [])
+    if advanced:
+        return True, True, "Everyone voted NEXT — moving on."
+    return True, False, f"NEXT vote recorded ({voted}/{total}) ✓"
+
+
+def host_skip_results(career, player_id, connected_player_ids, is_host, rng=None):
+    """The host's override: advances the results stage immediately. Only
+    the host may call it (the button is only ever sent to the host)."""
+    if not is_host:
+        return False, False, "Only the host can skip the vote."
+    if career.get("phase") not in ("qual_results", "race_results"):
+        return False, False, "There is no results vote to skip right now."
+    advanced = advance_results_stage(career, connected_player_ids, rng=rng)
+    return True, advanced, "Host skipped the vote — moving on."
+
+
+def complete_race_weekend(career, rng=None):
+    """After the race-results vote: next round, or season end."""
+    career["advanced"] = []
+    career["results_vote"] = []
+    career["results_stage"] = None
+    if career["round"] >= SEASON_LENGTH:
+        end_of_season(career, rng=rng)
+    else:
+        career["round"] += 1
+        career["phase"] = "round"
+        set_circuit_for_round(career)
+
+
 def run_race_weekend(career, connected_player_ids, rng=None):
-    """AI acts, then qualifying, then the race, then money and round advance."""
+    """AI acts, then qualifying, then the race, then money. v0.1: the round
+    does NOT advance here — the room goes to the qualifying results page
+    first (phase 'qual_results'), and only the NEXT votes move it on."""
     rng = rng or random
     # AI teams act; disconnected humans are AI-driven this round.
     for team in career["teams"]:
@@ -433,22 +555,22 @@ def run_race_weekend(career, connected_player_ids, rng=None):
     points_dist = update_points_dist(len(career["drivers"]) and
                                      len([d for d in career["drivers"]
                                           if d["status"] == "f1"]))
+    gp = circuit_for_round(career["round"])
     qual = race_mod.simulate_qual(career, rng=rng)
     leader = qual[0][0]["qual_time"] if qual else 0
-    career["last_qual"] = [{
-        "pos": i + 1, "driver": d["name"], "team": t["name"],
-        "time": round(d["qual_time"], 3),
-        "gap": "LEADER" if i == 0 else f"+{d['qual_time'] - leader:.3f}s",
-    } for i, (d, t) in enumerate(qual)]
-    race_entries = race_mod.simulate_race(career, rng=rng)
+    career["last_qual"] = [
+        result_row(d, t, i + 1,
+                   "LEADER" if i == 0 else f"+{d['qual_time'] - leader:.3f}s")
+        for i, (d, t) in enumerate(qual)]
+    race_entries = race_mod.simulate_race(career, laps=gp["laps"], rng=rng)
     race_mod.apply_race_results(career, race_entries, points_dist)
     leader_time = race_entries[0][0]["race_time"] if race_entries else 0
-    career["last_race"] = [{
-        "pos": i + 1, "driver": d["name"], "team": t["name"],
-        "time": round(d["race_time"], 3),
-        "gap": "LEADER" if i == 0 else f"+{d['race_time'] - leader_time:.3f}s",
-        "points": points_dist[i] if i < len(points_dist) else 0,
-    } for i, (d, t) in enumerate(race_entries)]
+    career["last_race"] = [
+        result_row(d, t, i + 1,
+                   "LEADER" if i == 0 else f"+{d['race_time'] - leader_time:.3f}s",
+                   points=points_dist[i] if i < len(points_dist) else 0,
+                   gl=(d.get("qual_pos") or 0) - (i + 1))
+        for i, (d, t) in enumerate(race_entries)]
     # F2 race in parallel.
     f2_order = race_mod.simulate_f2(career, rng=rng)
     for pos, d in enumerate(f2_order, start=1):
@@ -469,18 +591,20 @@ def run_race_weekend(career, connected_player_ids, rng=None):
         if d1 and d2 and d2["points"] > d1["points"]:
             team["driver1_id"], team["driver2_id"] = team["driver2_id"], team["driver1_id"]
     career["teams"] = race_mod.constructor_standings(career)
+    # Full Grand Prix record for history (revisit any previous GP).
     if career["last_race"]:
         top = career["last_race"][:3]
         career["race_history"].append({
             "year": career["year"], "round": career["round"],
+            "circuit": gp["name"], "laps": gp["laps"],
+            "qual": list(career["last_qual"]),
+            "race": list(career["last_race"]),
             "top3": [{"driver": r["driver"], "team": r["team"]} for r in top],
         })
-    career["advanced"] = []
-    if career["round"] >= SEASON_LENGTH:
-        end_of_season(career, rng=rng)
-    else:
-        career["round"] += 1
-        career["phase"] = "round"
+    # To the qualifying results page — the NEXT votes take it from here.
+    career["phase"] = "qual_results"
+    career["results_stage"] = "qual"
+    career["results_vote"] = []
 
 
 # ---------------------------------------------------------------------------
@@ -671,8 +795,11 @@ def start_next_season(career):
     career["round"] = 1
     career["phase"] = "round"
     career["advanced"] = []
+    career["results_vote"] = []
+    career["results_stage"] = None
     career["transfers"] = []
     career["retired_this_season"] = []
+    set_circuit_for_round(career)
     return True, "ok"
 
 
@@ -717,6 +844,11 @@ def public_state(career, chart_on, viewer_team_id=None):
     pools stay visible (you need them to play), but never its perf.
     When the chart is ON, everything is shown."""
     state = copy.deepcopy(career)
+    # v0.1: absolute lap/race times NEVER leave the server — results carry
+    # gaps only, even when the chart is on. Strip them from every driver.
+    for d in state["drivers"]:
+        d.pop("qual_time", None)
+        d.pop("race_time", None)
     if chart_on:
         return state
     for team in state["teams"]:

@@ -1,15 +1,41 @@
 """Race simulation — formulas from the original Race.py, cleaned up.
 
-lapSim, simulateQual and simulateRace keep the original maths. One preserved
-quirk: in the original simulateRace the 80-lap loop overwrote race_time on
-every lap, so the final race time is effectively a single lapSim draw, then
-(race_time + qual_pos) * 3.0. We keep that exact behaviour rather than
-inventing a different race model — the ordering is still driven by driver
-perf, team perf (with supplier blending) and tuning.
+lapSim and simulateQual keep the original maths (qualifying is a single
+lapSim draw per driver, gaps ~0-3s). simulateRace changed in v0.1 with
+Matthew's approval: the original looped 80 times overwriting race_time, so
+a race was effectively one lap draw (~137s total). v0.1 sums a real
+full-distance race — every driver runs the circuit's lap count — with a
+compressed per-lap perf spread so gaps stay plausible (~20-100s) and the
+winner's total is a Grand Prix length (~5,000s). See race_lap_time().
 """
 import random
 
 BASELINE_LAP = 75.000
+
+RACE_LAP_BASE = 95.0
+# v0.1: a full-distance race. Each driver runs the circuit's lap count and
+# every lap is summed. The per-lap time is
+#   95 - (driver_perf/20 + team_perf/80)  +/- tuning effect  + N(0, 0.12)
+# so a lap is ~88s, a 57-lap race is ~5,000s (80+ minutes), and the
+# driver+team perf spread is ~1.8s/lap, giving total gaps of roughly
+# 20-100s — like Matthew's local race screenshot — instead of the hundreds
+# of seconds the raw lapSim spread (driver/5 + team/20, ~5.6s/lap) would
+# produce over a full race. Tuning helps Driver 1 and hurts Driver 2 by
+# 0.1s/lap per tuning point. A one-off grid penalty of 0.5s per qualifying
+# position reflects the start; the rest is pure pace.
+RACE_TUNING_PER_LAP = 0.1
+RACE_GRID_PENALTY_PER_POS = 0.5
+
+
+def race_lap_time(driver_perf, team_perf, tuning, is_driver1, rng=None):
+    """One lap of a full-distance race (v0.1)."""
+    rng = rng or random
+    lap = RACE_LAP_BASE - (driver_perf / 20.0 + team_perf / 80.0)
+    if tuning:
+        lap += (-tuning * RACE_TUNING_PER_LAP) if is_driver1 \
+            else (tuning * RACE_TUNING_PER_LAP)
+    lap += rng.gauss(0, 0.12)
+    return lap
 
 
 def lap_sim(driver_perf, team_perf, max_perf, min_perf, session, error_multiplier, rng=None):
@@ -71,19 +97,17 @@ def simulate_qual(career, rng=None):
     return entries
 
 
-def simulate_race(career, rng=None):
-    """Sets race_time / race_pos. Returns ordered list of (driver, team).
-
-    Preserves Race.py: race_time = (lapSim(...) + qual_pos) * 3.0.
-    (The original looped 80 times overwriting the value; net effect is one
-    draw, so we do one draw.)
+def simulate_race(career, laps=57, rng=None):
+    """Full-distance race (v0.1): every driver runs `laps` laps, summing
+    per-lap race_lap_time draws, plus a one-off grid penalty. Returns
+    ordered list of (driver, team). race_time is the summed total (~5,000s
+    for a 57-lap race) and is kept server-side only — results payloads
+    carry gaps, never times.
     """
     rng = rng or random
     teams = career["teams"]
     drivers = {d["id"]: d for d in career["drivers"]}
     by_id = {t["id"]: t for t in teams}
-    perfs = sorted([t["perf"] for t in teams], reverse=True)
-    max_perf, min_perf = perfs[0], perfs[-1]
     entries = []
     for team in teams:
         t_perf = _team_perf(team, by_id)
@@ -91,10 +115,11 @@ def simulate_race(career, rng=None):
             if not did:
                 continue
             d = drivers[did]
-            w = d["perf"] + (team["tuning"] * 4.0) if did == team["driver1_id"] \
-                else d["perf"] - (team["tuning"] * 4.0)
-            lap = lap_sim(w, t_perf, max_perf, min_perf, 2, 25.0, rng)
-            d["race_time"] = (lap + (1.0 * (d.get("qual_pos") or 0))) * 3.0
+            is_d1 = did == team["driver1_id"]
+            total = sum(race_lap_time(d["perf"], t_perf, team["tuning"],
+                                      is_d1, rng) for _ in range(laps))
+            total += RACE_GRID_PENALTY_PER_POS * (d.get("qual_pos") or 0)
+            d["race_time"] = total
             entries.append((d, team))
     entries.sort(key=lambda e: e[0]["race_time"])
     return entries

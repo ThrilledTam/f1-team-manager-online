@@ -14,7 +14,41 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 1
+SAVE_VERSION = 2  # v0.1: results stages, circuit per round, full GP history.
+
+
+def migrate_save(doc):
+    """Fill in v0.1 fields missing from a v0 save (version 1), so old saves
+    still load. Rounds played under v0 have no circuit and no full qual/race
+    tables in history — those entries keep their top3 and show as
+    'Round N' with no tables to revisit."""
+    if not isinstance(doc, dict):
+        return doc
+    doc.setdefault("results_vote", [])
+    doc.setdefault("results_stage", None)
+    # A career saved mid-results under v0 never existed (v0 had no results
+    # stages), but guard anyway: drop back to the dashboard round.
+    if doc.get("phase") == "race_results":
+        doc["phase"] = "round"
+    if "circuit" not in doc or doc.get("circuit") is None:
+        from .data import circuit_for_round
+        gp = circuit_for_round(doc.get("round") or 1)
+        doc["circuit"] = gp["name"]
+        doc["circuit_laps"] = gp["laps"]
+    for entry in doc.get("race_history") or []:
+        entry.setdefault("circuit", f"Round {entry.get('round')}")
+        entry.setdefault("laps", None)
+        entry.setdefault("qual", None)   # None = no full table recorded (v0)
+        entry.setdefault("race", None)
+    # Strip any absolute times that slipped into stored results rows.
+    for key in ("last_qual", "last_race"):
+        for row in doc.get(key) or []:
+            row.pop("time", None)
+    for entry in doc.get("race_history") or []:
+        for key in ("qual", "race"):
+            for row in entry.get(key) or []:
+                row.pop("time", None)
+    return doc
 
 
 def _now_iso():
@@ -77,7 +111,7 @@ def load_save(saves_dir, save_id):
         doc = json.load(f)
     if not isinstance(doc, dict) or "teams" not in doc or "drivers" not in doc:
         return None
-    return doc
+    return migrate_save(doc)
 
 
 def delete_save(saves_dir, save_id):
@@ -99,6 +133,7 @@ def import_save(doc, saves_dir):
     if os.path.exists(_path(saves_dir, save_id)):
         save_id = uuid.uuid4().hex[:12]
         doc["save_id"] = save_id
+    doc = migrate_save(doc)
     doc["version"] = SAVE_VERSION
     doc["saved_at"] = _now_iso()
     with open(_path(saves_dir, save_id), "w", encoding="utf-8") as f:

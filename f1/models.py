@@ -77,17 +77,28 @@ def new_career_dict(name, host_nickname, chart_on=True):
         "year": 2026,
         "season_index": 0,         # 0-based; 2026 is season 0, max 30 seasons
         "round": 1,                # 1..12 within the season
-        "phase": "round",          # round | race_results | winter_break | finished
+        "phase": "round",          # round | qual_results | race_results |
+                                   # winter_break | finished
         "settings": {"chart_on": bool(chart_on)},
         "teams": [],
         "drivers": [],
         "advanced": [],            # team ids that hit Advance this round
-        "race_history": [],        # [{year, round, top3: [{driver, team}]}]
+        "results_vote": [],        # v0.1: player ids that voted NEXT at the
+                                   # current results stage (qual/race)
+        "results_stage": None,     # v0.1: None | "qual" | "race" while the
+                                   # room is looking at results pages
+        "circuit": None,           # v0.1: current round's Grand Prix name
+        "circuit_laps": None,      # v0.1: laps for the current circuit
+        "race_history": [],        # v0.1: [{year, round, circuit, laps,
+                                   #   qual: [full rows], race: [full rows],
+                                   #   top3: [{driver, team}]}]
         "champion_history": [],    # [{year, driver, team, points}]
         "transfers": [],           # ["Driver from X to Y"] this season
         "retired_this_season": [],
-        "last_qual": None,         # [{pos, driver, team, time, gap}]
-        "last_race": None,         # [{pos, driver, team, time, gap, points}]
+        "last_qual": None,         # v0.1: [{pos, driver, driver_id, team,
+                                   #   team_id, cha, gap}] — gaps only, no times
+        "last_race": None,         # v0.1: [{pos, driver, driver_id, team,
+                                   #   team_id, cha, gap, gl, points}]
         "last_reg_change": None,   # {year, kind, changes: [{team, old, new}]}
         "next_reg_year": 2027,
         "next_reg_kind": "Minor",
