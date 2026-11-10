@@ -1,4 +1,4 @@
-"""Tests for F1 Team Manager Online v0.1.
+"""Tests for F1 Team Manager Online v0.1.1.
 
 Deterministic: every test that touches randomness passes a seeded
 random.Random. Run with:  python -m pytest tests/ -q
@@ -729,3 +729,107 @@ def test_ws_next_vote_and_host_skip_over_real_websocket():
                                check=lambda m: m["room"]["career"]["phase"] == "round")
             assert state["room"]["career"]["round"] == 2
             assert state["room"]["career"]["circuit"] == "Saudi Arabian Grand Prix"
+
+
+# ---------------------------------------------------------------------------
+# v0.1.1: WebSocket connect race
+# ---------------------------------------------------------------------------
+
+def test_advance_toast_says_qualifying_not_race_weekend_complete():
+    """The Advance confirmation must not claim the weekend is over: the
+    player is about to see the qualifying page first, the race page
+    only after the NEXT vote."""
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    rng = seeded()
+    ok, ran, _msg = game.advance_team(
+        career, career["teams"][0]["id"], connected, rng=rng)
+    assert ok and not ran
+    ok, ran, msg = game.advance_team(
+        career, career["teams"][1]["id"], connected, rng=rng)
+    assert ok and ran
+    assert career["phase"] == "qual_results"
+    assert msg == "Qualifying complete — results are in."
+    assert "Race weekend complete" not in msg
+
+
+def test_connection_code_queues_while_connecting():
+    """Static check on the fix itself: messages queue and flush on open,
+    the home screen shows connection status, and the old fixed 300ms
+    send timeouts and the 'Not connected yet' error are gone."""
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert "wsQueue" in html and "onopen" in html and "conn-status" in html
+    assert "Connected ✓" in html and "Connection lost — retrying…" in html
+    assert "setTimeout(() => send(" not in html
+    assert "Not connected yet" not in html
+
+
+def test_create_room_succeeds_with_slow_websocket_handshake():
+    """The v0.1 bug, reproduced and fixed: with the WebSocket handshake
+    delayed 1.5s (5x the old 300ms deadline), clicking Create Room
+    immediately must still open the lobby — the create_room message
+    queues while connecting and flushes on open — and exactly one room
+    is created per player, even when Create is double-clicked."""
+    pytest.importorskip("playwright")
+    import asyncio
+    import threading
+    import time
+    import urllib.request
+
+    import uvicorn
+    from server import app as real_app
+
+    class SlowHandshake:
+        """Delay only the WebSocket upgrade, like a slow Render proxy."""
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "websocket":
+                await asyncio.sleep(1.5)
+            await self.app(scope, receive, send)
+
+    port = 8793
+    config = uvicorn.Config(SlowHandshake(real_app), host="127.0.0.1",
+                            port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+
+        def room_count():
+            return json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=5).read())["rooms"]
+
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            before = room_count()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")  # handshake still in flight (1.5s)
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            assert "Not connected yet" not in page.inner_text("body")
+            # text_content (not inner_text): the home screen is hidden
+            # once the lobby opens, but the status text must still say so.
+            assert "Connected" in (page.text_content("#conn-status") or "")
+            assert room_count() == before + 1
+            # A second player double-clicking Create gets exactly one room.
+            page2 = browser.new_page(viewport={"width": 1280, "height": 800})
+            page2.goto(f"http://127.0.0.1:{port}/")
+            page2.fill("#home-nick", "Max2")
+            page2.click("#btn-create")
+            page2.click("#btn-create")
+            page2.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            assert room_count() == before + 2
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
