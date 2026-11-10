@@ -268,7 +268,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 3  # v0.2 save format
+        assert loaded["version"] == 4  # v0.2.1 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -892,9 +892,12 @@ def test_session_form_pole_diversity():
 
 def test_midseason_replacement_keeps_outgoing_points():
     """Revised v0.2 rule (real F1): the replaced driver KEEPS their
-    points and stays in the driver standings; the replacement begins
-    at 0; the team's constructor total still includes the points the
-    outgoing driver scored for that team — even after the next race."""
+    points and stays in the driver standings; a free agent signed
+    mid-season keeps points from an earlier stint (v0.2.1 — only F2
+    drivers start at 0); the team's constructor total still includes
+    the points the outgoing driver scored for that team — even after
+    the next race — and is never inflated by the incoming driver's
+    old points."""
     from f1 import race as race_mod
     career = two_human_career()
     connected = {"p-matthew", "p-cousin"}
@@ -915,7 +918,8 @@ def test_midseason_replacement_keeps_outgoing_points():
     team_points_before = team["points"]
     seat = 1 if team["driver1_id"] == outgoing["id"] else 2
     # Give the incoming free agent points from an earlier stint, to
-    # prove they still start at 0 when signed.
+    # prove they KEEP them when signed (v0.2.1: only F2 drivers
+    # start at 0).
     incoming = game.free_agents(career)[0]
     incoming["points"] = 13
     incoming["season_wins"] = 1
@@ -923,24 +927,30 @@ def test_midseason_replacement_keeps_outgoing_points():
     team["money"] = 100.0
     ok, msg = game.sign_driver(career, team["id"], incoming["id"], seat)
     assert ok, msg
-    # Outgoing keeps everything and stays in the standings.
+    # Outgoing keeps everything, stays in the standings, and their old
+    # team is recorded for the standings display.
     assert outgoing["status"] == "free" and outgoing["team_id"] is None
     assert outgoing["points"] == out_points
     assert outgoing["season_wins"] == out_wins
     assert outgoing["best_pos"] == out_best
+    assert outgoing["last_team_id"] == team["id"]
     assert any(d["id"] == outgoing["id"]
                for d in race_mod.driver_standings(career))
-    # Incoming is in the seat at 0.
+    # Incoming keeps their earlier points, but starts a fresh per-team
+    # tally — the team's total must not include the 13.
     assert incoming["status"] == "f1" and incoming["team_id"] == team["id"]
-    assert incoming["points"] == 0
-    assert incoming["season_wins"] == 0
-    assert incoming["best_pos"] is None
+    assert incoming["points"] == 13
+    assert incoming["season_wins"] == 1
+    assert incoming["best_pos"] == 4
+    assert incoming["team_points"] == 0
     # Constructor total is unchanged by the swap (banked points).
     assert team["points"] == team_points_before
     assert team["points"] >= out_points
-    # ... and the banked points survive the next race too.
+    # ... and the banked points survive the next race too, while the
+    # incoming driver's new points count only from now on.
     play_full_round(career, connected, seeded(6))
     assert team["points"] >= out_points
+    assert incoming["points"] == 13 + incoming["team_points"]
 
 
 def test_standings_order_carries_into_next_season():
@@ -994,3 +1004,206 @@ def test_nickname_placeholder_is_generic():
     assert "e.g. Matthew" not in html
     placeholders = re.findall(r'placeholder="([^"]*)"', html)
     assert all("Matthew" not in p for p in placeholders)
+
+# ---------------------------------------------------------------------------
+# v0.2.1 — points follow the driver, last team shown, cost upfront
+# ---------------------------------------------------------------------------
+
+def test_midseason_move_keeps_points_across_teams():
+    """Flag 1, refined (real F1): a driver with 44 points at Alpine who
+    moves to Audi mid-season KEEPS the 44 in the driver standings; the
+    44 stay at Alpine's constructor total; only points scored from now
+    on for Audi count toward Audi."""
+    from f1 import race as race_mod
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    play_full_round(career, connected, seeded(5))
+    alpine = next(t for t in career["teams"] if t["name"] == "Alpine")
+    audi = next(t for t in career["teams"] if t["name"] == "Audi")
+    # The Alpine driver scored 44 points for Alpine this season.
+    driver = game.team_drivers(career, alpine)[0]
+    driver["points"] = 44
+    driver["team_points"] = 44
+    driver["season_wins"] = 2
+    driver["best_pos"] = 1
+    game._recompute_team_points(career, alpine)
+    alpine_before = alpine["points"]
+    audi_before = audi["points"]
+    assert alpine_before >= 44
+    # Drop him from Alpine (replace with a free agent).
+    alpine["money"] = 100.0
+    seat = 1 if alpine["driver1_id"] == driver["id"] else 2
+    filler = game.free_agents(career)[0]
+    ok, msg = game.sign_driver(career, alpine["id"], filler["id"], seat)
+    assert ok, msg
+    assert driver["status"] == "free" and driver["points"] == 44
+    assert driver["last_team_id"] == alpine["id"]
+    assert any(d["id"] == driver["id"]
+               for d in race_mod.driver_standings(career))
+    assert alpine["points"] == alpine_before  # the 44 stay at Alpine
+    # Sign him for Audi.
+    audi["money"] = 100.0
+    ok, msg = game.sign_driver(career, audi["id"], driver["id"], 1)
+    assert ok, msg
+    assert driver["status"] == "f1" and driver["team_id"] == audi["id"]
+    assert driver["points"] == 44 and driver["team_points"] == 0
+    assert audi["points"] == audi_before  # the 44 did NOT inflate Audi
+    # He scores for Audi in the next round: only the new points add
+    # to Audi's total.
+    before = {d["id"]: d["points"] for d in game.team_drivers(career, audi)}
+    play_full_round(career, connected, seeded(6))
+    gains = sum(game.get_driver(career, did)["points"] - pts
+                for did, pts in before.items())
+    assert audi["points"] == audi_before + gains
+    assert driver["points"] == 44 + driver["team_points"]
+
+
+def test_f2_signing_starts_at_zero():
+    """An F2 driver signed mid-season starts at 0: F2 championship
+    points must not carry into F1."""
+    career = two_human_career()
+    f2 = game.f2_drivers(career)[0]
+    f2["points"] = 30  # F2 championship points
+    team = career["teams"][0]
+    team["money"] = 100.0
+    ok, msg = game.sign_driver(career, team["id"], f2["id"], 1)
+    assert ok, msg
+    assert f2["status"] == "f1" and f2["team_id"] == team["id"]
+    assert f2["points"] == 0 and f2["team_points"] == 0
+    assert f2["season_wins"] == 0 and f2["best_pos"] is None
+
+
+def test_replacement_cost_matches_charge_and_is_shown():
+    """The Driver Market must show the exact total sign_driver()
+    charges: signing fee + contract-break fee for an occupied seat,
+    signing fee only for an empty seat — and the sign confirmation
+    must state the amount charged."""
+    career = two_human_career()
+    team = career["teams"][0]
+    incoming = game.free_agents(career)[0]
+    occupant = game.get_driver(career, team["driver1_id"])
+    expected = (incoming["mv"] + 1
+                + occupant["salary"] * occupant["contract_left"])
+    quote = game.signing_cost(career, team["id"], incoming["id"], 1)
+    assert quote is not None
+    assert quote["total"] == pytest.approx(expected)
+    assert quote["signing"] == incoming["mv"]
+    assert quote["break_fee"] == pytest.approx(
+        1 + occupant["salary"] * occupant["contract_left"])
+    assert quote["affordable"] == (expected <= team["money"])
+    # The same quote is in the market data sent to the client.
+    state = game.public_state(career, True, team["id"])
+    assert state["market_costs"][incoming["id"]]["1"]["total"] == quote["total"]
+    assert state["market_costs"][incoming["id"]]["1"]["affordable"] == quote["affordable"]
+    # An empty seat costs the signing fee only.
+    team["driver2_id"] = None
+    quote2 = game.signing_cost(career, team["id"], incoming["id"], 2)
+    assert quote2["break_fee"] == 0
+    assert quote2["total"] == pytest.approx(incoming["mv"])
+    # The charge equals the displayed total, and the confirmation
+    # states the amount.
+    team["money"] = 100.0
+    money_before = team["money"]
+    ok, msg = game.sign_driver(career, team["id"], incoming["id"], 1)
+    assert ok, msg
+    assert team["money"] == pytest.approx(money_before - quote["total"])
+    assert f"${quote['total']:.2f}M" in msg
+    # Unaffordable: the quote says so and signing is refused with the
+    # amount needed.
+    team2 = career["teams"][1]
+    team2["money"] = 0.5
+    poor = game.free_agents(career)[0]
+    quote3 = game.signing_cost(career, team2["id"], poor["id"], 1)
+    assert quote3["affordable"] is False
+    ok, msg = game.sign_driver(career, team2["id"], poor["id"], 1)
+    assert not ok and "Need $" in msg
+
+
+def test_replaced_driver_old_team_in_standings_ui():
+    """Flag 2, end to end in a real browser: replace a McLaren driver
+    through the Driver Market UI, then the standings tab must show the
+    outgoing driver with McLaren in the team column — and the market
+    must have shown the per-seat replacement cost before the click."""
+    pytest.importorskip("playwright")
+    import re
+    import subprocess
+    import time
+    import urllib.request
+    port = 8797
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            p1 = browser.new_page(viewport={"width": 1280, "height": 800})
+            p1.goto(f"http://127.0.0.1:{port}/")
+            p1.fill("#home-nick", "Max")
+            p1.click("#btn-create")
+            p1.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            p1.click("#btn-new-career")
+            p1.wait_for_selector("[data-team]", timeout=15000)
+            p1.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            code = re.search(r"\b[A-Z0-9]{6}\b",
+                             p1.inner_text("#screen-lobby")).group(0)
+            p2 = browser.new_page(viewport={"width": 1280, "height": 800})
+            p2.goto(f"http://127.0.0.1:{port}/?code={code}")
+            p2.fill("#home-nick", "Cousin")
+            p2.click("#btn-join")
+            p2.wait_for_selector("[data-team]", timeout=15000)
+            p2.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('Ferrari'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.click("#btn-start-career")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Play one round so the McLaren drivers have points.
+            p1.click("#btn-advance")
+            p2.click("#btn-advance")
+            p1.wait_for_selector("#screen-results:not(.hidden)", timeout=15000)
+            p1.click("#btn-vote-next")
+            p2.click("#btn-vote-next")
+            p1.wait_for_selector("text=Race Results", timeout=15000)
+            p1.click("#btn-vote-next")
+            p2.click("#btn-vote-next")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Who is in McLaren seat 1? (Their surname must stay visible
+            # with McLaren in the standings after replacement.)
+            my_team = p1.inner_text("#my-team")
+            seat1_surname = re.search(r"\b([A-Z][a-z]+)\s+([A-Z]+)\b", my_team)
+            assert seat1_surname, my_team
+            surname = seat1_surname.group(2)
+            # Market tab: per-seat costs are shown before committing.
+            p1.click("button[data-tab='market']")
+            market = p1.inner_text("#market-box")
+            assert "Cost to sign" in market
+            assert re.search(r"Seat 1 — \$\d+\.\d\dM", market), market
+            assert "Signing $" in market
+            # Replace seat 1 with the first listed free agent.
+            p1.click("#market-box button[data-sign][data-seat='1']")
+            p1.wait_for_selector("text=signed for McLaren", timeout=15000)
+            toast = p1.inner_text("body")
+            assert re.search(r"signed for McLaren.*\$\d+\.\d\dM", toast), toast
+            # Standings tab: outgoing driver still listed, McLaren shown.
+            p1.click("button[data-tab='standings']")
+            standings = p1.inner_text("#standings-box")
+            assert surname in standings, standings
+            row = next(r for r in standings.splitlines() if surname in r)
+            assert "McLaren" in row, row
+            browser.close()
+    finally:
+        proc.terminate()
