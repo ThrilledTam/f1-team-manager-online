@@ -23,18 +23,43 @@ RACE_LAP_BASE = 95.0
 # produce over a full race. Tuning helps Driver 1 and hurts Driver 2 by
 # 0.1s/lap per tuning point. A one-off grid penalty of 0.5s per qualifying
 # position reflects the start; the rest is pure pace.
+# v0.2 adds per-driver, per-session form (see SESSION_FORM_* below): one
+# random pace offset per driver per session, so the best combo wins ~45%
+# of races instead of ~100%.
 RACE_TUNING_PER_LAP = 0.1
 RACE_GRID_PENALTY_PER_POS = 0.5
 
+# v0.2: per-driver, per-session form ("race-day variance"). The v0.1 race
+# was too predictable: the per-lap noise (sigma 0.12) averages out over
+# 57 laps (total sigma ~0.9s) while the driver+car perf spread is ~1.8s/lap,
+# i.e. tens of seconds over a race — so the best driver+car combo won
+# every time. Qualifying was the same: one lap_sim draw with sigma 0.12*2.5
+# = 0.3s against a ~2.9s perf spread. The fix is one random pace offset
+# drawn ONCE per driver per session (not per lap, or it averages out
+# again) and different between qualifying and the race:
+#   qual:  + N(0, 0.35s) on the single lap time
+#   race:  + N(0, 0.22s) per lap, the same offset every lap (total sigma
+#          ~12.5s over 57 laps) on top of the per-lap noise.
+# Measured with the 2026 grid over 120 seeded races (see README): the
+# single best combo (Antonelli/Mercedes) wins 45% of races instead of
+# ~100%, with 5 different winners and 9 different poles (Antonelli on
+# pole 38%), while gaps stay plausible (qual P22 gap median 3.0s, race
+# P22 gap median ~96s, winner ~5,010s). No crashes/DNFs or weather —
+# only lap-time randomness, as asked.
 
-def race_lap_time(driver_perf, team_perf, tuning, is_driver1, rng=None):
-    """One lap of a full-distance race (v0.1)."""
+
+def race_lap_time(driver_perf, team_perf, tuning, is_driver1, rng=None,
+                  session_offset=0.0):
+    """One lap of a full-distance race (v0.1). session_offset (v0.2) is
+    the driver's per-session form: the same offset every lap, drawn once
+    per driver per race by simulate_race()."""
     rng = rng or random
     lap = RACE_LAP_BASE - (driver_perf / 20.0 + team_perf / 80.0)
     if tuning:
         lap += (-tuning * RACE_TUNING_PER_LAP) if is_driver1 \
             else (tuning * RACE_TUNING_PER_LAP)
     lap += rng.gauss(0, 0.12)
+    lap += session_offset
     return lap
 
 
@@ -70,6 +95,10 @@ def _team_perf(team, teams_by_id):
     return team["perf"]
 
 
+SESSION_FORM_QUAL_SIGMA = 0.35   # seconds, one draw per driver per qual
+SESSION_FORM_RACE_SIGMA = 0.22   # seconds per lap, one draw per driver per race
+
+
 def simulate_qual(career, rng=None):
     """Sets qual_time / qual_pos on every F1 driver. Returns ordered list of
     (driver, team) from pole to last."""
@@ -89,7 +118,9 @@ def simulate_qual(career, rng=None):
             # Tuning: +tuning for driver 1, -tuning for driver 2 (Race.py).
             w = d["perf"] + (team["tuning"] * 1.0) if did == team["driver1_id"] \
                 else d["perf"] - (team["tuning"] * 1.0)
-            d["qual_time"] = lap_sim(w, t_perf, max_perf, min_perf, 1, 2.5, rng)
+            # v0.2: per-session form — one draw per driver per session.
+            d["qual_time"] = lap_sim(w, t_perf, max_perf, min_perf, 1, 2.5, rng) \
+                + rng.gauss(0, SESSION_FORM_QUAL_SIGMA)
             entries.append((d, team))
     entries.sort(key=lambda e: e[0]["qual_time"])
     for pos, (d, _t) in enumerate(entries, start=1):
@@ -116,8 +147,12 @@ def simulate_race(career, laps=57, rng=None):
                 continue
             d = drivers[did]
             is_d1 = did == team["driver1_id"]
+            # v0.2: per-session form — one draw per driver per race, the
+            # same offset every lap (a fresh draw, different from qual).
+            form = rng.gauss(0, SESSION_FORM_RACE_SIGMA)
             total = sum(race_lap_time(d["perf"], t_perf, team["tuning"],
-                                      is_d1, rng) for _ in range(laps))
+                                      is_d1, rng, session_offset=form)
+                        for _ in range(laps))
             total += RACE_GRID_PENALTY_PER_POS * (d.get("qual_pos") or 0)
             d["race_time"] = total
             entries.append((d, team))
@@ -161,7 +196,8 @@ def apply_race_results(career, race_entries, points_dist):
         race_rep = 5 - (pos / (n_teams * 2)) * 3.2
         d["rep"] = (race_rep + d["rep"] * 11) / 12
     for team in career["teams"]:
-        pts = 0
+        pts = team.get("points_kept", 0)  # v0.2: points scored for this
+        # team by drivers who have since left stay with the team.
         for did in (team["driver1_id"], team["driver2_id"]):
             if did:
                 dd = next((x for x in career["drivers"] if x["id"] == did), None)
@@ -176,9 +212,32 @@ def apply_race_results(career, race_entries, points_dist):
 
 
 def driver_standings(career):
-    """From Race.py updateDriverChampionship(): by points desc, best pos."""
-    f1 = [d for d in career["drivers"] if d["status"] == "f1"]
-    return sorted(f1, key=lambda d: (-d["points"], d["best_pos"] if d["best_pos"] is not None else 99))
+    """From Race.py updateDriverChampionship(): by points desc, best pos.
+    v0.2: ties are broken by last season's finishing order
+    (career["prev_driver_order"]) — so at the start of a new season,
+    with everyone on 0 points, the standings show last season's order,
+    like real F1. Drivers with no previous order (promoted F2 drivers,
+    new signings) go after the carried-over drivers, ordered by best
+    finish, then driver perf, then name. Points always sort first.
+    v0.2 (revised): a replaced driver keeps their points and stays in
+    the standings, so free agents with points this season are listed
+    too (they scored those points as an F1 driver). F2 points do not
+    count — only 'free' drivers with points > 0 are included — and
+    free-agent points are reset at season end (game.end_of_season), so
+    a listed free agent always scored this season. Callers that need
+    F1 drivers only (season rollover, retirement rumours) filter on
+    status == 'f1' themselves."""
+    f1 = [d for d in career["drivers"]
+          if d["status"] == "f1" or (d["status"] == "free" and d["points"] > 0)]
+    prev = {did: i for i, did in enumerate(career.get("prev_driver_order") or [])}
+    n_prev = len(prev)
+    return sorted(f1, key=lambda d: (
+        -d["points"],
+        prev.get(d["id"], n_prev),
+        d["best_pos"] if d["best_pos"] is not None else 99,
+        -d["perf"],
+        d["name"],
+    ))
 
 
 def constructor_standings(career):

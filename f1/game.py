@@ -293,17 +293,49 @@ def sign_driver(career, team_id, driver_id, seat):
         return False, f"Need ${cost:.2f}M (signing fee + contract break)."
     team["money"] -= cost
     if current:
+        # v0.2 (revised): the outgoing driver KEEPS their points tally
+        # and stays in the driver standings, like real F1 — but the
+        # points they scored FOR this team stay with the team, so bank
+        # them on the team before they leave. (At season end
+        # end_of_season() resets everyone anyway, so this only ever
+        # bites mid-season.)
+        team["points_kept"] = team.get("points_kept", 0) + current["points"]
         current["status"] = "free"
         current["team_id"] = None
         current["contract_left"] = 0
         career["transfers"].append(
             f"{current['name']} left {team['name']} (contract broken)")
+    # v0.2 (revised): the incoming driver begins at 0 points — this
+    # matters for a free agent who already has season points from an
+    # earlier stint this season (a fresh free/F2 driver is already 0).
+    d["points"] = 0
+    d["season_wins"] = 0
+    d["best_pos"] = None
     d["status"] = "f1"
     d["team_id"] = team["id"]
     d["contract_left"] = SIGNING_CONTRACT_YEARS
     team[slot] = d["id"]
+    # Team points are the current drivers' points plus any points banked
+    # from drivers who scored for this team and have since left
+    # (apply_race_results does the same after a race).
+    _recompute_team_points(career, team)
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
     return True, f"{d['name']} signed for {team['name']} ✓ (Seat {seat})"
+
+
+def _recompute_team_points(career, team):
+    """Team points / best finish: the drivers currently in its seats,
+    plus points banked from departed drivers who scored for this team."""
+    pts = team.get("points_kept", 0)
+    bps = []
+    for did in (team["driver1_id"], team["driver2_id"]):
+        dd = get_driver(career, did) if did else None
+        if dd:
+            pts += dd["points"]
+            if dd["best_pos"] is not None:
+                bps.append(dd["best_pos"])
+    team["points"] = pts
+    team["best_pos"] = min(bps) if bps else None
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +649,14 @@ def end_of_season(career, rng=None):
     fill empty seats; AI teams fill theirs immediately."""
     rng = rng or random
     standings = race_mod.constructor_standings(career)
-    drivers = race_mod.driver_standings(career)
+    # v0.2: driver_standings() also lists replaced drivers (free agents
+    # with points), but the champion / retirements / ageing below are
+    # for F1 drivers only.
+    drivers = [d for d in race_mod.driver_standings(career)
+               if d["status"] == "f1"]
+    # v0.2: record this season's final driver order BEFORE the points
+    # reset below, so the next season opens in this order (all on 0).
+    career["prev_driver_order"] = [d["id"] for d in drivers]
     if drivers:
         champ = drivers[0]
         champ["cha"] += 1
@@ -685,6 +724,12 @@ def end_of_season(career, rng=None):
         if d not in retired:
             d["age"] += 1
             d["perf"] += dsus(d["age"], d["perf"], rng=rng)
+            # v0.2: free agents' points reset with the season, like F1/F2
+            # drivers — otherwise a replaced driver's stale points would
+            # show in next season's standings.
+            d["points"] = 0
+            d["season_wins"] = 0
+            d["best_pos"] = None
     for d in f2_drivers(career):
         d["age"] += 1
         d["perf"] += dsus(d["age"], d["perf"], rng=rng)
@@ -706,6 +751,7 @@ def end_of_season(career, rng=None):
         if team["driver1_id"] is None and team["driver2_id"] is not None:
             team["driver1_id"], team["driver2_id"] = team["driver2_id"], None
         team["points"] = 0
+        team["points_kept"] = 0  # v0.2: banked points reset with the season
         team["best_pos"] = None
         team["tuning"] = 0
     # Refill the F2 grid from queued / pool rookies.
@@ -810,7 +856,10 @@ def start_next_season(career):
 def retirement_rumours(career):
     """isRetiring(isRumour=True) for every F1 driver, as in Main.py's rumours."""
     out = []
-    drivers = race_mod.driver_standings(career)
+    # v0.2: driver_standings() also lists replaced drivers (free agents
+    # with points) — rumours are for current F1 drivers only.
+    drivers = [d for d in race_mod.driver_standings(career)
+               if d["status"] == "f1"]
     for d in drivers:
         team = get_team(career, d["team_id"]) if d.get("team_id") else None
         pos = constructor_pos(career, d["team_id"]) if team else len(career["teams"])

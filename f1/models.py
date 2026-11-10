@@ -64,6 +64,8 @@ def make_team(data, team_id=None):
         "is_ai": True,
         "owner_player_id": None,
         "points": 0,
+        "points_kept": 0,  # v0.2: points scored for this team by drivers
+                           # who have since left (stay with the team)
         "best_pos": None,
     }
 
@@ -93,6 +95,11 @@ def new_career_dict(name, host_nickname, chart_on=True):
                                    #   qual: [full rows], race: [full rows],
                                    #   top3: [{driver, team}]}]
         "champion_history": [],    # [{year, driver, team, points}]
+        "prev_driver_order": [],   # v0.2: driver ids in last season's
+                                   # finishing order, best first — the
+                                   # tie-breaker for driver_standings(),
+                                   # so the new season opens in last
+                                   # season's order (all on 0 points)
         "transfers": [],           # ["Driver from X to Y"] this season
         "retired_this_season": [],
         "last_qual": None,         # v0.1: [{pos, driver, driver_id, team,
