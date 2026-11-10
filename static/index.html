@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.2</title>
+<title>F1 Team Manager Online — v0.2.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -81,7 +81,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.2 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.2.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -288,6 +288,13 @@ function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<
 function money(v){ return "$" + (v ?? 0).toFixed(2) + "M"; }
 function driverById(id){ if(!room || !room.career) return null; return room.career.drivers.find(d => d.id === id) || null; }
 function teamById(id){ if(!room || !room.career) return null; return room.career.teams.find(t => t.id === id) || null; }
+/* v0.2.1: the team shown for a driver in the standings — their current
+   team, or, for a free agent with points, the last team they raced for
+   (like real F1). Exposed for the automated tests (see tests/test_f1.py). */
+function standingTeamFor(d){
+  if(!d) return null;
+  return teamById(d.team_id) || teamById(d.last_team_id) || null;
+}
 
 /* v0.1 driver-name styling, from Matthew's PyCharm screenshots: first name
    in normal case, SURNAME bold + UPPERCASE in the team colour, with a
@@ -342,7 +349,7 @@ function classificationTable(rows, opts){
   return `<div class="table-scroll"><table>${head}${body}</table></div>`;
 }
 /* Exposed for the automated markup tests (see tests/test_f1.py). */
-window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName };
+window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor };
 
 function colourPicker(elId, current, onPick){
   const el = $(elId); el.innerHTML = "";
@@ -623,18 +630,36 @@ function renderMyTeam(){
 
 function renderTabs(){
   const c = room.career; if(!c) return;
-  // Market
+  // Market — v0.2.1: every driver shows the TOTAL cost of signing them
+  // into each seat, computed server-side from the exact formula
+  // sign_driver() charges (signing fee + contract-break fee when the
+  // seat is occupied), so nobody has to work out the formula.
+  // Unaffordable seats are disabled and show the amount needed.
   const market = [...c.drivers.filter(d => d.status === "free"), ...c.drivers.filter(d => d.status === "f2")];
-  const signBtns = d => [1,2].map(s => `<button data-sign="${d.id}" data-seat="${s}">Sign to seat ${s}</button>`).join(" ");
-  $("market-box").innerHTML = `<p class="note">Signing costs the driver's market value${myTeam ? ", plus a contract-break fee (1 + salary × years left) if the seat is occupied." : ""} New contract: 2 years. Driver perf is hidden when the chart is off.</p>` +
-    `<div class="table-scroll"><table><tr><th>Driver</th><th>Age</th><th>Rep</th><th>Titles</th><th>Status</th><th>MV</th><th></th></tr>` +
+  const marketCosts = c.market_costs || {};
+  const costCell = (d, s) => {
+    const q = (marketCosts[d.id] || {})[String(s)];
+    if(!q) return `<button data-sign="${d.id}" data-seat="${s}">Seat ${s}</button>`;
+    const breakdown = q.break_fee > 0
+      ? `Signing ${money(q.signing)} + break ${money(q.break_fee)}`
+      : `Signing ${money(q.signing)}`;
+    const btn = q.affordable
+      ? `<button data-sign="${d.id}" data-seat="${s}">Seat ${s} — ${money(q.total)}</button>`
+      : `<button disabled title="Need ${money(q.total)}">Need ${money(q.total)}</button>`;
+    return `${btn}<br><span class="note">${breakdown}</span>`;
+  };
+  const signBtns = d => [1, 2].map(s => costCell(d, s)).join("<br>");
+  $("market-box").innerHTML = `<p class="note">Signing costs the driver's market value${myTeam ? ", plus a contract-break fee (1 + salary × years left) if the seat is occupied." : ""} The total for each seat is shown on its button. New contract: 2 years. Driver perf is hidden when the chart is off.</p>` +
+    `<div class="table-scroll"><table><tr><th>Driver</th><th>Age</th><th>Rep</th><th>Titles</th><th>Status</th><th>MV</th><th>Cost to sign</th></tr>` +
     market.map(d => `<tr><td>${driverNameHtml(d.name, null, d.cha, false)}</td><td>${d.age}</td><td>${Number(d.rep).toFixed(2)}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.mv)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => send({type:"sign_driver", driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat)}));
   // Standings — v0.2: a replaced driver keeps their points and stays in
-  // the standings (free agents with points this season are listed, with
-  // no team), and ties break by last season's finishing order
-  // (prev_driver_order), then best finish, perf, name — same rule as
-  // the server's driver_standings().
+  // the standings (free agents with points this season are listed), and
+  // ties break by last season's finishing order (prev_driver_order),
+  // then best finish, perf, name — same rule as the server's
+  // driver_standings(). v0.2.1: a free agent's team column shows the
+  // last team they raced for; their name stays uncoloured (v0.1 rule:
+  // free agents get bold + uppercase, no team colour).
   const prevOrder = c.prev_driver_order || [];
   const prevRank = d => { const i = prevOrder.indexOf(d.id); return i === -1 ? prevOrder.length : i; };
   const drv = [...c.drivers.filter(d => d.status === "f1" || (d.status === "free" && d.points > 0))]
@@ -643,7 +668,7 @@ function renderTabs(){
       || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name));
   const teams = [...c.teams].sort((a,b) => b.points - a.points);
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    drv.map((d,i) => { const tm = teamById(d.team_id); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, tm ? tm.colour : null, d.cha, false)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
+    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, false)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th></tr>` +
     teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
   // Chart
