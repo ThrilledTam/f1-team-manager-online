@@ -268,6 +268,50 @@ def do_reg_research(career, team_id, amount):
                   f"(total ${team['reg_research']:.2f}M)")
 
 
+def signing_cost(career, team_id, driver_id, seat):
+    """Total cost of signing a driver into a seat, computed the exact
+    way sign_driver() charges it — the single source of truth, so the
+    number shown in the Driver Market is always the number charged.
+
+    Returns {total, signing, break_fee, affordable} or None when the
+    team/driver/seat is invalid. signing = the driver's market value;
+    break_fee = 1 + outgoing salary x years left, when the seat is
+    occupied (0 for an empty seat)."""
+    team = get_team(career, team_id)
+    if not team:
+        return None
+    if seat not in (1, 2):
+        return None
+    d = get_driver(career, driver_id)
+    if not d or d["status"] not in ("free", "f2"):
+        return None
+    slot = "driver1_id" if seat == 1 else "driver2_id"
+    current = get_driver(career, team[slot]) if team[slot] else None
+    signing = d["mv"]
+    break_fee = 0.0
+    if current:
+        break_fee = 1 + current["salary"] * current["contract_left"]
+    total = signing + break_fee
+    return {"total": round(total, 2), "signing": round(signing, 2),
+            "break_fee": round(break_fee, 2),
+            "affordable": total <= team["money"]}
+
+
+def _release_driver(career, driver, team):
+    """A driver leaves a team (replaced mid-season or contract ended):
+    the points they scored FOR this team stay with the team (banked
+    into points_kept — real F1), their last team is recorded so the
+    standings can still show it, and their per-team tally is cleared
+    for wherever they go next. Championship points/wins/best finish
+    are NOT touched — they follow the driver (v0.2, revised)."""
+    if team is not None:
+        driver["last_team_id"] = team["id"]
+        team["points_kept"] = team.get("points_kept", 0) + driver.get("team_points", 0)
+    driver["team_points"] = 0
+    driver["team_id"] = None
+    driver["contract_left"] = 0
+
+
 def sign_driver(career, team_id, driver_id, seat):
     """Sign a free-agent / F2 driver into a seat (1 or 2).
 
@@ -275,6 +319,15 @@ def sign_driver(career, team_id, driver_id, seat):
     occupied, the current driver's contract must be broken first, costing
     1 + salary * contract_left (Main.py winter-break break cost).
     The new driver gets a 2-year contract.
+
+    v0.2.1 (real F1, per Matthew's correction): the outgoing driver
+    KEEPS their championship points and stays in the driver standings,
+    and the points they scored FOR this team stay with the team
+    (banked). A free agent who already has F1 points from an earlier
+    stint this season KEEPS them when signed by a new team — only
+    their per-team tally restarts at 0, so the new team's total is
+    never inflated by points scored elsewhere. An F2 driver starts
+    at 0: their F2 championship points must not carry into F1.
     """
     team = get_team(career, team_id)
     if not team:
@@ -286,52 +339,54 @@ def sign_driver(career, team_id, driver_id, seat):
         return False, "That driver is not available to sign."
     slot = "driver1_id" if seat == 1 else "driver2_id"
     current = get_driver(career, team[slot]) if team[slot] else None
-    cost = d["mv"]
-    if current:
-        cost += 1 + current["salary"] * current["contract_left"]
+    quote = signing_cost(career, team_id, driver_id, seat)
+    cost = quote["total"]
     if cost > team["money"]:
-        return False, f"Need ${cost:.2f}M (signing fee + contract break)."
+        return False, (f"Need ${cost:.2f}M "
+                       f"(signing ${quote['signing']:.2f}M"
+                       + (f" + break ${quote['break_fee']:.2f}M"
+                          if quote["break_fee"] else "") + ").")
     team["money"] -= cost
     if current:
-        # v0.2 (revised): the outgoing driver KEEPS their points tally
-        # and stays in the driver standings, like real F1 — but the
-        # points they scored FOR this team stay with the team, so bank
-        # them on the team before they leave. (At season end
-        # end_of_season() resets everyone anyway, so this only ever
-        # bites mid-season.)
-        team["points_kept"] = team.get("points_kept", 0) + current["points"]
+        _release_driver(career, current, team)
         current["status"] = "free"
-        current["team_id"] = None
-        current["contract_left"] = 0
         career["transfers"].append(
             f"{current['name']} left {team['name']} (contract broken)")
-    # v0.2 (revised): the incoming driver begins at 0 points — this
-    # matters for a free agent who already has season points from an
-    # earlier stint this season (a fresh free/F2 driver is already 0).
-    d["points"] = 0
-    d["season_wins"] = 0
-    d["best_pos"] = None
+    if d["status"] == "f2":
+        # F2 points are a different championship — a promoted driver
+        # starts their F1 tally at 0.
+        d["points"] = 0
+        d["season_wins"] = 0
+        d["best_pos"] = None
+    # A free agent keeps championship points/wins/best finish from an
+    # earlier stint; either way the per-team tally restarts at 0.
+    d["team_points"] = 0
+    d["last_team_id"] = None
     d["status"] = "f1"
     d["team_id"] = team["id"]
     d["contract_left"] = SIGNING_CONTRACT_YEARS
     team[slot] = d["id"]
-    # Team points are the current drivers' points plus any points banked
-    # from drivers who scored for this team and have since left
-    # (apply_race_results does the same after a race).
+    # Team points are the current drivers' per-team points plus any
+    # points banked from drivers who scored for this team and have
+    # since left (apply_race_results does the same after a race).
     _recompute_team_points(career, team)
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
-    return True, f"{d['name']} signed for {team['name']} ✓ (Seat {seat})"
+    return True, (f"{d['name']} signed for {team['name']} ✓ "
+                  f"(Seat {seat}) — ${cost:.2f}M")
 
 
 def _recompute_team_points(career, team):
-    """Team points / best finish: the drivers currently in its seats,
-    plus points banked from departed drivers who scored for this team."""
+    """Team points / best finish: the points its current drivers scored
+    FOR this team (team_points), plus points banked from departed
+    drivers who scored for this team. A driver's championship total
+    never counts here — it may include points scored for another
+    team earlier in the season."""
     pts = team.get("points_kept", 0)
     bps = []
     for did in (team["driver1_id"], team["driver2_id"]):
         dd = get_driver(career, did) if did else None
         if dd:
-            pts += dd["points"]
+            pts += dd.get("team_points", 0)
             if dd["best_pos"] is not None:
                 bps.append(dd["best_pos"])
     team["points"] = pts
@@ -615,12 +670,14 @@ def run_race_weekend(career, connected_player_ids, rng=None):
     for team in career["teams"]:
         team["money"] -= salary_per_round(career, team)
         team["money"] += finance_estimates(pos_before[team["id"]])["eprg"]
-    # Sort drivers within each team by points (Main.py swaps D1/D2) and
-    # re-sort the team list into constructor order.
+    # Sort drivers within each team by points scored FOR this team
+    # (Main.py swaps D1/D2) and re-sort the team list into
+    # constructor order. v0.2.1: team_points, not championship points
+    # — a newcomer must not become Driver 1 on points scored elsewhere.
     for team in career["teams"]:
         d1 = get_driver(career, team["driver1_id"]) if team["driver1_id"] else None
         d2 = get_driver(career, team["driver2_id"]) if team["driver2_id"] else None
-        if d1 and d2 and d2["points"] > d1["points"]:
+        if d1 and d2 and d2.get("team_points", 0) > d1.get("team_points", 0):
             team["driver1_id"], team["driver2_id"] = team["driver2_id"], team["driver1_id"]
     career["teams"] = race_mod.constructor_standings(career)
     # Full Grand Prix record for history (revisit any previous GP).
@@ -676,6 +733,8 @@ def end_of_season(career, rng=None):
         f2_champ["status"] = "free"
         f2_champ["team_id"] = None
         f2_champ["points"] = 0
+        f2_champ["team_points"] = 0  # v0.2.1: F2 points never carry to F1
+        f2_champ["last_team_id"] = None
         career["transfers"].append(
             f"{f2_champ['name']} won F2 and joins the free-agent pool")
     # Prize money (Main.py): 1st $12M, others 11 - 0.65*pos. Plus EPSCI.
@@ -702,6 +761,7 @@ def end_of_season(career, rng=None):
                 team["driver1_id"] = None
             if team["driver2_id"] == d["id"]:
                 team["driver2_id"] = None
+            d["last_team_id"] = team["id"]  # v0.2.1: record last team
         d["status"] = "retired"
         d["team_id"] = None
     career["retired_this_season"] = [d["name"] for d in retired]
@@ -718,6 +778,11 @@ def end_of_season(career, rng=None):
         d["mv"] = d["salary"]
         d["perf"] += dsus(d["age"], d["perf"], rng=rng)
         d["points"] = 0
+        d["team_points"] = 0  # v0.2.1: per-team tally resets with the season
+        if d["status"] == "f1":
+            # Still racing: last team is their current team (recorded
+            # on departure instead). Retired drivers keep theirs.
+            d["last_team_id"] = None
         d["season_wins"] = 0
         d["best_pos"] = None
     for d in free_agents(career):
@@ -728,12 +793,14 @@ def end_of_season(career, rng=None):
             # drivers — otherwise a replaced driver's stale points would
             # show in next season's standings.
             d["points"] = 0
+            d["team_points"] = 0  # v0.2.1
             d["season_wins"] = 0
             d["best_pos"] = None
     for d in f2_drivers(career):
         d["age"] += 1
         d["perf"] += dsus(d["age"], d["perf"], rng=rng)
         d["points"] = 0
+        d["team_points"] = 0  # v0.2.1
         d["best_pos"] = None
     # Contracts that expired: the driver leaves the team and becomes a free agent.
     for team in career["teams"]:
@@ -743,8 +810,11 @@ def end_of_season(career, rng=None):
                 continue
             d = get_driver(career, did)
             if d and d["status"] == "f1" and d["contract_left"] <= 0 and d not in retired:
+                # v0.2.1: leaving at contract end also records the last
+                # team (and banks the per-team points, though the season
+                # totals are reset just below anyway).
+                _release_driver(career, d, team)
                 d["status"] = "free"
-                d["team_id"] = None
                 team[slot] = None
                 career["transfers"].append(
                     f"{d['name']} left {team['name']} (contract ended)")
@@ -814,6 +884,8 @@ def fill_empty_seats_ai(career, team, rng=None):
             continue
         pick["status"] = "f1"
         pick["team_id"] = team["id"]
+        pick["team_points"] = 0  # v0.2.1: fresh per-team tally
+        pick["last_team_id"] = None
         pick["contract_left"] = SIGNING_CONTRACT_YEARS
         team[slot] = pick["id"]
         career["transfers"].append(f"{pick['name']} signed for {team['name']}")
@@ -898,6 +970,19 @@ def public_state(career, chart_on, viewer_team_id=None):
     for d in state["drivers"]:
         d.pop("qual_time", None)
         d.pop("race_time", None)
+    # v0.2.1: replacement costs for the viewer's team, computed
+    # server-side from the exact formula sign_driver() charges, so the
+    # Driver Market always shows the number that will be charged.
+    # {driver_id: {"1": {...}, "2": {...}}} — attached to the broadcast
+    # copy only, never saved.
+    if viewer_team_id:
+        viewer = get_team(career, viewer_team_id)
+        if viewer is not None:
+            state["market_costs"] = {
+                d["id"]: {str(seat): signing_cost(career, viewer["id"], d["id"], seat)
+                         for seat in (1, 2)}
+                for d in career["drivers"]
+                if d["status"] in ("free", "f2")}
     if chart_on:
         return state
     for team in state["teams"]:

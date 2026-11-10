@@ -31,7 +31,16 @@ def make_driver(data, status="free", team_id=None):
         "contract_left": int(data["contract"]) if isinstance(data["contract"], int) else 0,
         "mv": float(data["mv"]),
         "salary": float(data["salary"]),
-        "points": 0,
+        "points": 0,           # championship points this season (follow
+                               # the driver across teams, like real F1)
+        "team_points": 0,      # v0.2.1: points scored for the CURRENT team
+                               # this season — reset whenever the driver
+                               # joins a new team; this is what counts
+                               # toward a constructor total, never the
+                               # driver's championship total
+        "last_team_id": None,  # v0.2.1: team the driver last raced for
+                               # (shown in the standings once they are a
+                               # free agent, like real F1)
         "season_wins": 0,
         "best_pos": None,
         "qual_time": None,

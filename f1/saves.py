@@ -14,8 +14,9 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 3  # v0.2: prev_driver_order (standings carry-over).
-# v0.1: results stages, circuit per round, full GP history.
+SAVE_VERSION = 4  # v0.2.1: per-team points (team_points) + last team
+# (last_team_id) on drivers. v0.2: prev_driver_order (standings
+# carry-over). v0.1: results stages, circuit per round, full GP history.
 
 
 def migrate_save(doc):
@@ -32,6 +33,14 @@ def migrate_save(doc):
     # v0.2: constructor points banked from departed drivers.
     for team in doc.get("teams") or []:
         team.setdefault("points_kept", 0)
+    # v0.2.1: per-team points + last team on every driver. Old saves
+    # have neither: a driver's championship points are the best
+    # available stand-in for points scored for their current team,
+    # and their last team is their current team (free agents have none).
+    for d in doc.get("drivers") or []:
+        if "team_points" not in d:
+            d["team_points"] = d.get("points", 0) if d.get("status") == "f1" else 0
+        d.setdefault("last_team_id", d.get("team_id"))
     # A career saved mid-results under v0 never existed (v0 had no results
     # stages), but guard anyway: drop back to the dashboard round.
     if doc.get("phase") == "race_results":
