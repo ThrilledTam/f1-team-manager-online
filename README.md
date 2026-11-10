@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.2 (beta)
+# F1 Team Manager Online — v0.2.1 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.2 is a beta:
+for playing together at the same time (not pass-and-play). v0.2.1 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -187,6 +187,11 @@ The repo includes `render.yaml` for a free Web Service:
   (last season's driver finishing order) and each team's `points_kept`
   (constructor points banked from departed drivers). v0/v0.1 saves still
   load: the loader fills in both fields with safe defaults.
+- **Save format v4 (v0.2.1):** saves now also store each driver's
+  `team_points` (points scored for their current team) and
+  `last_team_id` (last team raced for). v0/v0.1/v0.2 saves still load:
+  the loader fills in both fields with safe defaults (`team_points`
+  from championship points for current F1 drivers, 0 otherwise).
 - **Reliability** is a developed/displayed stat; the original race sim never
   used it for DNFs, so v0 does not either.
 - **Disconnected humans:** their team is AI-driven for that round so the
@@ -265,6 +270,50 @@ complete" before the race results page had been shown — it now says
   "e.g. [name]" instead of "e.g. Matthew".
 - **Save format v3:** see above — `prev_driver_order` and per-team
   `points_kept`, with safe defaults when loading v0/v0.1 saves.
+
+## v0.2.1 — points follow the driver, last team shown, cost upfront
+
+A correction patch to v0.2's replacement rules (Matthew's clarification):
+
+- **Points follow the driver across teams (Flag 1, refined):** v0.2
+  reset every incoming driver's tally to 0, which was wrong for a
+  driver moving between teams. Now a free agent who already has F1
+  points from an earlier stint this season KEEPS them when signed by
+  a new team — e.g. a driver with 44 points at Alpine who moves to
+  Audi mid-season keeps the 44 in the driver standings. Only an F2
+  driver starts at 0 (their F2 points must not carry into F1).
+- **Points scored stay with the team:** three separate numbers are
+  now tracked — `driver["points"]` (championship total, follows the
+  driver), `driver["team_points"]` (points scored for the CURRENT
+  team, reset to 0 whenever the driver joins a new team), and
+  `team["points_kept"]` (points banked from departed drivers). A
+  constructor total is `points_kept + current drivers' team_points`,
+  so the 44 Alpine points stay at Alpine, and only points the driver
+  scores from now on for Audi count toward Audi. When a driver
+  leaves, only their `team_points` are banked — never their
+  championship total. `apply_race_results()` awards both tallies,
+  `_recompute_team_points()` uses `team_points`, and the Driver 1 /
+  Driver 2 order inside a team is now sorted by `team_points` too, so
+  a newcomer does not become Driver 1 on points scored elsewhere.
+- **Last team shown in the standings (Flag 2):** a replaced driver
+  now records `last_team_id` when they leave a team (replacement,
+  contract end, retirement), and the standings show that team in the
+  team column — in team colours — even though they no longer race for
+  them. Their name stays uncoloured (free-agent rule from v0.1).
+- **Replacement cost shown upfront:** the Driver Market now shows the
+  TOTAL cost of signing each driver into each seat — signing fee
+  (market value) + contract-break fee (1 + salary × years left) when
+  the seat is occupied — with the breakdown underneath. The cost is
+  computed server-side by `signing_cost()`, the same helper
+  `sign_driver()` charges with, and sent to the client as
+  `market_costs`, so the displayed number is always the number
+  charged. The sign confirmation toast also states the amount
+  charged. Seats the team cannot afford are disabled and show the
+  amount needed instead of erroring only after the click.
+- **Save format v4:** see above — `team_points` and `last_team_id`
+  on drivers, with safe defaults when loading v0/v0.1/v0.2 saves
+  (old saves take `team_points` from championship points for current
+  F1 drivers, 0 otherwise).
 
 ## Mobile + mouse
 
