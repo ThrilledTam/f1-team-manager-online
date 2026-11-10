@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.1</title>
+<title>F1 Team Manager Online — v0.1.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -81,7 +81,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.1 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.1.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -93,6 +93,7 @@
       <button id="btn-join" class="secondary">Join Room</button>
       <input id="home-code" placeholder="Room code" maxlength="6" style="width:110px; text-transform:uppercase">
     </div>
+    <div id="conn-status" class="note" style="margin-top:8px">Connecting…</div>
     <div style="margin-top:10px">
       <button id="btn-settings" class="secondary">Settings</button>
       <button id="btn-exit" class="secondary">Exit</button>
@@ -356,12 +357,57 @@ function colourPicker(elId, current, onPick){
 colourPicker("home-colours", myColour, c => myColour = c);
 colourPicker("custom-colours", myColour, c => myColour = c);
 
+/* v0.1.1 connection handling: the WebSocket handshake on Render's free
+   tier can take far longer than 300ms (cold start / proxy), and the old
+   code sent create/join 300ms after connect() — so it always failed with
+   a "not connected" error whenever the handshake was slow, and every retry
+   orphaned another socket. Now messages queue while the socket is still
+   connecting and flush on open; the socket reconnects with backoff even
+   before the player has a room; only one socket is ever live; and the
+   home screen shows the connection status instead of leaving the player
+   guessing. */
+let wsQueue = [], wsReconnectDelay = 500, wsReconnectTimer = null,
+    wsSlowTimer = null, joinPending = false;
+function setConnStatus(text, good){
+  const el = $("conn-status");
+  if(!el) return;
+  el.textContent = text;
+  el.style.color = good === true ? "#1e7d32" : good === false ? "#c62828" : "";
+}
+function scheduleReconnect(){
+  if(wsReconnectTimer) return;
+  const delay = wsReconnectDelay;
+  wsReconnectDelay = Math.min(wsReconnectDelay * 2, 4000);
+  wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; connect(); }, delay);
+}
+function flushQueue(){
+  if(!ws || ws.readyState !== 1) return;
+  while(wsQueue.length) ws.send(JSON.stringify(wsQueue.shift()));
+}
 function connect(){
+  // Never run two sockets at once: a live or connecting socket is reused.
+  if(ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  if(wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if(wsSlowTimer){ clearTimeout(wsSlowTimer); wsSlowTimer = null; }
+  if(ws){ try{ ws.onclose = null; ws.onerror = null; ws.close(); }catch(e){} }
+  setConnStatus("Connecting…");
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(proto + "//" + location.host + "/ws");
-  ws.onmessage = ev => {
+  const sock = new WebSocket(proto + "//" + location.host + "/ws");
+  ws = sock;
+  wsSlowTimer = setTimeout(() => {
+    if(ws === sock && ws.readyState === 0)
+      setConnStatus("Still connecting… (the free server can take ~50s to wake up)");
+  }, 10000);
+  sock.onopen = () => {
+    if(wsSlowTimer){ clearTimeout(wsSlowTimer); wsSlowTimer = null; }
+    wsReconnectDelay = 500;
+    setConnStatus("Connected ✓", true);
+    flushQueue();
+  };
+  sock.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if(m.type === "joined"){
+      joinPending = false;
       myId = m.player_id; myCode = m.code; room = m.room;
       sessionStorage.setItem("f1code", myCode); sessionStorage.setItem("f1player", myId);
       renderAll();
@@ -371,13 +417,37 @@ function connect(){
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
     } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
     } else if(m.type === "action"){ showOk(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
-    } else if(m.type === "error"){ showErr(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
+    } else if(m.type === "error"){ joinPending = false; showErr(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
     } else if(m.type === "kicked"){ alert(m.message); location.reload(); }
   };
-  ws.onclose = () => { setTimeout(() => { if(myCode && myId){ connect(); setTimeout(() => send({type:"rejoin", code:myCode, player_id:myId}), 300); } }, 1500); };
-  setInterval(() => { if(ws && ws.readyState === 1) ws.send(JSON.stringify({type:"ping"})); }, 5000);
+  sock.onerror = () => { /* onclose below handles the retry */ };
+  sock.onclose = () => {
+    if(sock !== ws) return; // stale socket from an earlier attempt
+    if(wsSlowTimer){ clearTimeout(wsSlowTimer); wsSlowTimer = null; }
+    joinPending = false; // let the player retry (a queued create/join
+    // is replaced, not duplicated — see send()).
+    setConnStatus("Connection lost — retrying…", false);
+    // Rejoin after reconnecting, if we already had a room (queued once).
+    if(myCode && myId && !wsQueue.some(m => m.type === "rejoin"))
+      wsQueue.push({type:"rejoin", code:myCode, player_id:myId});
+    scheduleReconnect();
+  };
 }
-function send(obj){ if(ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); else showErr("home-err", "Not connected yet — try again in a second."); }
+/* One ping interval for the whole page (the old code leaked a new one
+   on every connect() call). */
+setInterval(() => { if(ws && ws.readyState === 1) ws.send(JSON.stringify({type:"ping"})); }, 5000);
+function send(obj){
+  if(ws && ws.readyState === 1){ ws.send(JSON.stringify(obj)); return; }
+  // Still connecting (or not started yet): queue it — it goes out on
+  // open. Never fail an action just because the handshake is slow.
+  // A fresh create/join replaces a still-queued one, so a retry after
+  // a dropped socket cannot create two rooms.
+  if(obj.type === "create_room" || obj.type === "join_room")
+    wsQueue = wsQueue.filter(m => m.type !== "create_room" && m.type !== "join_room");
+  wsQueue.push(obj);
+  if(!ws || ws.readyState === 3 || ws.readyState === 2) connect();
+  else setConnStatus("Connecting…");
+}
 
 function renderAll(){
   if(!room) return;
@@ -602,8 +672,12 @@ function renderTabs(){
 }
 
 // ---- wiring ----
-$("btn-create").onclick = () => { const n = $("home-nick").value.trim() || "Player"; connect(); setTimeout(() => send({type:"create_room", nickname:n, colour:myColour}), 300); };
-$("btn-join").onclick = () => { const n = $("home-nick").value.trim() || "Player"; const code = $("home-code").value.trim().toUpperCase(); if(!code){ showErr("home-err", "Type a room code to join."); return; } connect(); setTimeout(() => send({type:"join_room", code, nickname:n, colour:myColour}), 300); };
+// v0.1.1: send() queues while the socket is still connecting, so there
+// is no fixed 300ms race any more. joinPending stops a double-click
+// from creating two rooms (the second click is ignored until the first
+// is answered with a "joined" or an "error").
+$("btn-create").onclick = () => { if(joinPending) return; joinPending = true; const n = $("home-nick").value.trim() || "Player"; send({type:"create_room", nickname:n, colour:myColour}); };
+$("btn-join").onclick = () => { if(joinPending) return; const n = $("home-nick").value.trim() || "Player"; const code = $("home-code").value.trim().toUpperCase(); if(!code){ showErr("home-err", "Type a room code to join."); return; } joinPending = true; send({type:"join_room", code, nickname:n, colour:myColour}); };
 $("btn-settings").onclick = () => { $("home-settings").classList.toggle("hidden"); };
 $("set-chart").onchange = e => { chartDefault = e.target.checked; };
 $("btn-exit").onclick = () => { $("home-exit-note").classList.remove("hidden"); };
@@ -636,12 +710,14 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
 $("import-file").onchange = e => { if(e.target.files[0]) importFile(e.target.files[0], "lobby-err"); };
 $("import-file-game").onchange = e => { if(e.target.files[0]) importFile(e.target.files[0], "game-err"); };
 
-// Auto-join from ?code= or rejoin from a reload
+// Auto-join from ?code= or rejoin from a reload. v0.1.1: connect on page
+// load, so the handshake is usually done before the player even clicks.
+connect();
 (function(){
   const q = new URLSearchParams(location.search);
   const code = (q.get("code") || "").toUpperCase();
   const savedCode = sessionStorage.getItem("f1code"), savedPlayer = sessionStorage.getItem("f1player");
-  if(savedCode && savedPlayer){ connect(); setTimeout(() => send({type:"rejoin", code: savedCode, player_id: savedPlayer}), 400); }
+  if(savedCode && savedPlayer){ send({type:"rejoin", code: savedCode, player_id: savedPlayer}); }
   else if(code){ $("home-code").value = code; }
 })();
 </script>
