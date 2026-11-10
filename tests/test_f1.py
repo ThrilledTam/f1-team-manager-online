@@ -1,4 +1,4 @@
-"""Tests for F1 Team Manager Online v0.
+"""Tests for F1 Team Manager Online v0.1.
 
 Deterministic: every test that touches randomness passes a seeded
 random.Random. Run with:  python -m pytest tests/ -q
@@ -14,10 +14,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from f1 import game
+from f1.data import CALENDAR, circuit_for_round
 from f1.rules import (
     add_perf_gain, finance_estimates, reg_change, retirement_chance,
 )
-from f1.saves import delete_save, list_saves, load_save, save_career
+from f1.saves import delete_save, list_saves, load_save, migrate_save, save_career
 
 
 def seeded(seed=1234):
@@ -31,6 +32,20 @@ def two_human_career():
     ok, _ = game.choose_team(career, career["teams"][1]["id"], "p-cousin")
     assert ok
     return career
+
+
+def play_full_round(career, connected, rng):
+    """Drive one round to completion the v0.1 way: all humans Advance,
+    then everyone votes NEXT on the qual page, then on the race page."""
+    for t in list(game.human_teams(career)):
+        game.advance_team(career, t["id"], connected, rng=rng)
+    assert career["phase"] == "qual_results"
+    for pid in sorted(connected):
+        game.vote_next(career, pid, connected, rng=rng)
+    assert career["phase"] == "race_results"
+    for pid in sorted(connected):
+        game.vote_next(career, pid, connected, rng=rng)
+    assert career["phase"] in ("round", "winter_break")
 
 
 # ---------------------------------------------------------------------------
@@ -94,12 +109,31 @@ def test_simultaneous_advance_blocks_until_all_humans():
     assert career["last_race"] is None
     ok, raced, _ = game.advance_team(career, t2["id"], connected, rng=seeded(7))
     assert ok and raced
-    assert career["round"] == 2
+    # v0.1: the race ran, but the room is on the qualifying results page —
+    # the round does NOT advance until the NEXT votes are done.
+    assert career["phase"] == "qual_results"
+    assert career["results_stage"] == "qual"
+    assert career["round"] == 1
     assert career["last_race"] is not None
     assert len(career["last_race"]) == 22
     assert len(career["last_qual"]) == 22
     assert career["last_race"][0]["points"] == 25
     assert sum(d["points"] for d in career["drivers"]) > 0
+    # One vote is not enough: the vote is unanimous.
+    ok, advanced, msg = game.vote_next(career, "p-matthew", connected, rng=seeded(7))
+    assert ok and not advanced
+    assert career["phase"] == "qual_results"
+    ok, advanced, msg = game.vote_next(career, "p-cousin", connected, rng=seeded(7))
+    assert ok and advanced
+    assert career["phase"] == "race_results"
+    assert career["results_stage"] == "race"
+    # Second vote returns everyone to their dashboards for round 2.
+    ok, advanced, _ = game.vote_next(career, "p-matthew", connected, rng=seeded(7))
+    assert ok and not advanced
+    ok, advanced, _ = game.vote_next(career, "p-cousin", connected, rng=seeded(7))
+    assert ok and advanced
+    assert career["phase"] == "round"
+    assert career["round"] == 2
 
 
 def test_race_points_and_money_change():
@@ -189,8 +223,7 @@ def test_full_season_rollover_applies_minor_reg_change():
     connected = {"p-matthew", "p-cousin"}
     rng = seeded(99)
     for _ in range(12):
-        for t in list(game.human_teams(career)):
-            game.advance_team(career, t["id"], connected, rng=rng)
+        play_full_round(career, connected, rng)
     assert career["phase"] == "winter_break"
     assert career["year"] == 2027
     assert career["last_reg_change"]["year"] == 2027
@@ -218,8 +251,7 @@ def test_full_season_rollover_applies_minor_reg_change():
 def test_save_load_round_trip_preserves_state():
     career = two_human_career()
     connected = {"p-matthew", "p-cousin"}
-    game.advance_team(career, career["teams"][0]["id"], connected, rng=seeded())
-    game.advance_team(career, career["teams"][1]["id"], connected, rng=seeded(7))
+    play_full_round(career, connected, seeded(7))
     assert career["round"] == 2
     snapshot = {t["id"]: (t["points"], t["money"], t["perf"]) for t in career["teams"]}
     with tempfile.TemporaryDirectory() as tmp:
@@ -236,7 +268,10 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 1
+        assert loaded["version"] == 2  # v0.1 save format
+        assert loaded["circuit"] == "Saudi Arabian Grand Prix"
+        assert len(loaded["race_history"]) == 1
+        assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
         assert delete_save(tmp, meta["save_id"])
         assert list_saves(tmp) == []
 
@@ -389,3 +424,308 @@ def test_mobile_friendly_markup():
         assert label in html
     # No action is a bare text link: the only <a> tags are none (links are buttons).
     assert "<a " not in html
+
+
+# ---------------------------------------------------------------------------
+# 6. v0.1 — no absolute times, full-distance races, NEXT votes, circuits
+# ---------------------------------------------------------------------------
+
+def test_results_payloads_never_contain_absolute_times():
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    play_full_round(career, connected, seeded(5))
+    for key in ("last_qual", "last_race"):
+        rows = career[key]
+        assert len(rows) == 22
+        for r in rows:
+            assert "time" not in r, f"absolute time leaked in {key}: {r}"
+            assert r["gap"] == "LEADER" or r["gap"].startswith("+")
+        assert rows[0]["gap"] == "LEADER"
+    # public_state must not leak qual_time / race_time either, chart on or off.
+    for chart_on in (True, False):
+        dumped = json.dumps(game.public_state(career, chart_on))
+        assert "qual_time" not in dumped
+        assert "race_time" not in dumped
+    # History rows are gap-only too.
+    entry = career["race_history"][0]
+    for key in ("qual", "race"):
+        assert all("time" not in r for r in entry[key])
+
+
+def test_race_is_full_distance_with_plausible_gaps():
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    for seed in (1, 7, 42):
+        c = game.build_new_career("T", "H")
+        rng = random.Random(seed)
+        from f1 import race as race_mod
+        qual = race_mod.simulate_qual(c, rng=rng)
+        qtimes = [d["qual_time"] for d, _ in qual]
+        assert qtimes[-1] - qtimes[0] <= 3.0  # qual gaps ~0-3s
+        race_entries = race_mod.simulate_race(c, laps=57, rng=rng)
+        rtimes = [d["race_time"] for d, _ in race_entries]
+        winner = rtimes[0]
+        assert 4000 <= winner <= 7000, f"winner total {winner:.0f}s is not a GP distance"
+        assert 10 <= rtimes[-1] - winner <= 150  # P22 gap plausible, not hundreds
+        assert 5 <= rtimes[9] - winner <= 120    # P10 gap plausible
+    # The played round agrees (server-side times are what the gaps came from).
+    play_full_round(career, connected, seeded(5))
+    assert career["last_race"][0]["gap"] == "LEADER"
+    assert career["last_race"][-1]["gap"].startswith("+")
+    last_gap = float(career["last_race"][-1]["gap"][1:-1])
+    assert 10 <= last_gap <= 150
+
+
+def test_next_vote_flow_host_override_and_disconnect():
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    for t in list(game.human_teams(career)):
+        game.advance_team(career, t["id"], connected, rng=seeded())
+    assert career["phase"] == "qual_results"
+    # A player with no team cannot vote.
+    ok, _adv, _msg = game.vote_next(career, "p-stranger", connected, rng=seeded())
+    assert not ok
+    # The host override is host-only.
+    ok, _adv, _msg = game.host_skip_results(career, "p-cousin", connected,
+                                            is_host=False, rng=seeded())
+    assert not ok
+    assert career["phase"] == "qual_results"
+    ok, adv, _msg = game.host_skip_results(career, "p-matthew", connected,
+                                           is_host=True, rng=seeded())
+    assert ok and adv
+    assert career["phase"] == "race_results"
+    # Second vote: one vote is not enough, both votes return to dashboards.
+    ok, adv, _ = game.vote_next(career, "p-matthew", connected, rng=seeded())
+    assert ok and not adv
+    assert career["phase"] == "race_results"
+    ok, adv, _ = game.vote_next(career, "p-cousin", connected, rng=seeded())
+    assert ok and adv
+    assert career["phase"] == "round" and career["round"] == 2
+    # Disconnected humans are excluded: one remaining voter can pass alone,
+    # and a recorded vote survives a disconnect/reconnect.
+    career2 = two_human_career()
+    for t in list(game.human_teams(career2)):
+        game.advance_team(career2, t["id"], connected, rng=seeded())
+    ok, adv, _ = game.vote_next(career2, "p-matthew", connected, rng=seeded())
+    assert ok and not adv  # cousin has not voted yet
+    assert "p-matthew" in career2["results_vote"]  # vote is recorded
+    connected2 = {"p-matthew"}  # cousin disconnected
+    assert game.check_results_vote(career2, connected2, rng=seeded())
+    assert career2["phase"] == "race_results"
+
+
+def test_history_gp_revisit_returns_full_tables():
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    play_full_round(career, connected, seeded(3))
+    play_full_round(career, connected, seeded(4))
+    assert len(career["race_history"]) == 2
+    circuits = [e["circuit"] for e in career["race_history"]]
+    assert circuits == ["Bahrain Grand Prix", "Saudi Arabian Grand Prix"]
+    for entry in career["race_history"]:
+        assert len(entry["qual"]) == 22 and len(entry["race"]) == 22
+        assert entry["qual"][0]["gap"] == "LEADER"
+        assert entry["race"][0]["gap"] == "LEADER"
+        assert all("time" not in r for r in entry["qual"] + entry["race"])
+        assert len(entry["top3"]) == 3
+        assert "gl" in entry["race"][0]  # gained/lost vs qualifying
+
+
+def test_button_actions_confirm_and_reflect_state():
+    career = game.build_new_career("Test", "Matthew")
+    team = career["teams"][0]
+    ok, msg = game.do_tuning(career, team["id"], 2)
+    assert ok and team["tuning"] == 2
+    assert msg == "Tuning set to +2 ✓"
+    ok, msg = game.do_research(career, team["id"], "perf", 1.0)
+    assert ok and "Invested $1.00M in Performance research" in msg
+    assert team["perf_res"] == 1.0
+    # A failed action says so clearly instead of failing silently.
+    ok, msg = game.do_research(career, team["id"], "perf", 10**9)
+    assert not ok and "Not enough money" in msg
+    ok, msg = game.do_reg_research(career, team["id"], 1.0)
+    assert ok and "regulation research" in msg
+    assert team["reg_research"] == 1.0
+    ok, msg = game.do_develop(career, team["id"])
+    assert ok and "Parts developed" in msg
+    # Signing confirms with the driver's name.
+    pool = game.free_agents(career)
+    team["money"] = 50.0
+    ok, msg = game.sign_driver(career, team["id"], pool[0]["id"], 1)
+    assert ok and pool[0]["name"] in msg and "signed" in msg
+
+
+def test_calendar_covers_all_12_rounds():
+    assert len(CALENDAR) == 12
+    names = [gp["name"] for gp in CALENDAR]
+    assert len(set(names)) == 12
+    assert all(50 <= gp["laps"] <= 78 for gp in CALENDAR)
+    assert circuit_for_round(1)["name"] == "Bahrain Grand Prix"
+    assert circuit_for_round(1)["laps"] == 57
+    assert circuit_for_round(12)["name"] == "British Grand Prix"
+    assert circuit_for_round(12)["laps"] == 52
+    career = game.build_new_career("Test", "Matthew")
+    assert career["circuit"] == "Bahrain Grand Prix"
+    assert career["circuit_laps"] == 57
+    connected = {"p-matthew", "p-cousin"}
+    # (two_human_career already picks teams; use a fresh one here)
+    career = two_human_career()
+    play_full_round(career, connected, seeded(11))
+    assert career["circuit"] == "Saudi Arabian Grand Prix"
+    assert career["circuit_laps"] == 50
+
+
+def test_old_v0_save_still_loads():
+    # A v0 save: version 1, no circuit / results fields, history with only
+    # top3, and results rows that still carry a "time" field.
+    v0_doc = {
+        "version": 1, "name": "Old v0 career", "host": "Matthew",
+        "year": 2026, "round": 3, "season_index": 0, "phase": "round",
+        "teams": [], "drivers": [],
+        "race_history": [{"year": 2026, "round": 1,
+                          "top3": [{"driver": "Lewis Hamilton", "team": "Ferrari"}]}],
+        "last_qual": [{"pos": 1, "driver": "Lewis Hamilton", "team": "Ferrari",
+                       "time": 66.1, "gap": "LEADER"}],
+        "last_race": [{"pos": 1, "driver": "Lewis Hamilton", "team": "Ferrari",
+                       "time": 137.3, "gap": "LEADER", "points": 25}],
+    }
+    migrated = migrate_save(v0_doc)
+    assert migrated["circuit"] == "Australian Grand Prix"  # round 3
+    assert migrated["circuit_laps"] == 58
+    assert migrated["results_vote"] == [] and migrated["results_stage"] is None
+    assert migrated["race_history"][0]["circuit"] == "Round 1"
+    assert migrated["race_history"][0]["qual"] is None  # no full tables in v0
+    assert "time" not in migrated["last_qual"][0]
+    assert "time" not in migrated["last_race"][0]
+    # The same doc also loads through the real load_save path.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "oldv0.json"
+        path.write_text(json.dumps(v0_doc), encoding="utf-8")
+        loaded = load_save(tmp, "oldv0")
+        assert loaded is not None and loaded["circuit"] == "Australian Grand Prix"
+
+
+def test_host_override_only_sent_to_host_client():
+    import server as srv
+    room = srv.new_room("Matthew", "#e74c3c")
+    host = srv.add_player(room, "Matthew", "#e74c3c")
+    cousin = srv.add_player(room, "Cousin", "#3498db")
+    assert room["host_id"] == host["player_id"]
+    assert srv.room_public(room, host["player_id"])["is_host"] is True
+    assert srv.room_public(room, cousin["player_id"])["is_host"] is False
+    # my_team never carries absolute times either.
+    room["career"] = game.build_new_career("T", "Matthew")
+    game.choose_team(room["career"], room["career"]["teams"][0]["id"], host["player_id"])
+    mt = srv.my_team_public(room, host["player_id"])
+    assert mt is not None
+    assert all("qual_time" not in d and "race_time" not in d for d in mt["drivers"])
+
+
+def test_driver_surname_markup_bold_uppercase_team_coloured():
+    """Render the real page in headless Chromium and check the markup
+    helper: team-coloured bold UPPERCASE surname + '|' bar for a driver,
+    neutral bold uppercase for a free agent, and a gap-only table."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    import subprocess, time, urllib.request
+    port = 8791
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 360, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/")
+            html = page.evaluate(
+                "window.F1UI.driverNameHtml('Lando Norris', '#EF9B33', 1, true)")
+            assert "NORRIS" in html and "Lando" in html
+            assert "#EF9B33" in html and 'class="surname"' in html
+            assert 'class="team-bar"' in html and "|" in html
+            assert "🏆1" in html
+            free = page.evaluate(
+                "window.F1UI.driverNameHtml('Yuki Tsunoda', null, 0, true)")
+            assert "TSUNODA" in free and "Yuki" in free
+            assert "team-bar" not in free and "#" not in free
+            table = page.evaluate(
+                "window.F1UI.classificationTable("
+                "[{pos:1,driver:'Lewis Hamilton',driver_id:'x',team:'Ferrari',"
+                "team_id:null,cha:7,gap:'LEADER',points:25,gl:0},"
+                "{pos:2,driver:'Max Verstappen',driver_id:'y',team:'Red Bull',"
+                "team_id:null,cha:4,gap:'+12.345s',points:18,gl:-1}], {showGL:true})")
+            assert "Time" not in table and "GAP" in table and "G/L" in table
+            assert "🥇" in table and "▲" not in table  # P1 gl=0 shows 0
+            assert "▼1" in table
+            browser.close()
+    finally:
+        proc.terminate()
+
+
+def test_ws_next_vote_and_host_skip_over_real_websocket():
+    """The v0.1 vote messages end to end: vote_next confirmations, the
+    unanimous rule, and the host-only skip, over real WebSockets."""
+    from fastapi.testclient import TestClient
+    from server import app
+
+    client = TestClient(app)
+
+    def recv_until(ws, want, limit=60, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({"type": "create_room", "nickname": "Matthew", "colour": "#e74c3c"})
+        joined = recv_until(host_ws, "joined")
+        code, host_id = joined["code"], joined["player_id"]
+        with client.websocket_connect("/ws") as guest_ws:
+            guest_ws.send_json({"type": "join_room", "code": code,
+                                "nickname": "Cousin", "colour": "#3498db"})
+            g_joined = recv_until(guest_ws, "joined")
+            guest_id = g_joined["player_id"]
+            host_ws.send_json({"type": "new_career", "name": "Vote Career"})
+            state = recv_until(host_ws, "room_state",
+                               check=lambda m: m["room"]["career"] is not None)
+            teams = state["room"]["career"]["teams"]
+            host_ws.send_json({"type": "choose_team", "team_id": teams[0]["id"]})
+            guest_ws.send_json({"type": "choose_team", "team_id": teams[1]["id"]})
+            host_ws.send_json({"type": "start_career"})
+            recv_until(host_ws, "room_state",
+                       check=lambda m: m["room"]["started"] is True)
+            # Both advance -> qualifying results page.
+            host_ws.send_json({"type": "advance"})
+            guest_ws.send_json({"type": "advance"})
+            state = recv_until(host_ws, "room_state",
+                               check=lambda m: m["room"]["career"]["phase"] == "qual_results")
+            career = state["room"]["career"]
+            assert career["circuit"] == "Bahrain Grand Prix"
+            assert state["room"]["is_host"] is True
+            assert all("time" not in r for r in career["last_qual"] + career["last_race"])
+            # Non-host skip is rejected.
+            guest_ws.send_json({"type": "host_skip"})
+            err = recv_until(guest_ws, "error")
+            assert "Only the host" in err["message"]
+            # Host votes: confirmation arrives, stage does not move yet.
+            host_ws.send_json({"type": "vote_next"})
+            act = recv_until(host_ws, "action")
+            assert "NEXT vote recorded (1/2)" in act["message"]
+            # Guest votes -> race results page.
+            guest_ws.send_json({"type": "vote_next"})
+            state = recv_until(host_ws, "room_state",
+                               check=lambda m: m["room"]["career"]["phase"] == "race_results")
+            assert state["room"]["career"]["results_stage"] == "race"
+            # Host skip on the race page returns everyone to dashboards.
+            host_ws.send_json({"type": "host_skip"})
+            state = recv_until(host_ws, "room_state",
+                               check=lambda m: m["room"]["career"]["phase"] == "round")
+            assert state["room"]["career"]["round"] == 2
+            assert state["room"]["career"]["circuit"] == "Saudi Arabian Grand Prix"
