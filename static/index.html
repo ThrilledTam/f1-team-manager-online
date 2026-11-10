@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0</title>
+<title>F1 Team Manager Online — v0.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -17,6 +17,7 @@
      both fire the same standard click handler; touch-action avoids double-tap
      zoom / double-firing on mobile). */
   button { background:#238636; color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:16px; cursor:pointer; margin:4px 4px 4px 0; min-height:44px; min-width:44px; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  button:active { transform:scale(.97); filter:brightness(1.25); }
   button.secondary { background:#30363d; }
   button.danger { background:#da3633; }
   button:disabled { opacity:.45; cursor:not-allowed; }
@@ -44,11 +45,27 @@
   .tabs button.sel { background:#1f6feb; }
   .hidden { display:none; }
   .mono { font-family: ui-monospace, monospace; }
+  /* v0.1 driver-name styling (from Matthew's screenshots): first name normal,
+     SURNAME bold + uppercase in team colour; free agents / F2 neutral. */
+  .surname { font-weight:700; text-transform:uppercase; }
+  .team-bar { font-weight:900; margin-right:4px; }
+  .trophy { font-size:13px; white-space:nowrap; }
+  .gl-up { color:#3fb950; font-weight:700; }
+  .gl-down { color:#f85149; font-weight:700; }
+  .medal { font-size:16px; }
+  /* v0.1 toasts: every action confirms (or errors) where you can see it. */
+  #toasts { position:fixed; left:0; right:0; bottom:16px; display:flex; flex-direction:column; align-items:center; gap:8px; z-index:50; pointer-events:none; padding:0 12px; }
+  .toast { background:#0e2a18; border:1px solid #238636; color:#a9e8bd; border-radius:8px; padding:12px 16px; font-size:15px; max-width:560px; box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  .toast.err { background:#3d1113; border-color:#da3633; color:#ffb3b0; }
+  .vote-box { background:#161b22; border:1px solid #1f6feb; border-radius:10px; padding:14px; margin:12px 0; }
+  .gp-title { font-size:22px; margin:6px 0 2px; }
+  .gp-sub { color:#8b949e; font-size:14px; margin:0 0 10px; }
   @media (max-width: 600px) {
     .wrap { padding:12px; }
     h1 { font-size:22px; }
     /* Full-width action buttons on phones so they are easy to hit. */
     #screen-home button, #screen-lobby button, #advance-box button,
+    #screen-results button,
     #winter-card button, #tab-research button, #tab-saves button,
     #screen-game > p > button { width:100%; margin:4px 0; }
     .tabs button { width:auto; margin:4px 4px 4px 0; }
@@ -64,7 +81,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -178,14 +195,6 @@
     </div>
   </div>
 
-  <div class="card" id="results-card" class="hidden">
-    <h2>🏁 Race weekend results</h2>
-    <h3>Qualifying</h3>
-    <div id="qual-table"></div>
-    <h3>Race</h3>
-    <div id="race-table"></div>
-  </div>
-
   <div class="card">
     <div class="tabs">
       <button data-tab="research" class="sel">Research</button>
@@ -236,20 +245,103 @@
   <span class="note">Your team becomes AI-driven while you are away — rejoin with the same room code to take it back.</span></p>
 </div>
 
+<!-- ================= RESULTS (v0.1) ================= -->
+<div id="screen-results" class="hidden">
+  <h1>🏁 <span id="results-stage-title"></span></h1>
+  <p class="gp-title" id="results-gp"></p>
+  <p class="gp-sub" id="results-gp-sub"></p>
+  <div id="results-err"></div>
+  <div class="card"><div id="results-table"></div></div>
+  <div class="vote-box" id="vote-box">
+    <h3 style="margin-top:0">Next</h3>
+    <p id="vote-status" class="note"></p>
+    <button id="btn-vote-next">▶ NEXT</button>
+    <button id="btn-host-skip" class="secondary hidden">⏭ Host: skip vote &amp; continue</button>
+    <p class="note" id="vote-note"></p>
+  </div>
+  <p><button id="btn-results-leave" class="secondary">Leave room</button></p>
+</div>
+
+<div id="toasts"></div>
+
 </div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 const PALETTE = ["#e74c3c","#e67e22","#f1c40f","#2ecc71","#1abc9c","#3498db","#9b59b6","#fd79a8","#00cec9","#6c5ce7"];
 let ws = null, myId = null, myCode = null, myColour = PALETTE[0], room = null, myTeam = null;
-let chartDefault = true, lastRound = null, lastPhase = null;
+let chartDefault = true, lastRound = null, lastPhase = null, viewingGP = null;
 
-function showErr(box, msg){ const el = $(box); if(!el) return; el.innerHTML = `<div class="err">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 6000); }
-function showOk(box, msg){ const el = $(box); if(!el) return; el.innerHTML = `<div class="ok">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 4000); }
+function showErr(box, msg){ toast(msg, true); const el = $(box); if(!el) return; el.innerHTML = `<div class="err">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 6000); }
+function showOk(box, msg){ toast(msg, false); const el = $(box); if(!el) return; el.innerHTML = `<div class="ok">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 4000); }
+/* v0.1: every action confirms (or errors) with a toast you cannot miss. */
+function toast(msg, isErr){
+  const box = $("toasts"); if(!box) return;
+  const el = document.createElement("div");
+  el.className = "toast" + (isErr ? " err" : "");
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.remove(), isErr ? 6000 : 4000);
+}
 function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function money(v){ return "$" + (v ?? 0).toFixed(2) + "M"; }
 function driverById(id){ if(!room || !room.career) return null; return room.career.drivers.find(d => d.id === id) || null; }
 function teamById(id){ if(!room || !room.career) return null; return room.career.teams.find(t => t.id === id) || null; }
+
+/* v0.1 driver-name styling, from Matthew's PyCharm screenshots: first name
+   in normal case, SURNAME bold + UPPERCASE in the team colour, with a
+   coloured '|' bar next to the name in classification tables, and a trophy
+   + title count for world champions. Free agents / F2 drivers get bold +
+   uppercase with NO team colour (neutral). */
+function splitName(name){
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  const last = parts.pop() || "";
+  return { first: parts.join(" "), last };
+}
+function driverNameHtml(name, teamColour, cha, withBar){
+  const f = splitName(name);
+  const bar = (withBar && teamColour) ? `<span class="team-bar" style="color:${teamColour}">|</span> ` : "";
+  const style = teamColour ? ` style="color:${teamColour}"` : "";
+  const trophy = cha ? ` <span class="trophy" title="${cha} world title${cha > 1 ? "s" : ""}">🏆${cha}</span>` : "";
+  return `${bar}<span>${esc(f.first)}</span> <span class="surname"${style}>${esc(f.last.toUpperCase())}</span>${trophy}`;
+}
+/* Team name in team colour, supplier suffix in the supplier's colour
+   (e.g. McLaren-Mercedes). The supplier is a constructor team, resolved
+   through supplier_id; a custom team has no supplier. */
+function teamNameHtml(team){
+  if(!team) return "";
+  const main = `<span style="color:${team.colour}; font-weight:700">${esc(team.name)}</span>`;
+  if(team.supplier_name){
+    const sup = team.supplier_id ? teamById(team.supplier_id) : null;
+    const sc = sup ? sup.colour : "#8b949e";
+    return main + `-<span style="color:${sc}">${esc(team.supplier_name)}</span>`;
+  }
+  return main;
+}
+/* Classification table (qualifying or race), gaps only — never absolute
+   times. Race rows also get a G/L column (positions gained/lost vs
+   qualifying) and medals for P1-P3. Rows carry driver_id/team_id/cha so
+   names can be coloured even for a revisited Grand Prix. */
+function classificationTable(rows, opts){
+  opts = opts || {};
+  const showPts = rows.length && "points" in rows[0];
+  const showGL = !!opts.showGL;
+  const head = `<tr><th>POS</th><th>DRIVER</th><th>CAR</th><th>GAP</th>${showGL ? "<th>G/L</th>" : ""}${showPts ? "<th>PTS</th>" : ""}</tr>`;
+  const body = rows.map(r => {
+    const team = r.team_id ? teamById(r.team_id) : null;
+    const colour = team ? team.colour : null;
+    const medal = r.pos === 1 ? "🥇" : r.pos === 2 ? "🥈" : r.pos === 3 ? "🥉" : "";
+    let gl = "";
+    if(showGL){
+      const g = r.gl || 0;
+      gl = g > 0 ? `<span class="gl-up">▲${g}</span>` : g < 0 ? `<span class="gl-down">▼${-g}</span>` : "0";
+    }
+    return `<tr><td>${medal} ${r.pos}</td><td>${driverNameHtml(r.driver, colour, r.cha, true)}</td><td>${team ? teamNameHtml(team) : esc(r.team)}</td><td>${esc(r.gap)}</td>${showGL ? `<td>${gl}</td>` : ""}${showPts ? `<td>${r.points}</td>` : ""}</tr>`;
+  }).join("");
+  return `<div class="table-scroll"><table>${head}${body}</table></div>`;
+}
+/* Exposed for the automated markup tests (see tests/test_f1.py). */
+window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName };
 
 function colourPicker(elId, current, onPick){
   const el = $(elId); el.innerHTML = "";
@@ -275,9 +367,10 @@ function connect(){
       renderAll();
     } else if(m.type === "room_state"){ room = m.room; renderAll();
     } else if(m.type === "my_team"){ myTeam = m.team; renderMyTeam();
-    } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box) box.innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>` + m.rumours.map(r => `<tr><td>${esc(r.driver)}</td><td>${esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`).join("") + "</table></div>";
+    } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box) box.innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>` + m.rumours.map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; return `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join("") + "</table></div>";
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
     } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
+    } else if(m.type === "action"){ showOk(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
     } else if(m.type === "error"){ showErr(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
     } else if(m.type === "kicked"){ alert(m.message); location.reload(); }
   };
@@ -289,10 +382,50 @@ function send(obj){ if(ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); 
 function renderAll(){
   if(!room) return;
   const inGame = room.started;
+  const inResults = inGame && room.career && (room.career.phase === "qual_results" || room.career.phase === "race_results");
   $("screen-home").classList.toggle("hidden", true);
   $("screen-lobby").classList.toggle("hidden", inGame);
-  $("screen-game").classList.toggle("hidden", !inGame);
-  if(!inGame) renderLobby(); else renderGame();
+  $("screen-game").classList.toggle("hidden", !inGame || inResults);
+  $("screen-results").classList.toggle("hidden", !inResults);
+  if(!inGame) renderLobby();
+  else if(inResults) renderResults();
+  else renderGame();
+}
+
+/* v0.1 results pages: qualifying first, then the race, each with a
+   unanimous NEXT vote (all connected humans) and a host-only skip. */
+function renderResults(){
+  const c = room.career;
+  const isQual = c.phase === "qual_results";
+  $("results-stage-title").textContent = isQual ? "Qualifying Results" : "Race Results";
+  $("results-gp").textContent = (c.circuit || ("Round " + c.round)) + ` — ${c.year}`;
+  $("results-gp-sub").textContent = isQual
+    ? `Round ${c.round} of 12 · ${c.circuit_laps || "?"} laps · gaps from pole sitter`
+    : `Round ${c.round} of 12 · ${c.circuit_laps || "?"} laps · gaps from race winner`;
+  const rows = isQual ? (c.last_qual || []) : (c.last_race || []);
+  $("results-table").innerHTML = rows.length
+    ? classificationTable(rows, { showGL: !isQual })
+    : "<p class='note'>No results yet.</p>";
+  // Vote status: who has voted NEXT, who we are still waiting for.
+  const voted = new Set(c.results_vote || []);
+  const voters = c.teams.filter(t => t.owner_player_id && room.players.some(p => p.player_id === t.owner_player_id && p.connected));
+  const votedNames = [], waitingNames = [];
+  voters.forEach(t => {
+    const p = room.players.find(x => x.player_id === t.owner_player_id);
+    (voted.has(t.owner_player_id) ? votedNames : waitingNames).push(p ? p.nickname : t.name);
+  });
+  $("vote-status").innerHTML = `NEXT votes: ${votedNames.length}/${voters.length}` +
+    (votedNames.length ? `<br>Voted: ${votedNames.map(esc).join(", ")}` : "") +
+    (waitingNames.length ? `<br>Waiting for: ${waitingNames.map(esc).join(", ")}` : "<br>Everyone has voted ✓");
+  const iVoted = voted.has(myId);
+  const btn = $("btn-vote-next");
+  btn.disabled = iVoted;
+  btn.textContent = iVoted ? "✓ You voted NEXT — waiting for the others" : "▶ NEXT";
+  $("vote-note").textContent = isQual
+    ? "Everyone must vote NEXT to see the race results."
+    : "Everyone must vote NEXT to return to the dashboards for the next round.";
+  // Host-only override: only the host client ever sees this button.
+  $("btn-host-skip").classList.toggle("hidden", !room.is_host);
 }
 
 function renderLobby(){
@@ -331,7 +464,7 @@ function renderTeamList(){
     const btn = (!t.owner_player_id && !myT) ? ` <button data-team="${t.id}">Take this team</button>` : "";
     const mine = t.owner_player_id === myId ? " 👈 yours" : "";
     return `<div class="bar-row"><span class="colour-dot" style="background:${t.colour}"></span>
-      <b>${esc(t.name)}</b><span class="note">${d1 ? esc(d1.name) : "?"} / ${d2 ? esc(d2.name) : "?"}${owned}${mine}</span>${btn}</div>`;
+      <b>${teamNameHtml(t)}</b><span class="note">${d1 ? driverNameHtml(d1.name, t.colour, d1.cha, false) : "?"} / ${d2 ? driverNameHtml(d2.name, t.colour, d2.cha, false) : "?"}${owned}${mine}</span>${btn}</div>`;
   }).join("");
   document.querySelectorAll("[data-team]").forEach(b => b.onclick = () => send({type:"choose_team", team_id: b.dataset.team}));
   const canCustom = room.career_mode === "new" && !myT;
@@ -369,7 +502,7 @@ async function importFile(file, box){
 function renderGame(){
   const c = room.career;
   $("game-title").textContent = c.name;
-  $("game-sub").textContent = `Room ${room.code} · ${c.year} · Season ${c.season_index + 1} of 30 · Round ${c.round} of 12 · ${c.phase === "winter_break" ? "Winter break" : c.phase === "finished" ? "Career finished" : "Racing"}`;
+  $("game-sub").textContent = `Room ${room.code} · ${c.year} · Season ${c.season_index + 1} of 30 · Round ${c.round} of 12 — ${c.circuit || ""} · ${c.phase === "winter_break" ? "Winter break" : c.phase === "finished" ? "Career finished" : "Racing"}`;
   const nextKind = c.next_reg_kind || "Minor";
   $("reg-line").textContent = `Next reg change: ${c.next_reg_year} (${nextKind})`;
   $("reg-note").textContent = nextKind === "Major"
@@ -391,17 +524,11 @@ function renderGame(){
   if(c.phase === "round"){
     const adv = c.advanced || [];
     const humans = c.teams.filter(t => t.owner_player_id);
-    $("advanced-list").innerHTML = humans.map(t =>
-      `<span class="pill ${adv.includes(t.id) ? "adv" : "wait"}">${esc(t.name)}: ${adv.includes(t.id) ? "advanced ✓" : "not yet"}</span>`).join("");
-  }
-  // Results
-  const showRes = c.last_race && (c.round !== lastRound || c.phase !== lastPhase);
-  $("results-card").classList.toggle("hidden", !c.last_race);
-  if(c.last_race){
-    const table = rows => `<div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Time</th><th>Gap</th>${rows[0] && "points" in rows[0] ? "<th>Pts</th>" : ""}</tr>` +
-      rows.map(r => `<tr><td>${r.pos}</td><td>${esc(r.driver)}</td><td>${esc(r.team)}</td><td>${r.time}s</td><td>${esc(r.gap)}</td>${"points" in r ? `<td>${r.points}</td>` : ""}</tr>`).join("") + "</table></div>";
-    $("qual-table").innerHTML = c.last_qual ? table(c.last_qual) : "<p class='note'>No qualifying yet.</p>";
-    $("race-table").innerHTML = table(c.last_race);
+    const ready = humans.filter(t => adv.includes(t.id)).map(t => esc(t.name));
+    const waiting = humans.filter(t => !adv.includes(t.id)).map(t => esc(t.name));
+    $("advanced-list").innerHTML =
+      (ready.length ? `<span class="pill adv">Ready: ${ready.join(", ")} ✓</span>` : "") +
+      (waiting.length ? `<span class="pill wait">Waiting for: ${waiting.join(", ")}</span>` : "");
   }
   lastRound = c.round; lastPhase = c.phase;
   renderTabs();
@@ -410,7 +537,7 @@ function renderGame(){
 function renderMyTeam(){
   if(!myTeam){ $("my-team").innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby, or ask the host to restart the career setup.</p>"; return; }
   const t = myTeam;
-  const drivers = (t.drivers || []).map(d => d ? `${esc(d.name)} (${d.age}, rep ${Number(d.rep).toFixed(2)}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)` : "[empty seat]").join("<br>");
+  const drivers = (t.drivers || []).map(d => d ? `${driverNameHtml(d.name, t.colour, d.cha, false)} (${d.age}, rep ${Number(d.rep).toFixed(2)}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)` : "[empty seat]").join("<br>");
   const perfLine = room.chart_on && ("perf" in t) ? ` · Perf ${Number(t.perf).toFixed(1)} · Reliability ${(t.rel * 100).toFixed(1)}%` : "";
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
     · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}`;
@@ -431,15 +558,15 @@ function renderTabs(){
   const signBtns = d => [1,2].map(s => `<button data-sign="${d.id}" data-seat="${s}">Sign to seat ${s}</button>`).join(" ");
   $("market-box").innerHTML = `<p class="note">Signing costs the driver's market value${myTeam ? ", plus a contract-break fee (1 + salary × years left) if the seat is occupied." : ""} New contract: 2 years. Driver perf is hidden when the chart is off.</p>` +
     `<div class="table-scroll"><table><tr><th>Driver</th><th>Age</th><th>Rep</th><th>Titles</th><th>Status</th><th>MV</th><th></th></tr>` +
-    market.map(d => `<tr><td>${esc(d.name)}</td><td>${d.age}</td><td>${Number(d.rep).toFixed(2)}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.mv)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
+    market.map(d => `<tr><td>${driverNameHtml(d.name, null, d.cha, false)}</td><td>${d.age}</td><td>${Number(d.rep).toFixed(2)}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.mv)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => send({type:"sign_driver", driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat)}));
   // Standings
   const drv = [...c.drivers.filter(d => d.status === "f1")].sort((a,b) => b.points - a.points || (a.best_pos || 99) - (b.best_pos || 99));
   const teams = [...c.teams].sort((a,b) => b.points - a.points);
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    drv.map((d,i) => `<tr><td>${i+1}</td><td>${esc(d.name)}</td><td>${esc((teamById(d.team_id) || {}).name || "")}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`).join("") + "</table></div>" +
+    drv.map((d,i) => { const tm = teamById(d.team_id); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, tm ? tm.colour : null, d.cha, false)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th></tr>` +
-    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="colour-dot" style="background:${t.colour}"></span>${esc(t.name)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
+    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
   // Chart
   if(room.chart_on){
     const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
@@ -449,11 +576,27 @@ function renderTabs(){
   } else {
     $("chart-box").innerHTML = `<p class="note">The performance chart is OFF. No perf numbers are shown anywhere — judge teams on results only. The host can turn it back on in the lobby before the career starts.</p>`;
   }
-  // History
-  const hist = (c.race_history || []).slice(-12).reverse().map(r =>
-    `<div>${r.year} R${r.round}: ${r.top3.map((x,i) => `${i+1}. ${esc(x.driver)} (${esc(x.team)})`).join(" · ")}</div>`).join("") || "<p class='note'>No races yet.</p>";
-  const champs = (c.champion_history || []).map(h => `<div>${h.year}: ${esc(h.driver)} (${esc(h.team)}) — ${h.points} pts</div>`).join("") || "<p class='note'>No champions yet.</p>";
-  $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`; 
+  // History — every previous Grand Prix can be reopened with its full
+  // qualifying + race tables (v0.1). v0 saves have no full tables.
+  const histEntries = (c.race_history || []).slice().reverse();
+  const hist = histEntries.map((r, i) =>
+    `<div class="bar-row"><b>${r.year} R${r.round} — ${esc(r.circuit || ("Round " + r.round))}</b><span class="note">${r.top3.map((x,j) => `${j+1}. ${esc(x.driver)} (${esc(x.team)})`).join(" · ")}</span>
+     <button class="secondary" data-gp="${i}">View full GP</button></div>`).join("") || "<p class='note'>No races yet.</p>";
+  const champs = (c.champion_history || []).map(h => {
+    const tm = c.teams.find(t => t.name === h.team);
+    return `<div>${h.year}: ${driverNameHtml(h.driver, tm ? tm.colour : null, 0, false)} (${tm ? teamNameHtml(tm) : esc(h.team)}) — ${h.points} pts</div>`;
+  }).join("") || "<p class='note'>No champions yet.</p>";
+  let gpView = "";
+  if(viewingGP != null && histEntries[viewingGP]){
+    const r = histEntries[viewingGP];
+    const tables = (r.qual && r.race)
+      ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true })}`
+      : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
+    gpView = `<div class="card"><h3>${r.year} R${r.round} — ${esc(r.circuit || ("Round " + r.round))}</h3>${tables}<button class="secondary" id="btn-gp-back">← Back to history</button></div>`;
+  }
+  $("history-box").innerHTML = `<h3>Race history</h3>${hist}${gpView}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`;
+  document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
+  const gb = $("btn-gp-back"); if(gb) gb.onclick = () => { viewingGP = null; renderTabs(); };
   const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
   if(myTeam) renderMyTeam();
 }
@@ -474,6 +617,9 @@ $("btn-new-career").onclick = () => send({type:"new_career", name: $("career-nam
 $("btn-create-custom").onclick = () => send({type:"create_custom_team", name: $("custom-name").value.trim(), colour: myColour, driver1_id: $("custom-d1").value, driver2_id: $("custom-d2").value});
 $("btn-start-career").onclick = () => send({type:"start_career"});
 $("btn-advance").onclick = () => send({type:"advance"});
+$("btn-vote-next").onclick = () => send({type:"vote_next"});
+$("btn-host-skip").onclick = () => { if(confirm("Skip the vote and continue now?")) send({type:"host_skip"}); };
+$("btn-results-leave").onclick = () => { sessionStorage.removeItem("f1code"); sessionStorage.removeItem("f1player"); location.href = "/"; };
 $("btn-next-season").onclick = () => send({type:"start_next_season"});
 $("btn-research").onclick = () => send({type:"research", priority: $("res-priority").value, amount: parseFloat($("res-amount").value)});
 $("btn-develop").onclick = () => send({type:"develop"});
