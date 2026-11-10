@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.1 (beta)
+# F1 Team Manager Online — v0.1.1 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.1 is a beta:
+for playing together at the same time (not pass-and-play). v0.1.1 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -195,6 +195,30 @@ animated race view / lap-by-lap progression:** results still resolve on
 Advance, just as proper full-distance results on separate pages — that was
 deliberately left out of v0.1.
 
+## v0.1.1 — WebSocket connect race (live blocker, fixed)
+
+Live v0.1 served pages fine but Create Room / Join Room always failed in
+a real browser with "Not connected yet — try again in a second." Root
+cause: the home screen called `connect()` and then sent `create_room`
+after a fixed 300ms timeout; whenever the WebSocket handshake took
+longer than 300ms (common on Render's free tier, especially after a
+cold start) `send()` saw `readyState === 0` and errored, and every
+retry created a new orphaned socket and repeated the same race. The
+server even logged "connection open" for each attempt — the handshake
+did complete, just too late — and a Render restart did not help. Fix:
+messages now queue while the socket is connecting and flush on `open`
+(no fixed send timeouts anywhere); the socket reconnects with backoff
+(0.5s → 4s cap) even before the player has a room; only one socket is
+ever live (re-connecting closes the old one, and there is a single ping
+interval); the home screen shows the connection status ("Connecting…"
+→ "Connected ✓" / "Connection lost — retrying…", with a "still
+connecting — the free server can take ~50s to wake up" note after 10s);
+the page connects on load so the handshake is usually done before the
+player clicks; and a double-click on Create/Join cannot create two
+rooms. Also fixed the premature Advance toast: it said "Race weekend
+complete" before the race results page had been shown — it now says
+"Qualifying complete — results are in."
+
 ## Mobile + mouse
 
 The UI works the same with a mouse click or a mobile tap: every action is a
@@ -240,7 +264,10 @@ vote flow (unanimous, host override host-only, disconnect exclusion, vote
 persistence), reopening a previous GP from history with full tables,
 action confirmations (e.g. "Tuning set to +2 ✓"), the 12-round calendar,
 and driver-surname markup (bold/uppercase/team-coloured, free agents
-neutral) rendered in headless Chromium.
+neutral) rendered in headless Chromium, and v0.1.1: Create Room succeeds
+even when the WebSocket handshake takes 1.5s (queued while connecting,
+exactly one room per player, double-click safe), plus the corrected
+Advance toast wording.
 
 ## Known limits
 
