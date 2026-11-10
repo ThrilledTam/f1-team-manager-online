@@ -268,7 +268,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 2  # v0.1 save format
+        assert loaded["version"] == 3  # v0.2 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -461,7 +461,9 @@ def test_race_is_full_distance_with_plausible_gaps():
         from f1 import race as race_mod
         qual = race_mod.simulate_qual(c, rng=rng)
         qtimes = [d["qual_time"] for d, _ in qual]
-        assert qtimes[-1] - qtimes[0] <= 3.0  # qual gaps ~0-3s
+        # v0.2 form widens qual gaps a little (sim median 3.0s, max 4.1s
+        # over 120 races) — still a few seconds, not tens.
+        assert qtimes[-1] - qtimes[0] <= 4.5
         race_entries = race_mod.simulate_race(c, laps=57, rng=rng)
         rtimes = [d["race_time"] for d, _ in race_entries]
         winner = rtimes[0]
@@ -593,6 +595,7 @@ def test_old_v0_save_still_loads():
     assert migrated["circuit"] == "Australian Grand Prix"  # round 3
     assert migrated["circuit_laps"] == 58
     assert migrated["results_vote"] == [] and migrated["results_stage"] is None
+    assert migrated["prev_driver_order"] == []  # v0.2 field defaults
     assert migrated["race_history"][0]["circuit"] == "Round 1"
     assert migrated["race_history"][0]["qual"] is None  # no full tables in v0
     assert "time" not in migrated["last_qual"][0]
@@ -833,3 +836,161 @@ def test_create_room_succeeds_with_slow_websocket_handshake():
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# v0.2 — session form, replacement rules (revised), standings carry-over,
+# nickname placeholder
+# ---------------------------------------------------------------------------
+
+def _simulate_many_races(n=120, base_seed=10000):
+    """Run n seeded races (fresh career each) and return winner/pole
+    counters plus gap lists. Same setup as the /tmp/sim_v02.py tuning
+    script, so the measured numbers here match the README."""
+    from collections import Counter
+    from f1 import race as race_mod
+    wins, poles = Counter(), Counter()
+    q_gaps, r_gaps, totals = [], [], []
+    for i in range(n):
+        c = game.build_new_career("Sim", "H")
+        rng = random.Random(base_seed + i)
+        qual = race_mod.simulate_qual(c, rng=rng)
+        poles[qual[0][0]["name"]] += 1
+        qtimes = [d["qual_time"] for d, _ in qual]
+        q_gaps.append(qtimes[-1] - qtimes[0])
+        entries = race_mod.simulate_race(c, laps=57, rng=rng)
+        wins[entries[0][0]["name"]] += 1
+        rtimes = [d["race_time"] for d, _ in entries]
+        totals.append(rtimes[0])
+        r_gaps.append(rtimes[-1] - rtimes[0])
+    return wins, poles, q_gaps, r_gaps, totals
+
+
+def test_session_form_winner_diversity():
+    """The best combo must not win every race: over 120 seeded races
+    Antonelli/Mercedes wins 54 (45%) — in the 30-50% band — with 5
+    different winners (Russell 42, Leclerc 11, Hamilton 7, Verstappen 6),
+    while races stay a Grand Prix distance with plausible gaps."""
+    wins, _poles, _q, r_gaps, totals = _simulate_many_races()
+    assert 36 <= wins["Kimi Antonelli"] <= 60  # 30-50% of 120
+    assert len(wins) >= 4
+    assert all(4000 <= t <= 7000 for t in totals)
+    assert all(10 <= g <= 150 for g in r_gaps)
+
+
+def test_session_form_pole_diversity():
+    """Qualifying is less deterministic too: over the same 120 seeded
+    sessions Antonelli takes pole 45 times (38%), with 9 different poles,
+    and the P22 qual gap stays a few seconds (median 3.0s, max 4.1s)."""
+    _wins, poles, q_gaps, _r, _t = _simulate_many_races()
+    assert poles["Kimi Antonelli"] <= 60  # not every pole
+    assert len(poles) >= 5
+    q_sorted = sorted(q_gaps)
+    assert q_sorted[len(q_sorted) // 2] <= 3.5
+    assert q_sorted[-1] <= 5.0
+
+
+def test_midseason_replacement_keeps_outgoing_points():
+    """Revised v0.2 rule (real F1): the replaced driver KEEPS their
+    points and stays in the driver standings; the replacement begins
+    at 0; the team's constructor total still includes the points the
+    outgoing driver scored for that team — even after the next race."""
+    from f1 import race as race_mod
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    play_full_round(career, connected, seeded(5))
+    # Find a team with a points-scoring driver in a seat.
+    team = outgoing = None
+    for t in career["teams"]:
+        for d in game.team_drivers(career, t):
+            if d["points"] > 0:
+                team, outgoing = t, d
+                break
+        if team:
+            break
+    assert team is not None and outgoing is not None
+    out_points, out_wins, out_best = (outgoing["points"],
+                                      outgoing["season_wins"],
+                                      outgoing["best_pos"])
+    team_points_before = team["points"]
+    seat = 1 if team["driver1_id"] == outgoing["id"] else 2
+    # Give the incoming free agent points from an earlier stint, to
+    # prove they still start at 0 when signed.
+    incoming = game.free_agents(career)[0]
+    incoming["points"] = 13
+    incoming["season_wins"] = 1
+    incoming["best_pos"] = 4
+    team["money"] = 100.0
+    ok, msg = game.sign_driver(career, team["id"], incoming["id"], seat)
+    assert ok, msg
+    # Outgoing keeps everything and stays in the standings.
+    assert outgoing["status"] == "free" and outgoing["team_id"] is None
+    assert outgoing["points"] == out_points
+    assert outgoing["season_wins"] == out_wins
+    assert outgoing["best_pos"] == out_best
+    assert any(d["id"] == outgoing["id"]
+               for d in race_mod.driver_standings(career))
+    # Incoming is in the seat at 0.
+    assert incoming["status"] == "f1" and incoming["team_id"] == team["id"]
+    assert incoming["points"] == 0
+    assert incoming["season_wins"] == 0
+    assert incoming["best_pos"] is None
+    # Constructor total is unchanged by the swap (banked points).
+    assert team["points"] == team_points_before
+    assert team["points"] >= out_points
+    # ... and the banked points survive the next race too.
+    play_full_round(career, connected, seeded(6))
+    assert team["points"] >= out_points
+
+
+def test_standings_order_carries_into_next_season():
+    """Like real F1: the new season opens in last season's driver order
+    (everyone on 0 points), and once points are scored, points sort
+    takes over."""
+    from f1 import race as race_mod
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    rng = seeded(99)
+    for _ in range(12):
+        play_full_round(career, connected, rng)
+    assert career["phase"] == "winter_break"
+    order = career["prev_driver_order"]
+    assert len(order) == 22
+    # Fill empty human seats, then start the next season.
+    for team in game.human_teams(career):
+        for seat in game.empty_seats(career, team):
+            pool = game.free_agents(career) + game.f2_drivers(career)
+            ok, why = game.sign_driver(career, team["id"], pool[0]["id"], seat)
+            assert ok, why
+    ok, why = game.start_next_season(career)
+    assert ok, why
+    assert career["round"] == 1 and career["year"] == 2027
+    assert all(d["points"] == 0 for d in career["drivers"]
+               if d["status"] == "f1")
+    standings = race_mod.driver_standings(career)
+    # Every carried-over driver appears in exactly last season's order;
+    # newcomers (promoted F2 / fresh signings) come after them.
+    carried = [d["id"] for d in standings if d["id"] in order]
+    survivors = [did for did in order
+                 if did in {d["id"] for d in standings}]
+    assert carried == survivors
+    assert standings[0]["id"] == carried[0]  # top = best surviving finisher
+    # Newcomers all sit after every carried-over driver.
+    assert all(d["id"] not in order for d in standings[len(carried):])
+    # After round 1, points sort takes over: the race winner leads.
+    play_full_round(career, connected, seeded(21))
+    standings2 = race_mod.driver_standings(career)
+    assert standings2[0]["points"] == 25
+    assert standings2[0]["name"] == career["last_race"][0]["driver"]
+
+
+def test_nickname_placeholder_is_generic():
+    """The home nickname input must say exactly "e.g. [name]" and
+    Matthew's name must not appear as an example anywhere in the
+    frontend (comments mentioning his screenshots are not examples)."""
+    import re
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert 'placeholder="e.g. [name]"' in html
+    assert "e.g. Matthew" not in html
+    placeholders = re.findall(r'placeholder="([^"]*)"', html)
+    assert all("Matthew" not in p for p in placeholders)
