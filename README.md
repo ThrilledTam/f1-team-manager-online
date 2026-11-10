@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0 (beta)
+# F1 Team Manager Online — v0.1 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0 is a beta:
+for playing together at the same time (not pass-and-play). v0.1 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -52,12 +52,29 @@ The repo includes `render.yaml` for a free Web Service:
 4. **Race rounds (simultaneous turns):** every human acts at once on their
    own dashboard — Finances, Research, Develop Parts, Tuning, Reg Research,
    Driver Market, Lineup, Standings, Retirement Rumours, Race/Champion
-   History. Hit **Advance to Race Weekend** when you are done. When every
-   connected human has advanced, the AI teams act and the server runs
-   qualifying then the race, and shows who has / has not advanced yet.
-5. **Seasons:** 12 rounds per season, up to 30 seasons. At season end:
+   History. Every action confirms with a toast (e.g. "Tuning set to +2 ✓")
+   and the updated value shows immediately; a failed action shows an error
+   toast instead of failing silently. Hit **Advance to Race Weekend** when
+   you are done. The dashboard labels who is ready and who it is waiting
+   for ("Waiting for: …" / "Ready: …"). When every connected human has
+   advanced, the AI teams act and the server runs qualifying then the race.
+5. **Results pages (v0.1):** after a race weekend runs, everyone sees a full
+   **Qualifying Results** page first (POS, driver with team-coloured `|`
+   bar, CAR, GAP from pole — never absolute times), then a unanimous **NEXT**
+   vote (all connected humans must vote; the host has a skip button only
+   they can see) takes everyone to the full **Race Results** page (same
+   style, plus G/L vs qualifying and 🥇🥈🥉 medals). A second NEXT vote
+   returns everyone to their dashboards for the next round. Votes are stored
+   by player, so reconnecting mid-vote keeps your vote; if a voter
+   disconnects they drop out of the vote and the rest can finish it. Any
+   previous Grand Prix can be reopened from the dashboard's Race History
+   with its full qualifying + race tables.
+6. **Seasons:** 12 rounds per season, up to 30 seasons. At season end:
    champion, prize money, retirements, driver ageing, transfers, and a
    winter break where humans fill any empty seats before the next season.
+   Each round is a named Grand Prix from the 12-round calendar (see below);
+   the circuit name shows on the dashboard header, both results pages, and
+   in Race History.
 6. **Regulation research:** a minor reg change every year, a major one every
    4 years (2030, 2034, …). The dashboard always shows the next reg-change
    year and whether it is Minor or Major. Reg Research is a separate pool
@@ -92,7 +109,13 @@ The repo includes `render.yaml` for a free Web Service:
 - Race sim (`Race.py`): `lapSim` baseline 75.000, qual then race, supplier
   perf blending `(2*own + supplier)/3`, tuning + for driver 1 / − for
   driver 2 in qual (×4 in the race), race prize money
-  `1.95 − 0.025*pos` per driver, rep updates.
+  `1.95 − 0.025*pos` per driver, rep updates. **v0.1 race:** the race itself
+  is a real full-distance sum — see "Race time (v0.1)" below.
+- **2026 circuit calendar (v0.1, `f1/data.py` CALENDAR):** Bahrain 57,
+  Jeddah 50, Melbourne 58, Suzuka 53, Shanghai 56, Miami 57, Imola 63,
+  Monaco 78, Barcelona 66, Montreal 70, Spielberg 71, Silverstone 52.
+  The same 12 Grands Prix repeat every season; the circuit and lap count
+  are stored per round in saves and in race history.
 - Finances (`Main.py`): post-season injection `9.0 − 0.50*pos` (+1.50 if
   1st); per-race gains `(1.75−0.025*(pos*2)) + (1.75−0.025*((pos*2)−1))`;
   per-race driver cost `salary / 12`.
@@ -124,9 +147,30 @@ The repo includes `render.yaml` for a free Web Service:
 - **Custom teams are appended** to the grid (as in `Main.py`), and a custom
   team's reliability is 0.90 — the original passed `rel=6`, which is a bug.
 - **Custom-team perf** follows `Main.py`: `(best + 5 × worst) / 6`.
-- **Race time:** `Race.py`'s 80-lap loop overwrote the race time every lap,
-  so the effective result is one `lapSim` draw, then `(time + qualPos) * 3`.
-  v0 keeps that exact behaviour rather than inventing a new race model.
+- **Race time (v0.1 — changed with Matthew's approval):** `Race.py`'s
+  80-lap loop overwrote the race time every lap, so v0 races totalled
+  ~137s. v0.1 sums a real Grand Prix: each driver runs the circuit's lap
+  count, every lap is `95 − (driver_perf/20 + team_perf/80) ± tuning
+  (0.1s/lap per point, helps Driver 1 / hurts Driver 2) + N(0, 0.12)`,
+  plus a one-off 0.5s per qualifying position. A 57-lap race totals
+  ~5,000s (80+ min), P22 finishes ~80s behind, qualifying stays a single
+  `lapSim` draw per driver (gaps ~0–3s). The per-lap perf spread is
+  deliberately compressed (driver/20 + team/80) so a full race does not
+  produce gaps of hundreds of seconds. Absolute times are kept server-side
+  only for ordering — results payloads and history carry gaps only
+  (`LEADER` / `+x.xxxs`), never times. Qualifying keeps the original
+  `lapSim` maths.
+- **Driver-name colour (v0.1):** surnames are bold, UPPERCASED, and coloured
+  by team everywhere a driver name appears (results, standings, market,
+  lineup, history, rumours), with a coloured `|` bar in classification
+  tables and 🏆 + title count for champions; team names are coloured, with
+  the supplier suffix in the supplier's colour (e.g. McLaren-Mercedes).
+  Free agents / F2 drivers are bold + uppercase with no team colour.
+- **Save format v2 (v0.1):** saves now store the circuit per round, the
+  results stage/vote, and full qual+race tables per Grand Prix in
+  `race_history`. v0 saves (version 1) still load: the loader fills in the
+  circuit for the saved round, marks old history entries as having no full
+  tables, and strips any stored absolute times.
 - **Reliability** is a developed/displayed stat; the original race sim never
   used it for DNFs, so v0 does not either.
 - **Disconnected humans:** their team is AI-driven for that round so the
@@ -143,10 +187,13 @@ The repo includes `render.yaml` for a free Web Service:
   / expired contracts) before the next season; AI teams fill theirs
   automatically. The career ends after 30 seasons.
 
-## Out of scope for v0 (not built)
+## Out of scope for v0.1 (not built)
 
 Driver/team affiliates, Power Unit menu, contract extensions beyond the
-basic Driver Market signing above, 2025 season, 2027+ seasons.
+basic Driver Market signing above, 2025 season, 2027+ seasons. **No live
+animated race view / lap-by-lap progression:** results still resolve on
+Advance, just as proper full-distance results on separate pages — that was
+deliberately left out of v0.1.
 
 ## Mobile + mouse
 
@@ -159,7 +206,7 @@ breakpoint with full-width action buttons, 16px input text (so iOS does not
 auto-zoom), tables in horizontal-scroll containers, and all buttons/inputs
 at least 44px tall.
 
-**Mobile checks run for v0:** `tests/test_f1.py::test_mobile_friendly_markup`
+**Mobile checks run for v0.1:** `tests/test_f1.py::test_mobile_friendly_markup`
 asserts the viewport meta, 44px tap targets, responsive breakpoint,
 scrollable tables, and no hover/mouse/touch-only handlers. In addition, a
 headless-Chromium check at 360px wide (see below) loaded the home screen,
@@ -168,6 +215,10 @@ new career, picked a team, started the season and advanced to a race, and
 measured `scrollWidth` vs viewport width plus the rendered height of every
 visible button on the home, lobby, dashboard, standings and race-results
 screens — no horizontal overflow, all measured tap targets ≥ 44px.
+For v0.1 the same check (`/tmp/mobile_check_v01.py`, two real players)
+drives the whole results flow: qualifying page → unanimous NEXT vote →
+race page → NEXT vote → dashboard round 2 → reopening the Bahrain GP from
+Race History, checking overflow and tap targets on each screen.
 
 ## Tests
 
@@ -176,12 +227,20 @@ screens — no horizontal overflow, all measured tap targets ≥ 44px.
 ```
 
 `tests/test_f1.py` covers: new 2026 career (11 teams, correct drivers),
-simultaneous advance (race waits for all humans, then qual+race run and
-points change), reg-change properties (research helps but cannot cancel,
-floor holds, major > minor), save/load round-trip, chart-off hiding perf
-and results-based AI, lobby kick / host promotion / mid-career takeover
-over a real WebSocket, finances/research/develop/tuning/retirement
-formulas, a full 12-round season rollover, and the mobile markup checks.
+simultaneous advance (race waits for all humans, then the qualifying
+results page appears and the round only advances after the NEXT votes),
+reg-change properties (research helps but cannot cancel, floor holds,
+major > minor), save/load round-trip (v0.1 format + old v0 saves still
+load), chart-off hiding perf and results-based AI, lobby kick / host
+promotion / mid-career takeover over a real WebSocket, finances/research/
+develop/tuning/retirement formulas, a full 12-round season rollover, the
+mobile markup checks, and v0.1: results payloads never contain absolute
+times, full-distance race totals (~5,000s) with plausible gaps, the NEXT
+vote flow (unanimous, host override host-only, disconnect exclusion, vote
+persistence), reopening a previous GP from history with full tables,
+action confirmations (e.g. "Tuning set to +2 ✓"), the 12-round calendar,
+and driver-surname markup (bold/uppercase/team-coloured, free agents
+neutral) rendered in headless Chromium.
 
 ## Known limits
 

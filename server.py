@@ -186,6 +186,9 @@ def room_public(room, viewer_player_id=None):
     return {
         "code": room["code"],
         "host_id": room["host_id"],
+        # v0.1: the host override button is only ever sent to the host
+        # client — the frontend shows it when this flag is true.
+        "is_host": viewer_player_id == room["host_id"],
         "players": [
             {"player_id": p["player_id"], "nickname": p["nickname"],
              "colour": p["colour"], "connected": p["connected"],
@@ -221,6 +224,8 @@ def my_team_public(room, player_id):
             d = dict(d)
             if not room["chart_on"]:
                 d.pop("perf", None)
+            d.pop("qual_time", None)
+            d.pop("race_time", None)
             out["drivers"].append(d)
     out["finances"] = game.finances_view(career, team)
     out["empty_seats"] = game.empty_seats(career, team)
@@ -290,7 +295,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.1"}
 
 
 @app.get("/api/saves")
@@ -517,6 +522,8 @@ async def ws_endpoint(ws: WebSocket):
                     if not ok:
                         await send_error(ws, why)
                     else:
+                        await ws.send_json({"type": "action", "action": "choose_team",
+                                            "ok": True, "message": why})
                         await broadcast(room)
 
             elif mtype == "create_custom_team":
@@ -536,6 +543,8 @@ async def ws_endpoint(ws: WebSocket):
                     if not ok:
                         await send_error(ws, why)
                     else:
+                        await ws.send_json({"type": "action", "action": "create_custom_team",
+                                            "ok": True, "message": why})
                         await broadcast(room)
 
             elif mtype == "start_career":
@@ -558,6 +567,35 @@ async def ws_endpoint(ws: WebSocket):
                         if career.get("phase") not in ("round", "winter_break"):
                             career["phase"] = "round"
                         await broadcast(room)
+
+            elif mtype == "vote_next":
+                # v0.1: unanimous NEXT vote on a results page.
+                if not room["started"] or not career:
+                    await send_error(ws, "The career has not started yet.")
+                else:
+                    ok, _advanced, why = game.vote_next(
+                        career, player["player_id"], connected_ids(room), rng=rng)
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": "vote_next",
+                                            "ok": True, "message": why})
+                    await broadcast(room)
+
+            elif mtype == "host_skip":
+                # v0.1: host-only override — advances the results stage now.
+                if not room["started"] or not career:
+                    await send_error(ws, "The career has not started yet.")
+                else:
+                    ok, _advanced, why = game.host_skip_results(
+                        career, player["player_id"], connected_ids(room),
+                        is_host, rng=rng)
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": "host_skip",
+                                            "ok": True, "message": why})
+                    await broadcast(room)
 
             elif mtype in ("research", "develop", "tuning", "reg_research",
                            "sign_driver", "advance"):
@@ -587,6 +625,11 @@ async def ws_endpoint(ws: WebSocket):
                             career, team["id"], connected_ids(room), rng=rng)
                     if not ok:
                         await send_error(ws, why)
+                    else:
+                        # v0.1: confirm every action back to the actor so
+                        # the frontend can toast it (e.g. "Tuning set to +2 ✓").
+                        await ws.send_json({"type": "action", "action": mtype,
+                                            "ok": True, "message": why})
                     await broadcast(room)
 
             elif mtype == "start_next_season":
@@ -596,6 +639,10 @@ async def ws_endpoint(ws: WebSocket):
                     ok, why = game.start_next_season(career)
                     if not ok:
                         await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": "start_next_season",
+                                            "ok": True,
+                                            "message": f"Season {career['year']} starts ✓"})
                     await broadcast(room)
 
             else:
@@ -608,6 +655,11 @@ async def ws_endpoint(ws: WebSocket):
             player.pop("ws", None)
         if room is not None:
             promote_host_if_needed(room)
+            # v0.1: a disconnect shrinks the NEXT-vote voter set, so a
+            # stalled vote can now complete (the disconnected team is AI).
+            career = room.get("career")
+            if career and career.get("phase") in ("qual_results", "race_results"):
+                game.check_results_vote(career, connected_ids(room))
             if not any(p["connected"] for p in room["players"]):
                 room["empty_since"] = time.time()
             await broadcast(room)
