@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.1.1</title>
+<title>F1 Team Manager Online — v0.2</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -81,11 +81,11 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.1.1 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.2 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
-    <label>Your nickname<br><input id="home-nick" placeholder="e.g. Matthew" maxlength="20"></label><br>
+    <label>Your nickname<br><input id="home-nick" placeholder="e.g. [name]" maxlength="20"></label><br>
     <label>Your colour</label>
     <div id="home-colours"></div>
     <div style="margin-top:10px">
@@ -630,8 +630,17 @@ function renderTabs(){
     `<div class="table-scroll"><table><tr><th>Driver</th><th>Age</th><th>Rep</th><th>Titles</th><th>Status</th><th>MV</th><th></th></tr>` +
     market.map(d => `<tr><td>${driverNameHtml(d.name, null, d.cha, false)}</td><td>${d.age}</td><td>${Number(d.rep).toFixed(2)}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.mv)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => send({type:"sign_driver", driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat)}));
-  // Standings
-  const drv = [...c.drivers.filter(d => d.status === "f1")].sort((a,b) => b.points - a.points || (a.best_pos || 99) - (b.best_pos || 99));
+  // Standings — v0.2: a replaced driver keeps their points and stays in
+  // the standings (free agents with points this season are listed, with
+  // no team), and ties break by last season's finishing order
+  // (prev_driver_order), then best finish, perf, name — same rule as
+  // the server's driver_standings().
+  const prevOrder = c.prev_driver_order || [];
+  const prevRank = d => { const i = prevOrder.indexOf(d.id); return i === -1 ? prevOrder.length : i; };
+  const drv = [...c.drivers.filter(d => d.status === "f1" || (d.status === "free" && d.points > 0))]
+    .sort((a, b) => b.points - a.points || prevRank(a) - prevRank(b)
+      || (a.best_pos || 99) - (b.best_pos || 99)
+      || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name));
   const teams = [...c.teams].sort((a,b) => b.points - a.points);
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     drv.map((d,i) => { const tm = teamById(d.team_id); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, tm ? tm.colour : null, d.cha, false)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
