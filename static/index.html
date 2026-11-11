@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.3</title>
+<title>F1 Team Manager Online — v0.3.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -62,8 +62,31 @@
   .market-seats { display:flex; gap:6px; flex-wrap:wrap; }
   .market-seat { display:flex; flex-direction:column; align-items:flex-start; }
   .market-seat .note { font-size:12px; }
-  .sign-confirm { background:#0e2a18; border:1px solid #238636; border-radius:8px; padding:10px; margin:10px 0; }
-  .sign-confirm button { min-height:44px; }
+  /* v0.3.1 minimizable pop-ups: the full-GP view, the contract
+     picker and confirm dialogs are overlay panels with a header bar
+     (minimize "—" + close "×"); minimizing collapses the panel to a
+     floating chip at the bottom-left, and clicking the chip restores
+     it exactly as it was. Buttons are 44px so they are easy to hit
+     with mouse or touch. */
+  .ov-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:60; }
+  .ov-panel { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:min(920px, 94vw); max-height:86vh; z-index:61; display:flex; flex-direction:column;
+    background:#161b22; border:1px solid #30363d; border-radius:10px; box-shadow:0 8px 32px rgba(0,0,0,.6); }
+  /* Minimized panels are display:flex, which outranks the plain
+     .hidden utility — this keeps .hidden working on them. */
+  .ov-panel.hidden { display:none; }
+  .ov-head { display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #30363d; flex:0 0 auto; }
+  .ov-head h3 { margin:0; flex:1; font-size:16px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ov-head button { margin:0; min-width:44px; min-height:44px; padding:6px 10px; font-size:18px; line-height:1; background:#30363d; }
+  .ov-head button:hover { background:#3d444d; }
+  .ov-body { overflow:auto; padding:14px; }
+  #ov-chips { position:fixed; left:12px; bottom:12px; z-index:70; display:flex; flex-direction:column; gap:8px; max-width:calc(100vw - 24px); }
+  .ov-chip { display:flex; align-items:center; gap:6px; background:#21262d; border:1px solid #1f6feb; color:#e6edf3; border-radius:22px; padding:4px 6px 4px 14px; font-size:14px; cursor:pointer; min-height:44px; max-width:min(340px, 72vw); box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  .ov-chip span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .ov-chip button { margin:0; min-width:40px; min-height:40px; background:transparent; border-radius:50%; font-size:16px; }
+  @media (max-width: 600px) {
+    .ov-panel { width:96vw; max-height:90vh; }
+  }
   /* v0.3 race history grid: seasons as rows, R1..R12 as columns, top-3
      initials stacked in each cell (Matthew's PyCharm layout). */
   .hist-grid td, .hist-grid th { padding:4px 6px; font-size:13px; text-align:center; vertical-align:top; }
@@ -100,7 +123,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.3 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.3.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -118,6 +141,11 @@
       <button id="btn-exit" class="secondary">Exit</button>
     </div>
     <div id="home-settings" class="hidden" style="margin-top:10px">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
+        <b style="flex:1">Settings</b>
+        <button type="button" class="secondary" id="btn-settings-min" title="Minimize" aria-label="Minimize settings" style="min-width:44px; min-height:44px; margin:0">—</button>
+        <button type="button" class="secondary" id="btn-settings-close" title="Close" aria-label="Close settings" style="min-width:44px; min-height:44px; margin:0">×</button>
+      </div>
       <label><input type="checkbox" id="set-chart" checked> Performance bar chart ON by default
       <span class="note">(the host can change this in the lobby; when OFF, nobody sees perf numbers)</span></label>
       <p class="note">Seasons: 2026 only in v0. 2027 / 2028 come later.</p>
@@ -285,6 +313,12 @@
 <div id="toasts"></div>
 
 </div>
+<!-- v0.3.1 minimizable pop-ups: overlay panels + backdrop + chips.
+     Panels are created here by JS, outside the dashboard markup, so
+     a tab re-render never wipes an open pop-up. -->
+<div id="ov-backdrop" class="ov-backdrop hidden"></div>
+<div id="ov-root"></div>
+<div id="ov-chips"></div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -295,6 +329,218 @@ let chartDefault = true, lastRound = null, lastPhase = null, viewingGP = null;
    pick the contract length (1–4 years). pendingSign holds the seat
    the player is about to sign into until they pick (or cancel). */
 let pendingSign = null;
+
+/* ---- v0.3.1 minimizable pop-ups ----
+   Every pop-up — the full-GP view, the contract picker, confirm
+   dialogs, and the home settings panel — gets a minimize ("—") and
+   a close ("×") button. Minimizing collapses it to a floating chip
+   at the bottom-left showing its title; clicking the chip restores
+   it exactly as it was, and the dashboard underneath stays usable.
+   Escape closes the topmost open pop-up; clicking the backdrop
+   outside a modal overlay does the same. Overlay panels live in
+   #ov-root (outside the dashboard markup) so a tab re-render never
+   wipes an open pop-up; the settings panel is an "inline" pop-up
+   whose element already exists on the home screen. */
+let currentScreen = "home";
+const popupStack = []; // open pop-ups, topmost last: {id, kind, title, el, onClose, onConfirm, bodyKey, minimized}
+function popupById(id){ return popupStack.find(p => p.id === id); }
+function clearPopupState(id){
+  if(id === "gp") viewingGP = null;
+  if(id === "sign") pendingSign = null;
+}
+function syncBackdrop(){
+  const anyOpen = popupStack.some(p => p.kind === "overlay" && !p.minimized);
+  $("ov-backdrop").classList.toggle("hidden", !anyOpen);
+}
+function chipFor(id){ return document.querySelector(`#ov-chips [data-chip="${id}"]`); }
+function showChip(p){
+  let chip = chipFor(p.id);
+  if(!chip){
+    chip = document.createElement("div");
+    chip.className = "ov-chip";
+    chip.dataset.chip = p.id;
+    chip.innerHTML = `<span></span><button type="button" data-chip-close="${p.id}" title="Close" aria-label="Close">×</button>`;
+    $("ov-chips").appendChild(chip);
+  }
+  chip.querySelector("span").textContent = "▸ " + p.title;
+  chip.classList.remove("hidden");
+}
+function hideChip(id){ const chip = chipFor(id); if(chip) chip.remove(); }
+function minimizePopup(id){
+  const p = popupById(id);
+  if(!p || p.minimized) return;
+  p.minimized = true;
+  p.el.classList.add("hidden");
+  showChip(p);
+  syncBackdrop();
+}
+function restorePopup(id){
+  const p = popupById(id);
+  if(!p || !p.minimized) return;
+  p.minimized = false;
+  p.el.classList.remove("hidden");
+  hideChip(id);
+  syncBackdrop();
+}
+function closePopup(id, opts){
+  const i = popupStack.findIndex(p => p.id === id);
+  if(i === -1) return;
+  const p = popupStack[i];
+  popupStack.splice(i, 1);
+  if(p.kind === "overlay" && p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el);
+  if(p.kind === "inline" && p.el) p.el.classList.add("hidden");
+  hideChip(id);
+  clearPopupState(id);
+  syncBackdrop();
+  if(!(opts && opts.silent) && p.onClose) p.onClose();
+}
+function closeAllPopups(opts){ [...popupStack].forEach(p => closePopup(p.id, opts)); }
+function topPopup(){
+  for(let i = popupStack.length - 1; i >= 0; i--)
+    if(!popupStack[i].minimized) return popupStack[i];
+  return null;
+}
+/* Re-render an overlay panel's body from current state. A bodyKey
+   (data the panel shows) skips the re-render when nothing changed,
+   so an open panel keeps its scroll position across room updates. */
+function renderOverlayBody(p){
+  if(p.id === "confirm") return; // body is set by openConfirm only
+  const body = p.el.querySelector(".ov-body");
+  let html = "", key = "";
+  if(p.id === "gp"){
+    const r = viewingGP != null && room && room.career ? room.career.race_history[viewingGP] : null;
+    if(!r){ closePopup("gp", {silent:true}); return; }
+    key = `gp:${r.year}:${r.round}:${(r.qual || []).length}:${(r.race || []).length}`;
+    if(p.bodyKey === key) return;
+    const tables = (r.qual && r.race)
+      ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true })}`
+      : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
+    html = `${tables}<p><button class="secondary" id="btn-gp-back">← Back to history</button></p>`;
+  } else if(p.id === "sign"){
+    const pd = pendingSign ? driverById(pendingSign.driver_id) : null;
+    const pq = (pendingSign && room && room.career) ? ((room.career.market_costs || {})[pendingSign.driver_id] || {})[String(pendingSign.seat)] : null;
+    if(!pd || !pq){ closePopup("sign", {silent:true}); return; }
+    key = `sign:${pd.id}:${pendingSign.seat}:${pq.total}:${myTeam ? myTeam.money : 0}`;
+    if(p.bodyKey === key) return;
+    const costTxt = pq.total <= 0 ? "Free" : money(pq.total) + " break fee";
+    html = `<b>Sign ${esc(pd.name)} into Seat ${pendingSign.seat}?</b>
+      <span class="note">Cost: ${costTxt} · Salary ${money(pd.salary)}/season (paid ${money(pd.salary / 12)} after each race).</span><br>
+      <span class="note">Pick the contract length:</span>
+      ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
+      <button class="secondary" id="btn-sign-cancel">Cancel</button>`;
+  }
+  p.bodyKey = key;
+  body.innerHTML = html;
+}
+function openOverlay(id, title){
+  let p = popupById(id);
+  if(!p){
+    p = {id, kind:"overlay", title, minimized:false, bodyKey:null, onClose:null, el:null};
+    const el = document.createElement("div");
+    el.className = "ov-panel";
+    el.dataset.overlay = id;
+    el.innerHTML = `<div class="ov-head"><h3></h3>
+      <button type="button" data-ov-min="${id}" title="Minimize" aria-label="Minimize">—</button>
+      <button type="button" data-ov-close="${id}" title="Close" aria-label="Close">×</button></div>
+      <div class="ov-body"></div>`;
+    $("ov-root").appendChild(el);
+    p.el = el;
+    popupStack.push(p);
+  }
+  p.title = title;
+  p.el.querySelector(".ov-head h3").textContent = title;
+  if(p.minimized) showChip(p);
+  else p.el.classList.remove("hidden");
+  renderOverlayBody(p);
+  syncBackdrop();
+  return p;
+}
+let confirmSeq = 0;
+function openConfirm(title, message, onYes){
+  const p = openOverlay("confirm", title);
+  p.message = message; p.onConfirm = onYes; p.bodyKey = "confirm:" + (++confirmSeq);
+  p.onClose = null;
+  p.el.querySelector(".ov-body").innerHTML =
+    `<p>${esc(message)}</p><p><button data-confirm-yes>Yes</button> <button class="secondary" data-confirm-no>Cancel</button></p>`;
+  syncBackdrop();
+}
+function openInlinePopup(id, title){
+  let p = popupById(id);
+  if(!p){
+    p = {id, kind:"inline", title, el: $("home-settings"), minimized:false, bodyKey:null, onClose:null};
+    popupStack.push(p);
+  }
+  p.title = title;
+  p.minimized = false;
+  p.el.classList.remove("hidden");
+  hideChip(id);
+  return p;
+}
+function toggleInlinePopup(id, title){
+  const p = popupById(id);
+  const el = $("home-settings");
+  if(p && !p.minimized && !el.classList.contains("hidden")) closePopup(id);
+  else openInlinePopup(id, title);
+}
+/* Keep the two state-driven overlays in sync with the game state.
+   Called from renderTabs on every state update: the full-GP overlay
+   follows viewingGP, the sign overlay follows pendingSign. A
+   minimized pop-up stays minimized (its chip title is updated). */
+function syncOverlays(){
+  if(viewingGP != null && room && room.career && room.career.race_history[viewingGP]){
+    const r = room.career.race_history[viewingGP];
+    const p = openOverlay("gp", `${r.year} R${r.round} — ${r.circuit || ("Round " + r.round)}`);
+    p.onClose = () => { viewingGP = null; renderTabs(); };
+  } else if(popupById("gp")){
+    closePopup("gp", {silent:true});
+  }
+  if(pendingSign && myTeam){
+    const pd = driverById(pendingSign.driver_id);
+    const p = openOverlay("sign", pd ? `Sign ${pd.name} — Seat ${pendingSign.seat}` : "Sign driver");
+    p.onClose = () => { pendingSign = null; renderTabs(); };
+  } else if(popupById("sign")){
+    closePopup("sign", {silent:true});
+  }
+}
+document.addEventListener("keydown", e => {
+  if(e.key === "Escape"){
+    const top = topPopup();
+    if(top){ closePopup(top.id); e.preventDefault(); }
+  }
+});
+$("ov-backdrop").addEventListener("click", () => {
+  const top = topPopup();
+  if(top && top.kind === "overlay") closePopup(top.id);
+});
+$("ov-root").addEventListener("click", e => {
+  const minBtn = e.target.closest("[data-ov-min]");
+  if(minBtn){ minimizePopup(minBtn.dataset.ovMin); return; }
+  const closeBtn = e.target.closest("[data-ov-close]");
+  if(closeBtn){ closePopup(closeBtn.dataset.ovClose); return; }
+  if(e.target.closest("#btn-gp-back")){ closePopup("gp"); return; }
+  if(e.target.closest("#btn-sign-cancel")){ closePopup("sign"); return; }
+  const yrs = e.target.closest("[data-contract-years]");
+  if(yrs){
+    const p = pendingSign; pendingSign = null;
+    closePopup("sign", {silent:true});
+    if(p) send({type:"sign_driver", driver_id: p.driver_id, seat: p.seat, contract_years: parseInt(yrs.dataset.contractYears)});
+    return;
+  }
+  if(e.target.closest("[data-confirm-yes]")){
+    const p = popupById("confirm");
+    const onYes = p ? p.onConfirm : null;
+    closePopup("confirm", {silent:true});
+    if(onYes) onYes();
+    return;
+  }
+  if(e.target.closest("[data-confirm-no]")){ closePopup("confirm"); return; }
+});
+$("ov-chips").addEventListener("click", e => {
+  const x = e.target.closest("[data-chip-close]");
+  if(x){ closePopup(x.dataset.chipClose); return; }
+  const chip = e.target.closest("[data-chip]");
+  if(chip) restorePopup(chip.dataset.chip);
+});
 
 function showErr(box, msg){ toast(msg, true); const el = $(box); if(!el) return; el.innerHTML = `<div class="err">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 6000); }
 function showOk(box, msg){ toast(msg, false); const el = $(box); if(!el) return; el.innerHTML = `<div class="ok">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 4000); }
@@ -323,7 +569,10 @@ function standingTeamFor(d){
    in normal case, SURNAME bold + UPPERCASE in the team colour, with a
    coloured '|' bar next to the name in classification tables, and a trophy
    + title count for world champions. Free agents / F2 drivers get bold +
-   uppercase with NO team colour (neutral). */
+   uppercase with NO team colour (neutral). v0.3.1: the bar colour can be
+   given separately from the name colour (barColour) — a free agent with
+   points keeps the bar in their LAST team's colour in the standings
+   while their surname stays uncoloured. */
 function splitName(name){
   const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
   const last = parts.pop() || "";
@@ -336,9 +585,10 @@ function driverInitials(name){
   const first = f.first ? f.first[0].toUpperCase() : "?";
   return first + "." + f.last.slice(0, 3).toUpperCase();
 }
-function driverNameHtml(name, teamColour, cha, withBar){
+function driverNameHtml(name, teamColour, cha, withBar, barColour){
   const f = splitName(name);
-  const bar = (withBar && teamColour) ? `<span class="team-bar" style="color:${teamColour}">|</span> ` : "";
+  const barCol = barColour || teamColour;
+  const bar = (withBar && barCol) ? `<span class="team-bar" style="color:${barCol}">|</span> ` : "";
   const style = teamColour ? ` style="color:${teamColour}"` : "";
   const trophy = cha ? ` <span class="trophy" title="${cha} world title${cha > 1 ? "s" : ""}">🏆${cha}</span>` : "";
   return `${bar}<span>${esc(f.first)}</span> <span class="surname"${style}>${esc(f.last.toUpperCase())}</span>${trophy}`;
@@ -490,6 +740,11 @@ function renderAll(){
   if(!room) return;
   const inGame = room.started;
   const inResults = inGame && room.career && (room.career.phase === "qual_results" || room.career.phase === "race_results");
+  // Pop-ups belong to one screen: changing screen (home → lobby →
+  // game → results) closes them, so a stale panel never floats over
+  // the new screen.
+  const screen = !inGame ? "lobby" : inResults ? "results" : "game";
+  if(screen !== currentScreen){ closeAllPopups({silent:true}); currentScreen = screen; }
   $("screen-home").classList.toggle("hidden", true);
   $("screen-lobby").classList.toggle("hidden", inGame);
   $("screen-game").classList.toggle("hidden", !inGame || inResults);
@@ -589,12 +844,15 @@ function renderSaves(saves){
     `<div class="bar-row"><b>${esc(s.name)}</b><span class="note">${s.year} · Round ${s.round} · saved ${String(s.saved_at || "").slice(0,10)}</span>
      <button data-load="${s.save_id}">Load</button>
      <button class="secondary" data-export="${s.save_id}">Export</button>
-     <button class="danger" data-del="${s.save_id}">Delete</button></div>`).join("")
+     <button class="danger" data-del="${s.save_id}" data-del-name="${esc(s.name)}">Delete</button></div>`).join("")
     : `<p class="note">No saves yet.</p>`;
   if($("saves-list")) $("saves-list").innerHTML = html;
   if($("saves-list-game")) $("saves-list-game").innerHTML = html;
   document.querySelectorAll("[data-load]").forEach(b => b.onclick = () => send({type:"load_save", save_id: b.dataset.load}));
-  document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { if(confirm("Delete this save?")) send({type:"delete_save", save_id: b.dataset.del}); });
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => {
+    openConfirm("Delete save", `Delete the save "${b.dataset.delName || "this save"}"? This cannot be undone.`,
+      () => send({type:"delete_save", save_id: b.dataset.del}));
+  });
   document.querySelectorAll("[data-export]").forEach(b => b.onclick = () => window.open("/api/export/" + b.dataset.export, "_blank"));
 }
 function refreshSaves(){ send({type:"list_saves"}); }
@@ -684,34 +942,25 @@ function renderTabs(){
     return `<div class="market-seat">${btn}<span class="note">${breakdown}</span></div>`;
   };
   const signBtns = d => `<div class="market-seats">${[1, 2].map(s => costCell(d, s)).join("")}</div>`;
-  let confirmHtml = "";
-  if(pendingSign && myTeam){
-    const pd = driverById(pendingSign.driver_id);
-    const pq = (marketCosts[pendingSign.driver_id] || {})[String(pendingSign.seat)];
-    const costTxt = pq ? (pq.total <= 0 ? "Free" : money(pq.total) + " break fee") : "";
-    confirmHtml = `<div class="sign-confirm"><b>Sign ${pd ? esc(pd.name) : "?"} into Seat ${pendingSign.seat}?</b>
-      <span class="note">Cost: ${costTxt} · Salary ${pd ? money(pd.salary) : ""}/season (paid ${pd ? money(pd.salary / 12) : ""} after each race).</span><br>
-      <span class="note">Pick the contract length:</span>
-      ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
-      <button class="secondary" id="btn-sign-cancel">Cancel</button></div>`;
-  }
-  $("market-box").innerHTML = confirmHtml +
+  $("market-box").innerHTML =
     `<p class="note">Signing is free — no upfront cost. If a seat is occupied, breaking that driver's contract costs (rounds left × salary ÷ 12) + $2.0M; an empty seat is free. A driver's MV is their salary per season, paid after each race. Pick 1–4 contract years when you sign. Driver perf is hidden when the chart is off.</p>` +
     `<div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
     market.map(d => `<tr><td>${driverNameHtml(d.name, null, d.cha, false)}</td><td>${d.age}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => { pendingSign = { driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat) }; renderTabs(); });
-  document.querySelectorAll("[data-contract-years]").forEach(b => b.onclick = () => {
-    const p = pendingSign; pendingSign = null;
-    if(p) send({type:"sign_driver", driver_id: p.driver_id, seat: p.seat, contract_years: parseInt(b.dataset.contractYears)});
-  });
-  const cancelBtn = $("btn-sign-cancel"); if(cancelBtn) cancelBtn.onclick = () => { pendingSign = null; renderTabs(); };
+  // (The contract picker itself is an overlay pop-up now — its
+  // buttons are wired by the #ov-root click delegation, and its
+  // visibility follows pendingSign via syncOverlays below.)
   // Standings — v0.2: a replaced driver keeps their points and stays in
   // the standings (free agents with points this season are listed), and
   // ties break by last season's finishing order (prev_driver_order),
   // then best finish, perf, name — same rule as the server's
   // driver_standings(). v0.2.1: a free agent's team column shows the
   // last team they raced for; their name stays uncoloured (v0.1 rule:
-  // free agents get bold + uppercase, no team colour).
+  // free agents get bold + uppercase, no team colour). v0.3.1: the
+  // free agent's row still gets the '|' bar, in the LAST team's
+  // colour — the bar colour is passed separately from the name colour
+  // (see driverNameHtml), fixing the live v0.3 playtest bug where a
+  // replaced driver's standings row had no bar at all.
   const prevOrder = c.prev_driver_order || [];
   const prevRank = d => { const i = prevOrder.indexOf(d.id); return i === -1 ? prevOrder.length : i; };
   const drv = [...c.drivers.filter(d => d.status === "f1" || (d.status === "free" && d.points > 0))]
@@ -720,7 +969,7 @@ function renderTabs(){
       || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name));
   const teams = [...c.teams].sort((a,b) => b.points - a.points);
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
+    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th></tr>` +
     teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
   // Chart
@@ -737,7 +986,9 @@ function renderTabs(){
   // starts), columns = R1..R12. Each cell shows the top 3 finishers'
   // initials (L.HAM), each coloured by the team they raced for at the
   // time. Unplayed rounds show a dash. CLICKING a cell opens the full
-  // Grand Prix (qualifying + race tables), the same view as before.
+  // Grand Prix (qualifying + race tables) as a minimizable overlay
+  // pop-up (v0.3.1) — it can be minimized to a chip, closed, or
+  // dismissed with Escape, like every other pop-up.
   const histByKey = {};
   (c.race_history || []).forEach((r, idx) => { histByKey[r.year + "-" + r.round] = idx; });
   const seasons = [];
@@ -775,19 +1026,14 @@ function renderTabs(){
         return `<tr><td>${h.year}</td><td>${driverNameHtml(h.driver, tm ? tm.colour : null, 0, false)}</td><td>${age}</td><td>${tm ? teamNameHtml(tm) : esc(h.team || "")}</td><td>${h.points}</td><td>${trophies}</td><td>${wt ? teamNameHtml(wt) : esc(h.winning_team || "—")}</td></tr>`;
       }).join("") + "</table></div>"
     : "<p class='note'>No champions yet.</p>";
-  let gpView = "";
-  if(viewingGP != null && (c.race_history || [])[viewingGP]){
-    const r = c.race_history[viewingGP];
-    const tables = (r.qual && r.race)
-      ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true })}`
-      : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
-    gpView = `<div class="card"><h3>${r.year} R${r.round} — ${esc(r.circuit || ("Round " + r.round))}</h3>${tables}<button class="secondary" id="btn-gp-back">← Back to history</button></div>`;
-  }
-  $("history-box").innerHTML = `<h3>Race history</h3>${hist}${gpView}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`;
+  // (The full-GP view is an overlay pop-up now — clicking a cell
+  // sets viewingGP and syncOverlays opens the panel; the "Back to
+  // history" button inside it is wired by the #ov-root delegation.)
+  $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`;
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
-  const gb = $("btn-gp-back"); if(gb) gb.onclick = () => { viewingGP = null; renderTabs(); };
   const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
   if(myTeam) renderMyTeam();
+  syncOverlays();
 }
 
 // ---- wiring ----
@@ -797,7 +1043,9 @@ function renderTabs(){
 // is answered with a "joined" or an "error").
 $("btn-create").onclick = () => { if(joinPending) return; joinPending = true; const n = $("home-nick").value.trim() || "Player"; send({type:"create_room", nickname:n, colour:myColour}); };
 $("btn-join").onclick = () => { if(joinPending) return; const n = $("home-nick").value.trim() || "Player"; const code = $("home-code").value.trim().toUpperCase(); if(!code){ showErr("home-err", "Type a room code to join."); return; } joinPending = true; send({type:"join_room", code, nickname:n, colour:myColour}); };
-$("btn-settings").onclick = () => { $("home-settings").classList.toggle("hidden"); };
+$("btn-settings").onclick = () => toggleInlinePopup("settings", "Settings");
+$("btn-settings-min").onclick = () => minimizePopup("settings");
+$("btn-settings-close").onclick = () => closePopup("settings");
 $("set-chart").onchange = e => { chartDefault = e.target.checked; };
 $("btn-exit").onclick = () => { $("home-exit-note").classList.remove("hidden"); };
 $("btn-copy-link").onclick = () => { const url = location.origin + "/?code=" + room.code;
@@ -811,7 +1059,7 @@ $("btn-create-custom").onclick = () => send({type:"create_custom_team", name: $(
 $("btn-start-career").onclick = () => send({type:"start_career"});
 $("btn-advance").onclick = () => send({type:"advance"});
 $("btn-vote-next").onclick = () => send({type:"vote_next"});
-$("btn-host-skip").onclick = () => { if(confirm("Skip the vote and continue now?")) send({type:"host_skip"}); };
+$("btn-host-skip").onclick = () => openConfirm("Skip the vote?", "Skip the NEXT vote and continue now?", () => send({type:"host_skip"}));
 $("btn-results-leave").onclick = () => { sessionStorage.removeItem("f1code"); sessionStorage.removeItem("f1player"); location.href = "/"; };
 $("btn-next-season").onclick = () => send({type:"start_next_season"});
 $("btn-research").onclick = () => send({type:"research", priority: $("res-priority").value, amount: parseFloat($("res-amount").value)});
