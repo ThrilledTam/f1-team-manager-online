@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.4.0</title>
+<title>F1 Team Manager Online — v0.4.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -123,7 +123,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.4.0 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.4.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -764,6 +764,14 @@ function connect(){
       renderAll();
     } else if(m.type === "room_state"){ room = m.room; renderAll();
     } else if(m.type === "my_team"){ myTeam = m.team; renderMyTeam();
+      // v0.4.1: the winter-break card (empty seats, offers) is
+      // rendered from myTeam inside renderGame(), and the server
+      // sends room_state BEFORE my_team on every broadcast — so
+      // renderGame() would otherwise run once with the previous
+      // round's myTeam and the card would stay one broadcast
+      // behind (e.g. "Your empty seats: 2" after a signing). Re-render
+      // the current screen now that myTeam is fresh.
+      renderAll();
     } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box) box.innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>` + m.rumours.map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; return `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join("") + "</table></div>";
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
     } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
@@ -968,16 +976,29 @@ function renderGame(){
     const wbClear = document.querySelector("[data-wb-clear]");
     if(wbClear) wbClear.onclick = () => { wbOffers = []; renderGame(); };
     // Last-season review: final standings + my two drivers' head-to-head.
+    // v0.4.1: the server sends wb_review (final driver top 5,
+    // constructors, and the head-to-head of my two main drivers last
+    // season, read from the snapshot — so it still works when a
+    // driver has since left). Fall back to the raw last_season
+    // snapshot if wb_review is absent (older server).
+    const wr = c.wb_review;
     const ls = c.last_season;
-    if(ls && ls.drivers && ls.teams){
+    const h2hLine = pair => pair.length === 2
+      ? `<p><b>Your drivers last season:</b> ${pair.map(d => `${esc(d.name)} — ${d.points} pts, ${d.wins} win${d.wins === 1 ? "" : "s"}, ${d.podiums} podium${d.podiums === 1 ? "" : "s"}, best P${d.best_pos === null || d.best_pos === undefined ? "—" : d.best_pos}, out-qualified teammate ${d.qual_h2h === null || d.qual_h2h === undefined ? "—" : d.qual_h2h}x`).join(" · ")}</p>`
+      : "";
+    if(wr && (wr.drivers || wr.teams)){
+      const top5 = (wr.drivers || []).slice(0, 5).map((d, i) => `${i + 1}. ${esc(d.name)} (${esc(d.team || "")}) ${d.points} pts${d.wins ? `, ${d.wins} win${d.wins === 1 ? "" : "s"}` : ""}`).join(" · ");
+      const top3 = (wr.teams || []).slice(0, 3).map((t, i) => `${i + 1}. ${esc(t.name)} ${t.points} pts`).join(" · ");
+      $("winter-review").innerHTML = `<h3>Last season (${wr.year}) — final standings</h3>` +
+        `<p class="note">Drivers: ${top5}.</p>` +
+        `<p class="note">Constructors: ${top3}.</p>${h2hLine(wr.head_to_head || [])}` +
+        `<p class="note">Full standings are in the Standings tab. Last-minute regulation R&amp;D is in the Research tab.</p>`;
+    } else if(ls && ls.drivers && ls.teams){
       const myDrivers = myTeam ? (myTeam.drivers || []).map(d => d.id) : [];
       const mine = ls.drivers.filter(d => myDrivers.includes(d.id));
-      const h2h = mine.length === 2
-        ? `<p><b>Your drivers last season:</b> ${mine.map(d => `${esc(d.name)} — ${d.points} pts, ${d.wins} win${d.wins === 1 ? "" : "s"}, ${d.podiums} podium${d.podiums === 1 ? "" : "s"}, best P${d.best_pos === null || d.best_pos === undefined ? "—" : d.best_pos}, out-qualified teammate ${d.qual_h2h === null || d.qual_h2h === undefined ? "—" : d.qual_h2h}x`).join(" · ")}</p>`
-        : "";
       const top3 = ls.teams.slice(0, 3).map((t, i) => `${i + 1}. ${esc(t.name)} ${t.points} pts`).join(" · ");
       $("winter-review").innerHTML = `<h3>Last season (${ls.year}) — final standings</h3>` +
-        `<p class="note">Constructors: ${top3}.</p>${h2h}` +
+        `<p class="note">Constructors: ${top3}.</p>${h2hLine(mine)}` +
         `<p class="note">Full standings are in the Standings tab. Last-minute regulation R&amp;D is in the Research tab.</p>`;
     } else {
       $("winter-review").innerHTML = "";
