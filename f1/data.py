@@ -34,3 +34,67 @@ def circuit_for_round(round_no):
     if 1 <= round_no <= len(CALENDAR):
         return CALENDAR[round_no - 1]
     return {"name": f"Round {round_no}", "circuit": "", "laps": 57}
+
+
+# ---------------------------------------------------------------------------
+# v0.3 — real 2025 standings, used as the initial order for season 1
+# (2026). Like real F1, a new season opens in last season's finishing
+# order, all on 0 points. The online version has no in-game 2025, so
+# season 1 uses the real 2025 final standings (verified):
+# drivers Norris 423, Verstappen 421, Piastri 410, Russell 319,
+# Leclerc 242, Hamilton 156, Antonelli 150, Albon 73, Sainz 64,
+# Alonso 56, Hülkenberg 51, Hadjar 51, Bearman 41, Lawson 38, Ocon 38,
+# Stroll 33, Gasly 22, Bortoleto 19, Colapinto 0 (Tsunoda, 33 pts, is
+# not on the 2026 grid — he starts 2026 as a free agent).
+# The three 2026-grid drivers who did not race in F1 in 2025
+# (Pérez, Bottas, Lindblad) go after them, ordered by perf.
+# Constructors 2025: McLaren 833, Mercedes 469, Red Bull 451,
+# Ferrari 398, Williams 137, Racing Bulls 92, Aston Martin 89,
+# Haas 79, Sauber 70, Alpine 22. Audi takes Sauber's slot (9th) and
+# Cadillac, a new team, goes last.
+# ---------------------------------------------------------------------------
+PREV_SEASON_DRIVER_ORDER = [
+    "Lando Norris", "Max Verstappen", "Oscar Piastri", "George Russell",
+    "Charles Leclerc", "Lewis Hamilton", "Kimi Antonelli", "Alex Albon",
+    "Carlos Sainz", "Fernando Alonso", "Nico Hülkenberg", "Isack Hadjar",
+    "Oliver Bearman", "Liam Lawson", "Esteban Ocon", "Lance Stroll",
+    "Pierre Gasly", "Gabriel Bortoleto", "Franco Colapinto",
+]
+
+PREV_SEASON_TEAM_ORDER = [
+    "McLaren", "Mercedes", "Red Bull", "Ferrari", "Williams",
+    "Racing Bulls", "Aston Martin", "Haas", "Audi", "Alpine", "Cadillac",
+]
+
+
+# ---------------------------------------------------------------------------
+# v0.3 — champion history, real 2010–2025 (from Matthew's PyCharm
+# screenshot). Age = age at the start of the winning season.
+# Trophies = the driver's CUMULATIVE career championships at that
+# year — so Hamilton's 2014 row is x2 (he also won 2008). Winning
+# team = that year's constructors champion, which is not always the
+# drivers' champion's team (2021: Verstappen/Red Bull, Mercedes won
+# the constructors'; 2024: Verstappen/Red Bull, McLaren won it).
+# In-game seasons append a row as each season completes; 2026 is
+# NOT pre-filled — it has not been played yet in the online version.
+# (Matthew's screenshot shows a 2026 Antonelli row, but that is from
+# his local save's simulated season, not canonical history.)
+# ---------------------------------------------------------------------------
+CHAMPION_HISTORY_2010_2025 = [
+    {"year": 2010, "driver": "Sebastian Vettel", "age": 22, "team": "Red Bull", "points": 256, "trophies": 1, "winning_team": "Red Bull"},
+    {"year": 2011, "driver": "Sebastian Vettel", "age": 23, "team": "Red Bull", "points": 392, "trophies": 2, "winning_team": "Red Bull"},
+    {"year": 2012, "driver": "Sebastian Vettel", "age": 24, "team": "Red Bull", "points": 281, "trophies": 3, "winning_team": "Red Bull"},
+    {"year": 2013, "driver": "Sebastian Vettel", "age": 25, "team": "Red Bull", "points": 397, "trophies": 4, "winning_team": "Red Bull"},
+    {"year": 2014, "driver": "Lewis Hamilton", "age": 29, "team": "Mercedes", "points": 384, "trophies": 2, "winning_team": "Mercedes"},
+    {"year": 2015, "driver": "Lewis Hamilton", "age": 30, "team": "Mercedes", "points": 381, "trophies": 3, "winning_team": "Mercedes"},
+    {"year": 2016, "driver": "Nico Rosberg", "age": 30, "team": "Mercedes", "points": 385, "trophies": 1, "winning_team": "Mercedes"},
+    {"year": 2017, "driver": "Lewis Hamilton", "age": 32, "team": "Mercedes", "points": 363, "trophies": 4, "winning_team": "Mercedes"},
+    {"year": 2018, "driver": "Lewis Hamilton", "age": 33, "team": "Mercedes", "points": 408, "trophies": 5, "winning_team": "Mercedes"},
+    {"year": 2019, "driver": "Lewis Hamilton", "age": 34, "team": "Mercedes", "points": 413, "trophies": 6, "winning_team": "Mercedes"},
+    {"year": 2020, "driver": "Lewis Hamilton", "age": 35, "team": "Mercedes", "points": 347, "trophies": 7, "winning_team": "Mercedes"},
+    {"year": 2021, "driver": "Max Verstappen", "age": 23, "team": "Red Bull", "points": 395.5, "trophies": 1, "winning_team": "Mercedes"},
+    {"year": 2022, "driver": "Max Verstappen", "age": 24, "team": "Red Bull", "points": 454, "trophies": 2, "winning_team": "Red Bull"},
+    {"year": 2023, "driver": "Max Verstappen", "age": 25, "team": "Red Bull", "points": 575, "trophies": 3, "winning_team": "Red Bull"},
+    {"year": 2024, "driver": "Max Verstappen", "age": 26, "team": "Red Bull", "points": 437, "trophies": 4, "winning_team": "McLaren"},
+    {"year": 2025, "driver": "Lando Norris", "age": 25, "team": "McLaren", "points": 423, "trophies": 1, "winning_team": "McLaren"},
+]

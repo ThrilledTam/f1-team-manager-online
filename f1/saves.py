@@ -14,9 +14,12 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 4  # v0.2.1: per-team points (team_points) + last team
-# (last_team_id) on drivers. v0.2: prev_driver_order (standings
-# carry-over). v0.1: results stages, circuit per round, full GP history.
+SAVE_VERSION = 5  # v0.3: champion history pre-filled 2010–2025 +
+# appended per in-game season (age / trophies / winning team);
+# no upfront signing cost, break-cost formula, contract choice.
+# v0.2.1: per-team points (team_points) + last team (last_team_id)
+# on drivers. v0.2: prev_driver_order (standings carry-over).
+# v0.1: results stages, circuit per round, full GP history.
 
 
 def migrate_save(doc):
@@ -41,6 +44,32 @@ def migrate_save(doc):
         if "team_points" not in d:
             d["team_points"] = d.get("points", 0) if d.get("status") == "f1" else 0
         d.setdefault("last_team_id", d.get("team_id"))
+    # v0.3: champion history. A save from before v0.3 has none, or only
+    # in-game rows (v0.2 appended {year, driver, team, points} per
+    # completed season). Either way it gains the real 2010–2025 table
+    # for any year it does not already have, keeping any in-game rows
+    # (e.g. a simulated 2026) in place, sorted by year. Rows that
+    # predate the new fields show "—" for age / trophies / winning
+    # team in the UI.
+    from .data import CHAMPION_HISTORY_2010_2025
+    existing = doc.get("champion_history") or []
+    have_years = {r.get("year") for r in existing}
+    merged = ([dict(r) for r in CHAMPION_HISTORY_2010_2025
+               if r["year"] not in have_years]
+              + [dict(r) for r in existing])
+    for r in merged:
+        r.setdefault("age", None)
+        r.setdefault("trophies", None)
+        r.setdefault("winning_team", None)
+    merged.sort(key=lambda r: r.get("year") or 0)
+    doc["champion_history"] = merged
+    # v0.3: race-history top-3 entries gain team_id (for the grid's
+    # team colours). Old entries resolve it from the team name.
+    by_name = {t.get("name"): t.get("id") for t in doc.get("teams") or []}
+    for entry in doc.get("race_history") or []:
+        for item in entry.get("top3") or []:
+            if "team_id" not in item:
+                item["team_id"] = by_name.get(item.get("team"))
     # A career saved mid-results under v0 never existed (v0 had no results
     # stages), but guard anyway: drop back to the dashboard round.
     if doc.get("phase") == "race_results":

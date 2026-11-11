@@ -17,7 +17,10 @@ import copy
 import random
 
 from . import race as race_mod
-from .data import GRID_2026, circuit_for_round
+from .data import (
+    GRID_2026, CHAMPION_HISTORY_2010_2025, PREV_SEASON_DRIVER_ORDER,
+    PREV_SEASON_TEAM_ORDER, circuit_for_round,
+)
 from .models import make_driver, make_team, new_career_dict
 from .rules import (
     SEASON_LENGTH, MAX_SEASONS, REG_MINOR_TARGET, REG_MAJOR_TARGET,
@@ -27,7 +30,16 @@ from .rules import (
 
 CUSTOM_TEAM_MONEY = 6.0
 CUSTOM_TEAM_REL = 0.90  # v0 fix: Main.py passed rel=6 (a bug) for custom teams
-SIGNING_CONTRACT_YEARS = 2
+
+
+def driver_initials(name):
+    """Top-3 initials for the race history grid, like Matthew's PyCharm
+    version: first initial + '.' + first 3 surname letters, uppercased
+    (Lewis Hamilton -> L.HAM, Kimi Antonelli -> K.ANT)."""
+    parts = str(name or "").strip().split()
+    if not parts:
+        return "?.???"
+    return f"{parts[0][0].upper()}.{parts[-1][:3].upper()}"
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +48,13 @@ SIGNING_CONTRACT_YEARS = 2
 
 def build_new_career(name, host_nickname, chart_on=True):
     """A fresh 2026 career: 11 teams, 22 F1 drivers, 33 free agents, 22 F2,
-    5 queued rookies, 68 pool rookies (all from GRID_2026)."""
+    5 queued rookies, 68 pool rookies (all from GRID_2026).
+
+    v0.3: the season opens in the real 2025 finishing order — the
+    driver standings tie-breaker (prev_driver_order) is the 2025
+    order, and the teams list is in 2025 constructors order, so at
+    0 points both standings show last season's order, like real F1.
+    The champion history is pre-filled with the real 2010–2025 table."""
     career = new_career_dict(name, host_nickname, chart_on)
     teams_by_name = {}
     for tdata in GRID_2026["teams"]:
@@ -61,6 +79,22 @@ def build_new_career(name, host_nickname, chart_on=True):
         career["drivers"].append(make_driver(ddata, status="queued"))
     for ddata in GRID_2026["pool"]:
         career["drivers"].append(make_driver(ddata, status="pool"))
+    # v0.3: season 1 opens in the real 2025 order. The three 2026-grid
+    # drivers who did not race in F1 in 2025 (Pérez, Bottas, Lindblad)
+    # go after the 2025-ordered drivers, ordered by perf — the
+    # driver_standings() tie-break (best finish, then -perf) does
+    # exactly that for drivers with no previous order.
+    by_name = {d["name"]: d for d in career["drivers"]}
+    ordered = [by_name[n] for n in PREV_SEASON_DRIVER_ORDER if n in by_name]
+    career["prev_driver_order"] = [d["id"] for d in ordered]
+    # v0.3: teams list in 2025 constructors order (Audi in Sauber's
+    # slot, Cadillac last as a new team) — constructor_standings() is
+    # a stable sort, so at 0 points the list order is the order shown.
+    rank = {n: i for i, n in enumerate(PREV_SEASON_TEAM_ORDER)}
+    career["teams"].sort(key=lambda t: rank.get(t["name"], len(rank)))
+    # v0.3: champion history starts with the real 2010–2025 table;
+    # in-game seasons append as they complete (see end_of_season).
+    career["champion_history"] = [dict(r) for r in CHAMPION_HISTORY_2010_2025]
     career["next_reg_year"] = 2027
     career["next_reg_kind"] = "Minor"
     set_circuit_for_round(career)
@@ -268,15 +302,31 @@ def do_reg_research(career, team_id, amount):
                   f"(total ${team['reg_research']:.2f}M)")
 
 
-def signing_cost(career, team_id, driver_id, seat):
-    """Total cost of signing a driver into a seat, computed the exact
-    way sign_driver() charges it — the single source of truth, so the
+def break_cost(career, team_id, driver_id, seat):
+    """Cost of signing a driver into a seat, computed the exact way
+    sign_driver() charges it — the single source of truth, so the
     number shown in the Driver Market is always the number charged.
 
-    Returns {total, signing, break_fee, affordable} or None when the
-    team/driver/seat is invalid. signing = the driver's market value;
-    break_fee = 1 + outgoing salary x years left, when the seat is
-    occupied (0 for an empty seat)."""
+    v0.3 (replaces the v0.2.1 signing fee + old break fee): signing
+    is FREE — a driver's MV is their salary per season, paid
+    salary/12 after each race, never upfront. The only cost is
+    breaking the current driver's contract, when the seat is
+    occupied (0 for an empty seat):
+
+        rounds_remaining = (12 - current_round + 1)
+                           + max(0, contract_years - 1) * 12
+        break_cost = rounds_remaining * salary / 12 + $2.0M
+
+    current_round is the 1-indexed round about to be played and
+    contract_years is the outgoing driver's remaining contract years
+    including the current season. In winter break the current season
+    is over, so rounds_remaining = contract_years * 12.
+
+    Matthew's example: Gasly, contract 3, start of round 9 (4 rounds
+    left this season), salary $4.0M -> 28 x $4.0M/12 + $2.0M = $11.33M.
+
+    Returns {total, break_fee, affordable} or None when the
+    team/driver/seat is invalid."""
     team = get_team(career, team_id)
     if not team:
         return None
@@ -287,14 +337,16 @@ def signing_cost(career, team_id, driver_id, seat):
         return None
     slot = "driver1_id" if seat == 1 else "driver2_id"
     current = get_driver(career, team[slot]) if team[slot] else None
-    signing = d["mv"]
-    break_fee = 0.0
-    if current:
-        break_fee = 1 + current["salary"] * current["contract_left"]
-    total = signing + break_fee
-    return {"total": round(total, 2), "signing": round(signing, 2),
-            "break_fee": round(break_fee, 2),
-            "affordable": total <= team["money"]}
+    if not current:
+        return {"total": 0.0, "break_fee": 0.0, "affordable": True}
+    if career.get("phase") == "winter_break":
+        rounds_remaining = current["contract_left"] * SEASON_LENGTH
+    else:
+        rounds_remaining = ((SEASON_LENGTH - career["round"] + 1)
+                            + max(0, current["contract_left"] - 1) * SEASON_LENGTH)
+    fee = rounds_remaining * current["salary"] / SEASON_LENGTH + 2.0
+    return {"total": round(fee, 2), "break_fee": round(fee, 2),
+            "affordable": fee <= team["money"]}
 
 
 def _release_driver(career, driver, team):
@@ -312,13 +364,17 @@ def _release_driver(career, driver, team):
     driver["contract_left"] = 0
 
 
-def sign_driver(career, team_id, driver_id, seat):
+def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     """Sign a free-agent / F2 driver into a seat (1 or 2).
 
-    Cost: the driver's market value as a signing fee. If the seat is
-    occupied, the current driver's contract must be broken first, costing
-    1 + salary * contract_left (Main.py winter-break break cost).
-    The new driver gets a 2-year contract.
+    v0.3: signing is FREE — no upfront fee. A driver's MV is their
+    salary per season, paid salary/12 after each race (see
+    run_race_weekend). The only charge is breaking the current
+    driver's contract when the seat is occupied: break_cost()
+    (rounds left x salary/12 + $2.0M). The new driver gets the
+    contract length the signing manager picked: an integer 1–4
+    years (the player picks in the Driver Market confirm step;
+    bots pick via ai_contract_years()).
 
     v0.2.1 (real F1, per Matthew's correction): the outgoing driver
     KEEPS their championship points and stays in the driver standings,
@@ -334,18 +390,24 @@ def sign_driver(career, team_id, driver_id, seat):
         return False, "No such team."
     if seat not in (1, 2):
         return False, "Seat must be 1 or 2."
+    try:
+        contract_years = int(contract_years)
+    except (TypeError, ValueError):
+        return False, "Contract length must be a whole number of years (1–4)."
+    if not 1 <= contract_years <= 4:
+        return False, "Contract length must be 1–4 years."
     d = get_driver(career, driver_id)
     if not d or d["status"] not in ("free", "f2"):
         return False, "That driver is not available to sign."
     slot = "driver1_id" if seat == 1 else "driver2_id"
     current = get_driver(career, team[slot]) if team[slot] else None
-    quote = signing_cost(career, team_id, driver_id, seat)
+    quote = break_cost(career, team_id, driver_id, seat)
     cost = quote["total"]
     if cost > team["money"]:
-        return False, (f"Need ${cost:.2f}M "
-                       f"(signing ${quote['signing']:.2f}M"
-                       + (f" + break ${quote['break_fee']:.2f}M"
-                          if quote["break_fee"] else "") + ").")
+        if current:
+            return False, (f"Need ${cost:.2f}M to break "
+                           f"{current['name']}'s contract.")
+        return False, f"Need ${cost:.2f}M."
     team["money"] -= cost
     if current:
         _release_driver(career, current, team)
@@ -364,15 +426,19 @@ def sign_driver(career, team_id, driver_id, seat):
     d["last_team_id"] = None
     d["status"] = "f1"
     d["team_id"] = team["id"]
-    d["contract_left"] = SIGNING_CONTRACT_YEARS
+    d["contract_left"] = contract_years
     team[slot] = d["id"]
     # Team points are the current drivers' per-team points plus any
     # points banked from drivers who scored for this team and have
     # since left (apply_race_results does the same after a race).
     _recompute_team_points(career, team)
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
+    if cost > 0:
+        return True, (f"{d['name']} signed for {team['name']} ✓ "
+                      f"(Seat {seat}, {contract_years}-year contract) "
+                      f"— ${cost:.2f}M break fee")
     return True, (f"{d['name']} signed for {team['name']} ✓ "
-                  f"(Seat {seat}) — ${cost:.2f}M")
+                  f"(Seat {seat}, {contract_years}-year contract) — Free")
 
 
 def _recompute_team_points(career, team):
@@ -688,7 +754,10 @@ def run_race_weekend(career, connected_player_ids, rng=None):
             "circuit": gp["name"], "laps": gp["laps"],
             "qual": list(career["last_qual"]),
             "race": list(career["last_race"]),
-            "top3": [{"driver": r["driver"], "team": r["team"]} for r in top],
+            # v0.3: team_id too, so the history grid can colour each
+            # finisher by the team they raced for at the time.
+            "top3": [{"driver": r["driver"], "team": r["team"],
+                      "team_id": r.get("team_id")} for r in top],
         })
     # To the qualifying results page — the NEXT votes take it from here.
     career["phase"] = "qual_results"
@@ -718,10 +787,20 @@ def end_of_season(career, rng=None):
         champ = drivers[0]
         champ["cha"] += 1
         champ_team = get_team(career, champ["team_id"])
+        # v0.3: the champion-history row records age at the START of
+        # the season just finished (ages tick up later in this
+        # function), the champion's cumulative trophy count, and the
+        # constructors' champion — which may differ from the driver's
+        # team (e.g. 2021 Verstappen/Red Bull, Mercedes won the
+        # constructors').
+        constructors_champ = standings[0]["name"] if standings else ""
         career["champion_history"].append({
             "year": career["year"], "driver": champ["name"],
+            "age": champ["age"],
             "team": champ_team["name"] if champ_team else "",
             "points": champ["points"],
+            "trophies": champ["cha"],
+            "winning_team": constructors_champ,
         })
         if champ_team:
             champ_team["c_wins"] += 1
@@ -870,6 +949,23 @@ def refill_f2(career, rng=None):
         f2.append(nxt)
 
 
+def ai_contract_years(driver, rng=None):
+    """v0.3: a bot team signing a driver also picks a contract length
+    1–4 years. Rule (documented): bots commit longer to drivers they
+    rate highly (rep is the bots' judgement of who's good) — rep 4+
+    gets 4 years, rep 3+ gets 2–4, rep 2+ gets 1–3, below that 1–2.
+    The draw uses the passed rng so tests stay deterministic."""
+    rng = rng or random
+    rep = driver.get("rep", 2.0)
+    if rep >= 4.0:
+        return 4
+    if rep >= 3.0:
+        return rng.randint(2, 4)
+    if rep >= 2.0:
+        return rng.randint(1, 3)
+    return rng.randint(1, 2)
+
+
 def fill_empty_seats_ai(career, team, rng=None):
     """AI winter-break signing, results-based (ContractOffer logic)."""
     rng = rng or random
@@ -886,7 +982,8 @@ def fill_empty_seats_ai(career, team, rng=None):
         pick["team_id"] = team["id"]
         pick["team_points"] = 0  # v0.2.1: fresh per-team tally
         pick["last_team_id"] = None
-        pick["contract_left"] = SIGNING_CONTRACT_YEARS
+        # v0.3: bots also pick a 1–4 year contract (ai_contract_years).
+        pick["contract_left"] = ai_contract_years(pick, rng=rng)
         team[slot] = pick["id"]
         career["transfers"].append(f"{pick['name']} signed for {team['name']}")
 
@@ -970,16 +1067,24 @@ def public_state(career, chart_on, viewer_team_id=None):
     for d in state["drivers"]:
         d.pop("qual_time", None)
         d.pop("race_time", None)
-    # v0.2.1: replacement costs for the viewer's team, computed
+    # v0.3: reputation NEVER leaves the server either. Rep is only for
+    # the bot teams to judge who's good — players must not see it, in
+    # any payload, chart on or off. The live career keeps it (the AI
+    # reads it from there); only this broadcast copy is stripped.
+    for d in state["drivers"]:
+        d.pop("rep", None)
+    # v0.3: replacement costs for the viewer's team, computed
     # server-side from the exact formula sign_driver() charges, so the
     # Driver Market always shows the number that will be charged.
     # {driver_id: {"1": {...}, "2": {...}}} — attached to the broadcast
-    # copy only, never saved.
+    # copy only, never saved. The cost is the contract-break fee for
+    # the driver in the seat (0 / Free for an empty seat); signing
+    # itself is free.
     if viewer_team_id:
         viewer = get_team(career, viewer_team_id)
         if viewer is not None:
             state["market_costs"] = {
-                d["id"]: {str(seat): signing_cost(career, viewer["id"], d["id"], seat)
+                d["id"]: {str(seat): break_cost(career, viewer["id"], d["id"], seat)
                          for seat in (1, 2)}
                 for d in career["drivers"]
                 if d["status"] in ("free", "f2")}
