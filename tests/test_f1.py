@@ -1715,15 +1715,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v040():
-    """The live version string is v0.4.0 everywhere it is shown."""
+def test_health_reports_v041():
+    """The live version string is v0.4.1 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.4.0"
+    assert client.get("/api/health").json()["version"] == "v0.4.1"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.4.0</title>" in html
-    assert "Online · v0.4.0 beta" in html
+    assert "<title>F1 Team Manager Online — v0.4.1</title>" in html
+    assert "Online · v0.4.1 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2407,3 +2407,262 @@ def test_ws_winter_break_offers_next_and_start():
         act = recv_until(ws, "action", check=lambda m: m.get("action") == "start_next_season")
         assert act["ok"]
         assert career["phase"] == "round" and career["round"] == 1
+
+
+# ---------------------------------------------------------------------------
+# v0.4.1 — winter-break load fix, winter-break review, stale-render fix
+# ---------------------------------------------------------------------------
+
+def test_choose_team_clears_auto_generated_winter_offers():
+    """Defect 1 (game level): a team that was AI when its round opened
+    has bot offers in wb_offers; a human taking it over must start
+    with a clean slate and choose their own offers."""
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    career["wb_round"] = 1
+    mclaren = career["teams"][0]
+    mclaren["driver2_id"] = None  # empty seat, so bots offer for it
+    game.start_winter_break_round(career, rng=random.Random(4))
+    assert (career.get("wb_offers") or {}).get(mclaren["id"]), \
+        "bot offers should exist while the team is AI"
+    ok, msg = game.choose_team(career, mclaren["id"], "p-max")
+    assert ok, msg
+    assert (career.get("wb_offers") or {}).get(mclaren["id"]) is None
+    # ...and the human is not blocked from submitting their own.
+    pool = game.free_agents(career) + game.f2_drivers(career)
+    ok, msg = game.submit_winter_offers(
+        career, mclaren["id"],
+        [{"driver_id": pool[0]["id"], "target": "seat", "seat": 2, "years": 2}])
+    assert ok, msg
+
+
+def test_load_season3_save_human_team_gets_no_auto_offers():
+    """Defect 1 (server level): Continue a winter-break save, take
+    over McLaren, start the career — McLaren must have NO submitted
+    offers (only AI teams get auto-generated ones), and the AI teams
+    DO have offers for round 1."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-season3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir = srv.SAVES_DIR
+        srv.SAVES_DIR = Path(tmp)
+        try:
+            import shutil
+            shutil.copy(path, Path(tmp) / "matthew-max-season3-complete.json")
+            client = TestClient(srv.app)
+
+            def recv_until(ws, want, limit=60, check=None):
+                for _ in range(limit):
+                    m = ws.receive_json()
+                    if m.get("type") == want and (check is None or check(m)):
+                        return m
+                raise AssertionError(f"never got {want}")
+
+            with client.websocket_connect("/ws") as ws:
+                ws.send_json({"type": "create_from_save",
+                              "save_id": "matthew-max-season3-complete",
+                              "nickname": "Max", "colour": "#e74c3c"})
+                joined = recv_until(ws, "joined")
+                code = joined["code"]
+                room = srv.ROOMS[code]
+                # At load, nobody has picked a team yet: no offers
+                # exist for anyone (the round opens at start_career).
+                assert (room["career"].get("wb_offers") or {}) == {}
+                mclaren = next(t for t in room["career"]["teams"]
+                               if t["name"] == "McLaren")
+                ws.send_json({"type": "choose_team", "team_id": mclaren["id"]})
+                recv_until(ws, "action",
+                           check=lambda m: m.get("action") == "choose_team")
+                ws.send_json({"type": "start_career"})
+                recv_until(ws, "room_state",
+                           check=lambda m: m["room"]["started"] is True)
+                offers = room["career"].get("wb_offers") or {}
+                assert mclaren["id"] not in offers, \
+                    "human McLaren must have no auto-generated offers"
+                ai_ids = [t["id"] for t in room["career"]["teams"] if t["is_ai"]]
+                assert ai_ids and all(tid in offers for tid in ai_ids), \
+                    "every AI team must have offers for round 1"
+                # ...and the human can still submit their own offers.
+                pool = game.free_agents(room["career"]) + game.f2_drivers(room["career"])
+                ws.send_json({"type": "winter_offers", "offers": [
+                    {"driver_id": pool[0]["id"], "target": "seat",
+                     "seat": 2, "years": 2}]})
+                act = recv_until(ws, "action",
+                                 check=lambda m: m.get("action") == "winter_offers")
+                assert act["ok"]
+        finally:
+            srv.SAVES_DIR = old_dir
+
+
+def test_winter_break_review_payload_has_drivers_and_head_to_head():
+    """Defect 2: the winter-break state payload includes the final
+    driver standings (top 5) and the head-to-head of the player's
+    team's two main drivers last season — from the snapshot, so it
+    works for the migrated Season 3 save where Piastri has left."""
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-season3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    real = json.loads(path.read_text())
+    migrated = migrate_save(real)
+    mclaren = next(t for t in migrated["teams"] if t["name"] == "McLaren")
+    state = game.public_state(migrated, True, viewer_team_id=mclaren["id"])
+    review = state.get("wb_review")
+    assert review is not None
+    assert review["year"] == 2028
+    assert review["drivers"][0]["name"] == "Oliver Bearman"
+    assert review["drivers"][0]["points"] == 221
+    assert review["drivers"][0]["wins"] == 5
+    assert [d["name"] for d in review["drivers"][:3]] == [
+        "Oliver Bearman", "Mick Schumacher", "Arvid Lindblad"]
+    assert review["teams"][0]["name"] == "Ferrari"
+    assert review["teams"][0]["points"] == 331
+    # Head-to-head: McLaren's two main drivers last season — Lindblad
+    # (still there) and Piastri (left at contract end, still in the
+    # snapshot), with their real 2028 numbers.
+    h2h = {d["name"]: d for d in review["head_to_head"]}
+    assert set(h2h) == {"Arvid Lindblad", "Oscar Piastri"}
+    assert h2h["Arvid Lindblad"]["points"] == 175
+    assert h2h["Arvid Lindblad"]["wins"] == 3
+    assert h2h["Oscar Piastri"]["points"] == 92
+    # No reputation leaks into the review payload.
+    assert not any("rep" in d for d in review["drivers"])
+
+
+def test_imported_funds_match_save_file_exactly():
+    """Funds check: importing the Season 3 save and playing winter
+    break round 1 must not move McLaren's bank — it stays exactly
+    the save file's value ($150.19M) through load, takeover and
+    round-1 resolution."""
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-season3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    raw = json.loads(path.read_text())
+    saved_money = next(t["money"] for t in raw["teams"] if t["name"] == "McLaren")
+    assert saved_money == pytest.approx(150.19, abs=0.01)
+    with tempfile.TemporaryDirectory() as tmp:
+        import shutil
+        shutil.copy(path, Path(tmp) / "matthew-max-season3-complete.json")
+        loaded = load_save(tmp, "matthew-max-season3-complete")
+        mclaren = next(t for t in loaded["teams"] if t["name"] == "McLaren")
+        assert mclaren["money"] == pytest.approx(saved_money)
+        # Simulate the server load flow (all teams AI, then start).
+        for t in loaded["teams"]:
+            t["is_ai"] = True
+            t["owner_player_id"] = None
+        ok, _ = game.choose_team(loaded, mclaren["id"], "p-max")
+        assert ok
+        game.start_winter_break_round(loaded, rng=random.Random(4))
+        assert mclaren["money"] == pytest.approx(saved_money)
+        # The human has no auto-offers (v0.4.1), so they submit their
+        # own for the empty seat, then hit NEXT to resolve round 1.
+        piastri = next(d for d in loaded["drivers"] if d["name"] == "Oscar Piastri")
+        ok, why = game.submit_winter_offers(
+            loaded, mclaren["id"],
+            [{"driver_id": piastri["id"], "target": "seat", "seat": 2, "years": 2}])
+        assert ok, why
+        ok, _adv, why = game.winter_next(loaded, mclaren["id"], rng=random.Random(4))
+        assert ok, why
+        assert loaded["wb_round"] == 2
+        assert mclaren["money"] == pytest.approx(saved_money)
+
+
+def test_reg_progress_bar_data_in_state_payload_when_open():
+    """Reg progress bar (verify): once reg research is open (round 7+),
+    the state payload carries the bar data — % fitted, % to adapt and
+    the cost to adapt — for the viewer's team."""
+    career = game.build_new_career("Test", "Matthew")
+    ok, _ = game.choose_team(career, career["teams"][0]["id"], "p-max")
+    assert ok
+    team = career["teams"][0]
+    # Locked before round 7: the payload says so, with no bar data
+    # to show (open False).
+    state = game.public_state(career, True, viewer_team_id=team["id"])
+    assert state["reg_view"]["open"] is False
+    career["round"] = 7
+    game.init_reg_state(career)
+    state = game.public_state(career, True, viewer_team_id=team["id"])
+    rv = state["reg_view"]
+    assert rv["open"] is True
+    assert set(rv) == {"open", "adapted_pct", "unadapted_pct",
+                       "adapt_cost", "research", "kind", "year"}
+    assert rv["adapted_pct"] + rv["unadapted_pct"] == pytest.approx(100.0)
+    assert rv["adapt_cost"] >= 0
+    # And the raw perf numbers never ride along with it.
+    assert "reg_total" not in state["teams"][0]
+    assert "reg_unadapted" not in state["teams"][0]
+
+
+def test_ws_winter_break_kick_hands_offers_to_bot():
+    """Defect 1 (kick side): kicking a player in the lobby of a loaded
+    winter-break career reverts their team to AI and the bot manager
+    takes over its offers for the round — the team is not left
+    offer-less when the career starts."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-season3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir = srv.SAVES_DIR
+        srv.SAVES_DIR = Path(tmp)
+        try:
+            import shutil
+            shutil.copy(path, Path(tmp) / "matthew-max-season3-complete.json")
+            client = TestClient(srv.app)
+
+            def recv_until(ws, want, limit=60, check=None):
+                for _ in range(limit):
+                    m = ws.receive_json()
+                    if m.get("type") == want and (check is None or check(m)):
+                        return m
+                raise AssertionError(f"never got {want}")
+
+            with client.websocket_connect("/ws") as host_ws:
+                host_ws.send_json({"type": "create_from_save",
+                                   "save_id": "matthew-max-season3-complete",
+                                   "nickname": "Max", "colour": "#e74c3c"})
+                joined = recv_until(host_ws, "joined")
+                code = joined["code"]
+                room = srv.ROOMS[code]
+                mclaren = next(t for t in room["career"]["teams"]
+                               if t["name"] == "McLaren")
+                ferrari = next(t for t in room["career"]["teams"]
+                               if t["name"] == "Ferrari")
+                host_ws.send_json({"type": "choose_team", "team_id": mclaren["id"]})
+                recv_until(host_ws, "action",
+                           check=lambda m: m.get("action") == "choose_team")
+                with client.websocket_connect("/ws") as guest_ws:
+                    guest_ws.send_json({"type": "join_room", "code": code,
+                                        "nickname": "Matthew", "colour": "#d52f38"})
+                    g_joined = recv_until(guest_ws, "joined")
+                    guest_id = g_joined["player_id"]
+                    guest_ws.send_json({"type": "choose_team", "team_id": ferrari["id"]})
+                    recv_until(guest_ws, "action",
+                               check=lambda m: m.get("action") == "choose_team")
+                    # Kick in the lobby (kicks are lobby-only): Ferrari
+                    # reverts to AI and the bot manager makes its
+                    # offers for the round.
+                    host_ws.send_json({"type": "kick_player", "player_id": guest_id})
+                    recv_until(guest_ws, "kicked")
+                    assert ferrari["is_ai"] is True
+                    assert ferrari["owner_player_id"] is None
+                    offers = room["career"].get("wb_offers") or {}
+                    assert ferrari["id"] in offers, \
+                        "kicked team's offers revert to the bot manager"
+                    assert mclaren["id"] not in offers
+                # Starting the career opens the round for the AI teams;
+                # the human team still has no auto-generated offers.
+                host_ws.send_json({"type": "start_career"})
+                recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["started"] is True)
+                offers = room["career"].get("wb_offers") or {}
+                assert mclaren["id"] not in offers
+                ai_ids = [t["id"] for t in room["career"]["teams"] if t["is_ai"]]
+                assert ai_ids and all(tid in offers for tid in ai_ids)
+        finally:
+            srv.SAVES_DIR = old_dir
