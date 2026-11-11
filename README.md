@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.4.0 (beta)
+# F1 Team Manager Online — v0.4.1 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.4.0 is a beta:
+for playing together at the same time (not pass-and-play). v0.4.1 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -297,6 +297,16 @@ showing its title; clicking the chip restores it exactly as it was,
 and the dashboard underneath stays usable while a pop-up is minimized.
 Escape closes the topmost open pop-up, and clicking the backdrop
 outside a modal pop-up dismisses it too.
+
+## v0.4.1 — winter-break load fix, winter-break review, stale-render fix
+
+Fixes for 3 defects found in the live v0.4.0 play-test (2026-11-11):
+
+- **Human teams no longer get auto-offers on load:** loading a winter-break career used to open the round while every team was still flagged AI (ownership had just been cleared), so bot offers — and bot R&D — were generated for teams a human was about to take over. The round now opens at `start_career`, after the humans have picked their teams, so only still-AI teams get bot offers. Taking over a team also clears any auto-generated offers it already has, so the human chooses. (Kicking a player during the winter break hands that team's offers back to the bot manager.)
+- **Winter-break review actually renders:** the card now shows last season's final DRIVER standings (top 5) as well as the constructors, plus the head-to-head of the team's two main drivers last season (wins, podiums, points, best finish, qualifying head-to-head) — read from the last-season snapshot, so it works even when a driver has since left (e.g. Piastri after his McLaren contract ended).
+- **Stale "empty seats" text:** the winter card renders from the private `my_team` payload, but the server sends `room_state` before `my_team` on every broadcast, and the client only re-rendered the card on `room_state` — one broadcast behind. The `my_team` message now re-renders the game screen too.
+- **Funds check:** the play-test's $140.19M McLaren bank (vs $150.19M in the save file) could not be reproduced — the full load → takeover → round-1 resolution flow keeps $150.19M at every step, and no $10M charge exists in migration, import, offer generation, resolution, or signing for this save. A regression test now locks the imported funds to the save file's exact value.
+- Save format stays v6 (no migration bump).
 
 ## v0.4.0 — standings sort, F2 table, T&R drivers, winter break, reg revamp, bot parity
 

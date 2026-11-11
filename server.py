@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.4.0 (beta)
+F1 Team Manager Online — v0.4.1 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -121,7 +121,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.4.0", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.4.1", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -266,13 +266,17 @@ def my_team_public(room, player_id):
 
 
 def ensure_winter_break_open(career, rng=None):
-    """v0.4: when a winter-break career is loaded (Continue / Load),
-    make sure the current round has been opened — bot teams make
-    their offers and do last-minute R&D when the round opens. A round
-    is opened when every AI team has an entry in wb_offers (even an
-    empty one); if any AI team is missing, open (or re-open) the round.
-    Safe to call on every load: it never re-runs for an already-open
-    round, so bots never double-spend on R&D."""
+    """v0.4.1: when a winter-break career STARTS (start_career, after
+    the humans have picked their teams), make sure the current round
+    has been opened — bot teams make their offers and do last-minute
+    R&D when the round opens. It must NOT run at load time: a loaded
+    career has every team flagged AI (ownership was just cleared),
+    so opening the round then would auto-generate offers — and spend
+    R&D money — for teams a human is about to take over. A round is
+    opened when every AI team has an entry in wb_offers (even an
+    empty one); if any AI team is missing, open (or re-open) the
+    round. Safe to call on every start: it never re-runs for an
+    already-open round, so bots never double-spend on R&D."""
     if career.get("phase") != "winter_break":
         return
     offers = career.get("wb_offers") or {}
@@ -344,7 +348,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.0"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.1"}
 
 
 @app.get("/api/saves")
@@ -463,7 +467,11 @@ async def ws_endpoint(ws: WebSocket):
                 room["career"] = doc
                 room["career_mode"] = "loaded"
                 room["chart_on"] = bool(doc.get("settings", {}).get("chart_on", True))
-                ensure_winter_break_open(doc, rng=random)
+                # v0.4.1: do NOT open the winter-break round here — every
+                # team is still flagged AI at load time, so bot offers
+                # would be auto-generated for teams a human is about to
+                # take over. The round opens at start_career, once the
+                # humans have picked their teams.
                 await ws.send_json({"type": "joined", "code": room["code"],
                                     "player_id": player["player_id"],
                                     "room": room_public(room, player["player_id"])})
@@ -507,6 +515,16 @@ async def ws_endpoint(ws: WebSocket):
                             if t:
                                 t["is_ai"] = True
                                 t["owner_player_id"] = None
+                                # v0.4.1: the team is AI again — if the
+                                # winter break is running, the bot
+                                # manager takes over its offers for
+                                # this round (offers only: no R&D
+                                # spending on top of what the human
+                                # may already have done). Any offers
+                                # the kicked player submitted are
+                                # replaced by the bot's.
+                                if career.get("phase") == "winter_break":
+                                    game.bot_winter_offers(career, t, rng=rng)
                         tgt_ws = target.pop("ws", None)
                         room["players"] = [p for p in room["players"]
                                            if p["player_id"] != target["player_id"]]
@@ -564,10 +582,10 @@ async def ws_endpoint(ws: WebSocket):
                         room["career"] = doc
                         room["career_mode"] = "loaded"
                         room["chart_on"] = bool(doc.get("settings", {}).get("chart_on", True))
-                        # v0.4: a loaded winter-break career enters the
-                        # new 3-round offer flow at its current round —
-                        # make sure the round is opened (bot offers).
-                        ensure_winter_break_open(doc, rng=rng)
+                        # v0.4.1: do NOT open the winter-break round here
+                        # (see create_from_save) — it opens at
+                        # start_career, once the humans have picked
+                        # their teams.
                         await broadcast(room)
 
             elif mtype == "delete_save":
@@ -648,6 +666,11 @@ async def ws_endpoint(ws: WebSocket):
                         room["started"] = True
                         if career.get("phase") not in ("round", "winter_break"):
                             career["phase"] = "round"
+                        # v0.4.1: open the winter-break round now that
+                        # the humans have picked their teams — bot
+                        # offers (and bot R&D) are generated only for
+                        # teams that are still AI.
+                        ensure_winter_break_open(career, rng=rng)
                         await broadcast(room)
 
             elif mtype == "vote_next":
