@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.3 (beta)
+# F1 Team Manager Online — v0.3.1 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.3 is a beta:
+for playing together at the same time (not pass-and-play). v0.3.1 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -276,6 +276,27 @@ complete" before the race results page had been shown — it now says
   "e.g. [name]" instead of "e.g. Matthew".
 - **Save format v3:** see above — `prev_driver_order` and per-team
   `points_kept`, with safe defaults when loading v0/v0.1 saves.
+
+## v0.3.1 — standings '|' bar for free agents
+
+Small fix found in a live real-browser playtest of v0.3 (2026-11-10):
+a replaced driver who keeps points as a free agent (e.g. Piastri after
+being replaced at McLaren) showed in the driver standings with their old
+team in the team column but WITHOUT the coloured '|' bar every other row
+had. `driverNameHtml` now takes a separate bar colour, and the standings
+renderer passes the standing team's colour (current team, or last team
+for a free agent) as the bar colour while the surname stays uncoloured
+for free agents, per the v0.1 rule. Constructors' standings already had
+the bar on every row — no change there.
+
+Also in v0.3.1, every pop-up can be minimized: the full-GP view, the
+contract picker, confirm dialogs (delete save, skip vote) and the home
+settings panel all have a minimize ("—") and a close ("×") button.
+Minimizing collapses the pop-up to a floating chip at the bottom-left
+showing its title; clicking the chip restores it exactly as it was,
+and the dashboard underneath stays usable while a pop-up is minimized.
+Escape closes the topmost open pop-up, and clicking the backdrop
+outside a modal pop-up dismisses it too.
 
 ## v0.3 — hidden reputation, compact market, contract choice, free signing, new break cost, 2025 order, history grid + champions
 
