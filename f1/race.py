@@ -85,6 +85,42 @@ def lap_sim(driver_perf, team_perf, max_perf, min_perf, session, error_multiplie
     return lap_time
 
 
+def _driver_sort_key(d, prev):
+    """v0.4 standings sort (feature 1): points desc, wins desc, best
+    finish (lower is better), then whoever achieved that best finish
+    FIRST (earliest round). Non-point scorers (0 pts, 0 wins) sort by
+    best finish, then earliest. prev is the {driver_id: rank} map of
+    last season's finishing order — the final tie-break, so a new
+    season opens in last season's order (all on 0). Drivers with no
+    previous order go after the carried-over drivers, by perf, name."""
+    n_prev = len(prev)
+    return (
+        -d["points"],
+        -d.get("season_wins", 0),
+        d["best_pos"] if d["best_pos"] is not None else 99,
+        d.get("best_finish_round") if d.get("best_finish_round") is not None else 99,
+        prev.get(d["id"], n_prev),
+        -d["perf"],
+        d["name"],
+    )
+
+
+def _team_sort_key(t, prev):
+    """v0.4 constructors' sort (feature 1): points desc, wins desc,
+    best finish (best race finish by either driver), then whoever got
+    that best finish FIRST. prev is the {team_id: rank} map of last
+    season's constructors' order — the final tie-break."""
+    n_prev = len(prev)
+    return (
+        -t["points"],
+        -t.get("season_wins", 0),
+        t["best_pos"] if t["best_pos"] is not None else 99,
+        t.get("best_finish_round") if t.get("best_finish_round") is not None else 99,
+        prev.get(t["id"], n_prev),
+        t["name"],
+    )
+
+
 def _team_perf(team, teams_by_id):
     """Supplier blending from Race.py: if the team has a supplier stage > 0,
     effective perf = (2*own + supplier) / 3."""
@@ -186,8 +222,16 @@ def apply_race_results(career, race_entries, points_dist):
     teams_by_id = {t["id"]: t for t in career["teams"]}
     for pos, (d, team) in enumerate(race_entries, start=1):
         d["race_pos"] = pos
+        # v0.4: best finish + the round it was achieved (standings
+        # tie-break "whoever got there first"), podiums, and the
+        # finishing-position sum/count (bot drop rule uses the average).
         if d.get("best_pos") is None or pos < d["best_pos"]:
             d["best_pos"] = pos
+            d["best_finish_round"] = career["round"]
+        if pos <= 3:
+            d["season_podiums"] = d.get("season_podiums", 0) + 1
+        d["finish_sum"] = d.get("finish_sum", 0) + pos
+        d["finish_count"] = d.get("finish_count", 0) + 1
         if pos <= len(points_dist):
             # Championship points follow the driver; team_points are
             # the points scored FOR this team (v0.2.1) — only these
@@ -196,6 +240,16 @@ def apply_race_results(career, race_entries, points_dist):
             d["team_points"] = d.get("team_points", 0) + points_dist[pos - 1]
         if pos == 1:
             d["season_wins"] += 1
+            # v0.4: a constructor win is a race win by either driver.
+            team["season_wins"] = team.get("season_wins", 0) + 1
+        # v0.4: the team's best finish is the best race finish by a
+        # driver racing FOR this team in this race, and the round it
+        # happened — tracked at race time, not recomputed from the
+        # drivers afterwards (a driver's best finish may have been
+        # scored for another team earlier in the season).
+        if team.get("best_pos") is None or pos < team["best_pos"]:
+            team["best_pos"] = pos
+            team["best_finish_round"] = career["round"]
         team["money"] += 1.95 - (0.025 * pos)
         race_rep = 5 - (pos / (n_teams * 2)) * 3.2
         d["rep"] = (race_rep + d["rep"] * 11) / 12
@@ -212,21 +266,22 @@ def apply_race_results(career, race_entries, points_dist):
                 if dd:
                     pts += dd.get("team_points", 0)
         team["points"] = pts
-        # team best pos = best of its drivers
-        bps = [next((x for x in career["drivers"] if x["id"] == did), {}).get("best_pos")
-               for did in (team["driver1_id"], team["driver2_id"]) if did]
-        bps = [b for b in bps if b is not None]
-        team["best_pos"] = min(bps) if bps else None
+        # (v0.4: team best_pos / best_finish_round are tracked at race
+        # time above, not recomputed here.)
 
 
 def driver_standings(career):
-    """From Race.py updateDriverChampionship(): by points desc, best pos.
-    v0.2: ties are broken by last season's finishing order
+    """From Race.py updateDriverChampionship().
+
+    v0.4 (feature 1): ties sort by points, then wins, then best
+    finish, then whoever achieved that best finish FIRST (earliest
+    round); the final tie-break is last season's finishing order
     (career["prev_driver_order"]) — so at the start of a new season,
-    with everyone on 0 points, the standings show last season's order,
-    like real F1. Drivers with no previous order (promoted F2 drivers,
-    new signings) go after the carried-over drivers, ordered by best
-    finish, then driver perf, then name. Points always sort first.
+    with everyone on 0 points, the standings show last season's
+    order, like real F1. Drivers with no previous order (promoted F2
+    drivers, new signings) go after the carried-over drivers, ordered
+    by best finish, then driver perf, then name. Points always sort
+    first.
     v0.2 (revised): a replaced driver keeps their points and stays in
     the standings, so free agents with points this season are listed
     too (they scored those points as an F1 driver). F2 points do not
@@ -238,17 +293,24 @@ def driver_standings(career):
     f1 = [d for d in career["drivers"]
           if d["status"] == "f1" or (d["status"] == "free" and d["points"] > 0)]
     prev = {did: i for i, did in enumerate(career.get("prev_driver_order") or [])}
-    n_prev = len(prev)
-    return sorted(f1, key=lambda d: (
-        -d["points"],
-        prev.get(d["id"], n_prev),
-        d["best_pos"] if d["best_pos"] is not None else 99,
-        -d["perf"],
-        d["name"],
-    ))
+    return sorted(f1, key=lambda d: _driver_sort_key(d, prev))
+
+
+def f2_standings(career):
+    """v0.4 (feature 2): the background F2 championship, drivers only
+    (no F2 teams), sorted with the same rule as the F1 drivers'
+    championship — points, wins, best finish, earliest."""
+    f2 = [d for d in career["drivers"] if d["status"] == "f2"]
+    return sorted(f2, key=lambda d: _driver_sort_key(d, {}))
 
 
 def constructor_standings(career):
-    """From Race.py updateConstructorChampionship()."""
+    """From Race.py updateConstructorChampionship().
+
+    v0.4 (feature 1): points, then team wins (race wins by either
+    driver), then best finish, then earliest; the final tie-break is
+    last season's constructors' order (career["prev_team_order"]),
+    so a new season opens in last season's order."""
+    prev = {tid: i for i, tid in enumerate(career.get("prev_team_order") or [])}
     return sorted(career["teams"],
-                  key=lambda t: (-t["points"], t["best_pos"] if t["best_pos"] is not None else 99))
+                  key=lambda t: _team_sort_key(t, prev))

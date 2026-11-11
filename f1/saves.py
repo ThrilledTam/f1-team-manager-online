@@ -14,12 +14,108 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 5  # v0.3: champion history pre-filled 2010–2025 +
-# appended per in-game season (age / trophies / winning team);
-# no upfront signing cost, break-cost formula, contract choice.
-# v0.2.1: per-team points (team_points) + last team (last_team_id)
-# on drivers. v0.2: prev_driver_order (standings carry-over).
-# v0.1: results stages, circuit per round, full GP history.
+SAVE_VERSION = 6  # v0.4: standings sort (best finish + earliest round),
+# F2 standings, constructors' wins, Test & Reserve drivers, winter
+# break 3-round offer flow, regulation adaptation/research model.
+# v0.3: champion history pre-filled 2010–2025 + appended per in-game
+# season (age / trophies / winning team); no upfront signing cost,
+# break-cost formula, contract choice. v0.2.1: per-team points
+# (team_points) + last team (last_team_id) on drivers. v0.2:
+# prev_driver_order (standings carry-over). v0.1: results stages,
+# circuit per round, full GP history.
+
+
+def _reconstruct_last_season(doc):
+    """Best-effort last-season snapshot for a v5 winter-break save,
+    rebuilt from race_history (the season just finished is year - 1).
+    The v0.3 end_of_season already reset every driver's points to 0,
+    so the race tables are the only record of the final standings.
+    Qual head-to-head is rebuilt from the qual tables too. Returns
+    {year, drivers, teams} in final order, or None when there is no
+    race history for that year."""
+    year = (doc.get("year") or 1) - 1
+    entries = [e for e in doc.get("race_history") or []
+               if e.get("year") == year and e.get("race")]
+    if not entries:
+        return None
+    drivers = {d["id"]: d for d in doc.get("drivers") or []}
+    teams = {t["id"]: t for t in doc.get("teams") or []}
+    dstat = {}
+    tstat = {}
+    qual_h2h = {}
+    for e in entries:
+        rnd = e.get("round") or 99
+        for row in e.get("race") or []:
+            did, tid, pos = row.get("driver_id"), row.get("team_id"), row.get("pos")
+            pts = row.get("points") or 0
+            if did and did in drivers and pos is not None:
+                s = dstat.setdefault(did, {"points": 0, "wins": 0, "podiums": 0,
+                                           "best_pos": None, "best_round": None,
+                                           "finish_sum": 0, "finish_count": 0})
+                s["points"] += pts
+                if pos == 1:
+                    s["wins"] += 1
+                if pos <= 3:
+                    s["podiums"] += 1
+                if s["best_pos"] is None or pos < s["best_pos"]:
+                    s["best_pos"] = pos
+                    s["best_round"] = rnd
+                s["finish_sum"] += pos
+                s["finish_count"] += 1
+            if tid and tid in teams and pos is not None:
+                s = tstat.setdefault(tid, {"points": 0, "wins": 0,
+                                           "best_pos": None, "best_round": None})
+                s["points"] += pts
+                if pos == 1:
+                    s["wins"] += 1
+                if s["best_pos"] is None or pos < s["best_pos"]:
+                    s["best_pos"] = pos
+                    s["best_round"] = rnd
+        # Qualifying head-to-head, from the qual table of this round.
+        by_team = {}
+        for row in e.get("qual") or []:
+            if row.get("driver_id") and row.get("team_id") and row.get("pos") is not None:
+                by_team.setdefault(row["team_id"], []).append(row)
+        for rows in by_team.values():
+            if len(rows) >= 2:
+                best = min(rows, key=lambda r: r["pos"])
+                qual_h2h[best["driver_id"]] = qual_h2h.get(best["driver_id"], 0) + 1
+    prev_d = {did: i for i, did in enumerate(doc.get("prev_driver_order") or [])}
+
+    def dkey(item):
+        did, s = item
+        return (-s["points"], -s["wins"],
+                s["best_pos"] if s["best_pos"] is not None else 99,
+                s["best_round"] if s["best_round"] is not None else 99,
+                prev_d.get(did, len(prev_d)),
+                drivers[did].get("name", ""))
+
+    drv_list = []
+    for did, s in sorted(dstat.items(), key=dkey):
+        d = drivers[did]
+        team = teams.get(d.get("team_id")) or {}
+        drv_list.append({
+            "id": did, "name": d["name"],
+            "team": team.get("name", ""), "team_id": d.get("team_id"),
+            "points": s["points"], "wins": s["wins"],
+            "podiums": s["podiums"], "best_pos": s["best_pos"],
+            "qual_h2h": qual_h2h.get(did, 0),
+            "avg_finish": round(s["finish_sum"] / s["finish_count"], 1)
+                          if s["finish_count"] else None,
+        })
+
+    def tkey(item):
+        tid, s = item
+        return (-s["points"], -s["wins"],
+                s["best_pos"] if s["best_pos"] is not None else 99,
+                s["best_round"] if s["best_round"] is not None else 99,
+                teams[tid].get("name", ""))
+
+    team_list = [{"id": tid, "name": teams[tid]["name"],
+                  "points": s["points"], "wins": s["wins"],
+                  "best_pos": s["best_pos"]}
+                 for tid, s in sorted(tstat.items(), key=tkey)]
+    return {"year": year, "drivers": drv_list, "teams": team_list}
 
 
 def migrate_save(doc):
@@ -70,6 +166,48 @@ def migrate_save(doc):
         for item in entry.get("top3") or []:
             if "team_id" not in item:
                 item["team_id"] = by_name.get(item.get("team"))
+    # v0.4: standings tie-break tracking (best finish + the round it
+    # was achieved, podiums, qualifying head-to-head, finishing
+    # positions) on every driver; regulation state + season wins on
+    # every team. T&R drivers are just a driver status ('tr') — no
+    # separate migration needed.
+    for d in doc.get("drivers") or []:
+        d.setdefault("best_finish_round", None)
+        d.setdefault("season_podiums", 0)
+        d.setdefault("season_qual_h2h", 0)
+        d.setdefault("finish_sum", 0)
+        d.setdefault("finish_count", 0)
+    for team in doc.get("teams") or []:
+        team.setdefault("reg_total", 0.0)
+        team.setdefault("reg_adapted", 0.0)
+        team.setdefault("reg_unadapted", 0.0)
+        team.setdefault("reg_pending", False)
+        team.setdefault("season_wins", 0)
+        team.setdefault("best_finish_round", None)
+    # v0.4: constructors' carry-over order, the last-season snapshot
+    # (winter-break review + offer resolution order), and the
+    # winter-break flow state.
+    doc.setdefault("prev_team_order", [])
+    doc.setdefault("wb_round", 0)
+    doc.setdefault("wb_offers", {})
+    doc.setdefault("wb_ready", [])
+    doc.setdefault("wb_done", False)
+    doc.setdefault("pending_reg_year", None)
+    doc.setdefault("pending_reg_kind", None)
+    if "last_season" not in doc or doc.get("last_season") is None:
+        doc["last_season"] = _reconstruct_last_season(doc)
+    if doc.get("phase") == "winter_break" and not doc.get("wb_done"):
+        # A v5 winter-break save enters the new 3-round offer flow at
+        # round 1 (its reg change was already applied under v0.3, so
+        # reg_pending stays False and no reg change is applied again
+        # when the break ends). Bot offers for round 1 are generated
+        # when the room loads the career (server.py).
+        if not doc.get("wb_round"):
+            doc["wb_round"] = 1
+        doc.setdefault("wb_offers", {})
+        doc.setdefault("wb_ready", [])
+        if not doc.get("prev_team_order") and doc.get("last_season"):
+            doc["prev_team_order"] = [t["id"] for t in doc["last_season"]["teams"]]
     # A career saved mid-results under v0 never existed (v0 had no results
     # stages), but guard anyway: drop back to the dashboard round.
     if doc.get("phase") == "race_results":

@@ -49,6 +49,52 @@ def reg_change(grid_avg, target, perf, research, rng=None):
     return round(new_perf, 2)
 
 
+# ---------------------------------------------------------------------------
+# v0.4 — regulation research revamp (feature 7). The old reg_change()
+# above is kept for the v0.1–v0.3 tests and as the formula family this
+# is adapted from. The new model works on ADAPTED car perf, not on the
+# current car perf:
+#
+#   new_perf = adapted + research_gain + chaos
+#   research_gain = 12 * log1p(research), capped at 70% of target
+#   chaos = uniform(-4, 4)
+#
+# with one hard rule: if a team adapted nothing and researched
+# nothing, the new car is 0 perf — exactly (no chaos, no catch-up,
+# no floor). The catch-up bonus and the 72%-of-average floor from
+# the old formula are deliberately NOT applied here: both would
+# resurrect a car that adapted nothing, contradicting the "0 perf"
+# rule, and the unadapted formula itself already compresses the
+# field (a top team must adapt far more than a backmarker, and a
+# backmarker starts fully adapted). The research gain keeps the
+# 12*log1p shape and the 70%-of-target cap from regChange().
+# ---------------------------------------------------------------------------
+REG_ADAPT_COST_PER_POINT = 0.25   # $M per point of car perf adapted
+REG_OPENS_ROUND = 7               # reg research opens at round 7
+WINTER_BREAK_ROUNDS = 3           # v0.4: winter break is 3 offer rounds
+TR_RESEARCH_BONUS = 0.25          # v0.4: +25% research per T&R driver
+MAX_TR_DRIVERS = 2                # v0.4: at most 2 T&R drivers per team
+
+
+def reg_change_v2(adapted, research, target, rng=None):
+    """v0.4 reg change: next season's starting car perf from the
+    adapted part of the car plus research gains.
+
+    adapted: perf points already fitted to the new regulations.
+    research: $M invested in regulation research after full adaptation.
+    target: 12 (minor year) or 35 (major year) — the research gain is
+    capped at 70% of it, as in regChange().
+    Returns 0.0 exactly when nothing was adapted or researched."""
+    rng = rng or random
+    adapted = float(adapted or 0.0)
+    research = float(research or 0.0)
+    if adapted <= 0 and research <= 0:
+        return 0.0
+    research_gain = min(12 * math.log1p(research), target * 0.70)
+    chaos = rng.uniform(-4, 4)
+    return round(max(0.0, adapted + research_gain + chaos), 2)
+
+
 def reg_squeeze(perfs):
     """From Rules.py regSqueeze(): compresses a too-spread field toward the top.
 

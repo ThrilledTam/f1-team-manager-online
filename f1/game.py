@@ -22,10 +22,13 @@ from .data import (
     PREV_SEASON_TEAM_ORDER, circuit_for_round,
 )
 from .models import make_driver, make_team, new_career_dict
+from .rules import SEASON_LENGTH, MAX_SEASONS
 from .rules import (
-    SEASON_LENGTH, MAX_SEASONS, REG_MINOR_TARGET, REG_MAJOR_TARGET,
-    add_perf_gain, add_rel_gain, dsus, finance_estimates, is_retiring,
-    reg_change, retirement_chance, update_points_dist,
+    MAX_TR_DRIVERS, REG_ADAPT_COST_PER_POINT, REG_OPENS_ROUND,
+    REG_MAJOR_TARGET, REG_MINOR_TARGET, TR_RESEARCH_BONUS,
+    WINTER_BREAK_ROUNDS, add_perf_gain, add_rel_gain, dsus,
+    finance_estimates, is_retiring, reg_change, reg_change_v2,
+    retirement_chance, update_points_dist,
 )
 
 CUSTOM_TEAM_MONEY = 6.0
@@ -92,6 +95,16 @@ def build_new_career(name, host_nickname, chart_on=True):
     # a stable sort, so at 0 points the list order is the order shown.
     rank = {n: i for i, n in enumerate(PREV_SEASON_TEAM_ORDER)}
     career["teams"].sort(key=lambda t: rank.get(t["name"], len(rank)))
+    # v0.4: the constructors' carry-over order, so the new
+    # constructor_standings() sort (points, wins, best finish,
+    # earliest, then last season's order) opens season 1 in the real
+    # 2025 constructors' order — the list sort above alone is not
+    # enough any more, because the sort key falls through to the team
+    # name when every team is tied on 0 points.
+    by_team_name = {t["name"]: t for t in career["teams"]}
+    career["prev_team_order"] = [by_team_name[n]["id"]
+                                 for n in PREV_SEASON_TEAM_ORDER
+                                 if n in by_team_name]
     # v0.3: champion history starts with the real 2010–2025 table;
     # in-game seasons append as they complete (see end_of_season).
     career["champion_history"] = [dict(r) for r in CHAMPION_HISTORY_2010_2025]
@@ -144,6 +157,23 @@ def team_drivers(career, team):
     return [d for d in out if d]
 
 
+def team_tr_drivers(career, team):
+    """v0.4: a team's Test & Reserve drivers — status 'tr', affiliated
+    with this team. They do not race and never appear in the F1
+    standings, but they are paid their full salary and add +25% each
+    to research gained. At most MAX_TR_DRIVERS (2) per team."""
+    return [d for d in career["drivers"]
+            if d.get("status") == "tr" and d.get("team_id") == team["id"]]
+
+
+def research_multiplier(career, team):
+    """v0.4: each T&R driver adds +25% to research gained from an
+    investment — 1 T&R -> x1.25, 2 T&R -> x1.50. Applies to the
+    Performance / Reliability research pools (car-parts research);
+    regulation research is a separate pool and is not boosted."""
+    return 1.0 + TR_RESEARCH_BONUS * len(team_tr_drivers(career, team))
+
+
 def free_agents(career):
     return [d for d in career["drivers"] if d["status"] == "free"]
 
@@ -161,7 +191,11 @@ def constructor_pos(career, team_id):
 
 
 def salary_per_round(career, team):
+    """Salary cost after each race: salary/12 for every driver on the
+    team — the two main drivers AND any T&R drivers. v0.4: T&R
+    drivers are paid their FULL salary even though they do not race."""
     total = sum(d["salary"] for d in team_drivers(career, team))
+    total += sum(d["salary"] for d in team_tr_drivers(career, team))
     return total / SEASON_LENGTH
 
 
@@ -236,16 +270,21 @@ def do_research(career, team_id, priority, amount):
         return False, "Priority must be Performance or Reliability."
     # From Main.py: Performance adds PerfRes and -(invest/3) ReliRes;
     # Reliability adds ReliRes and -(invest/5) PerfRes.
+    # v0.4: each T&R driver adds +25% to the research POOL gained
+    # (x1.25 with one T&R driver, x1.50 with two). The cross-penalty
+    # is not boosted — it is a cost of the investment, not a gain.
+    mult = research_multiplier(career, team)
     if priority == "perf":
-        team["perf_res"] += amount
+        team["perf_res"] += amount * mult
         team["reli_res"] -= amount / 3.0
     else:
         team["perf_res"] -= amount / 5.0
-        team["reli_res"] += amount
+        team["reli_res"] += amount * mult
     team["money"] -= amount
     label = "Performance" if priority == "perf" else "Reliability"
     pool = team["perf_res"] if priority == "perf" else team["reli_res"]
-    return True, f"Invested ${amount:.2f}M in {label} research ✓ (pool now {pool:.2f})"
+    bonus = f" (x{mult:.2f} with T&R drivers)" if mult > 1.0 else ""
+    return True, f"Invested ${amount:.2f}M in {label} research ✓ (pool now {pool:.2f}){bonus}"
 
 
 def do_develop(career, team_id):
@@ -282,12 +321,122 @@ def do_tuning(career, team_id, value):
     return True, f"Tuning set to {value:+d} ✓"
 
 
-def do_reg_research(career, team_id, amount):
-    """Reg Research (v0): a separate pool from normal research. Money in
-    now is carried to the next reg change at season rollover."""
+def reg_open_for(career, team):
+    """v0.4 (feature 7): regulation research (adaptation + research
+    for next season's regulations) is open from the start of round 7,
+    and stays open during the winter break while a reg change is
+    pending. Before round 7 the control is greyed out."""
+    if career.get("phase") == "winter_break":
+        return bool(team.get("reg_pending"))
+    return career.get("phase") == "round" and career.get("round", 1) >= REG_OPENS_ROUND
+
+
+def init_reg_state(career):
+    """v0.4 (feature 7): at the start of round 7, initialise every
+    team's regulation state for next season's regulations, from the
+    car perf at round 7. Minor year: unadapted = own perf - bottom
+    team's perf (the top team adapts the most, the bottom team is
+    fully adapted and can research straight away). Major year: ALL
+    parts are unadapted (unadapted = the full car perf)."""
+    if not career["teams"]:
+        return
+    major = career.get("next_reg_kind") == "Major"
+    bottom = min(t["perf"] for t in career["teams"])
+    # Record which change this state is FOR — the change into the
+    # season after this one. start_next_season() applies it with
+    # the right target (minor 12 / major 35).
+    career["pending_reg_year"] = career.get("next_reg_year")
+    career["pending_reg_kind"] = career.get("next_reg_kind")
+    for team in career["teams"]:
+        total = float(team["perf"])
+        unadapted = total if major else max(0.0, total - bottom)
+        team["reg_total"] = total
+        team["reg_unadapted"] = round(unadapted, 2)
+        team["reg_adapted"] = round(total - unadapted, 2)
+        team["reg_pending"] = True
+        # reg_research is NOT reset here — it is already 0 for a team
+        # that has never researched, and any pool built up before
+        # round 7 (bots only) is kept.
+
+
+def reg_view(career, team):
+    """v0.4 (feature 7): the regulation progress a player is allowed
+    to see — percentages and money ONLY, never the true car
+    performance value. Returns {open, adapted_pct, unadapted_pct,
+    adapt_cost, research, kind, year}."""
+    total = float(team.get("reg_total") or 0.0)
+    adapted = float(team.get("reg_adapted") or 0.0)
+    unadapted = float(team.get("reg_unadapted") or 0.0)
+    if total > 0:
+        adapted_pct = round(100.0 * adapted / total, 1)
+        unadapted_pct = round(100.0 * unadapted / total, 1)
+    else:
+        adapted_pct = 100.0 if not unadapted else 0.0
+        unadapted_pct = 100.0 - adapted_pct
+    return {
+        "open": reg_open_for(career, team),
+        "adapted_pct": adapted_pct,
+        "unadapted_pct": unadapted_pct,
+        "adapt_cost": round(unadapted * REG_ADAPT_COST_PER_POINT, 2),
+        "research": round(float(team.get("reg_research") or 0.0), 2),
+        "kind": career.get("next_reg_kind") or "Minor",
+        "year": career.get("next_reg_year"),
+    }
+
+
+def do_reg_adapt(career, team_id, points=None):
+    """v0.4 (feature 7): spend money to adapt unadapted car parts to
+    next season's regulations — $0.25M per point of car perf.
+    points=None adapts everything still unadapted; otherwise adapt
+    up to that many points. Only while reg research is open."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
+    if not reg_open_for(career, team):
+        return False, "Regulation research opens at round 7."
+    unadapted = float(team.get("reg_unadapted") or 0.0)
+    if unadapted <= 0:
+        return False, "Your car is already fully adapted to the new regulations."
+    if points is None:
+        want = unadapted
+    else:
+        try:
+            want = float(points)
+        except (TypeError, ValueError):
+            return False, "Adapt amount must be a number."
+        if want <= 0:
+            return False, "Adapt amount must be positive."
+    adapt = min(want, unadapted)
+    cost = round(adapt * REG_ADAPT_COST_PER_POINT, 2)
+    if cost > team["money"]:
+        affordable = int(team["money"] / REG_ADAPT_COST_PER_POINT)
+        if affordable <= 0:
+            return False, f"Need ${cost:.2f}M to adapt {adapt:.1f} pts."
+        adapt = float(affordable)
+        cost = round(adapt * REG_ADAPT_COST_PER_POINT, 2)
+    team["reg_unadapted"] = round(unadapted - adapt, 2)
+    team["reg_adapted"] = round(float(team.get("reg_adapted") or 0.0) + adapt, 2)
+    team["money"] -= cost
+    left = float(team.get("reg_unadapted") or 0.0)
+    done = " — fully adapted ✓, regulation research is now open" if left <= 0 else ""
+    return True, (f"Adapted {adapt:.1f} pts to the new regulations ✓ "
+                  f"(${cost:.2f}M, {left:.1f} pts still to adapt){done}")
+
+
+def do_reg_research(career, team_id, amount):
+    """Reg Research (v0.4): a separate pool from normal research.
+    Money in now is carried to the next reg change at season start.
+    Only available once the car is 100% adapted to the new
+    regulations, and only while reg research is open (round 7+, or
+    winter break with a pending reg change)."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    if not reg_open_for(career, team):
+        return False, "Regulation research opens at round 7."
+    if float(team.get("reg_unadapted") or 0.0) > 0:
+        return False, ("Adapt your car to the new regulations first — "
+                       "regulation research opens once you are 100% adapted.")
     try:
         amount = float(amount)
     except (TypeError, ValueError):
@@ -302,51 +451,81 @@ def do_reg_research(career, team_id, amount):
                   f"(total ${team['reg_research']:.2f}M)")
 
 
-def break_cost(career, team_id, driver_id, seat):
-    """Cost of signing a driver into a seat, computed the exact way
-    sign_driver() charges it — the single source of truth, so the
-    number shown in the Driver Market is always the number charged.
+def break_fee_for_driver(career, driver):
+    """v0.4: the contract-break fee for one driver, from the v0.3
+    formula — rounds_remaining x salary/12 + $2.0M, where
+    rounds_remaining = (12 - current_round + 1) + max(0,
+    contract_years - 1) * 12 (in winter break: contract_years * 12).
+    Used for the occupant of a seat being replaced AND for poaching
+    a driver out of another team's contract."""
+    if career.get("phase") == "winter_break":
+        rounds_remaining = driver["contract_left"] * SEASON_LENGTH
+    else:
+        rounds_remaining = ((SEASON_LENGTH - career["round"] + 1)
+                            + max(0, driver["contract_left"] - 1) * SEASON_LENGTH)
+    return round(rounds_remaining * driver["salary"] / SEASON_LENGTH + 2.0, 2)
 
-    v0.3 (replaces the v0.2.1 signing fee + old break fee): signing
-    is FREE — a driver's MV is their salary per season, paid
-    salary/12 after each race, never upfront. The only cost is
-    breaking the current driver's contract, when the seat is
-    occupied (0 for an empty seat):
 
-        rounds_remaining = (12 - current_round + 1)
-                           + max(0, contract_years - 1) * 12
-        break_cost = rounds_remaining * salary / 12 + $2.0M
+def sign_cost(career, team_id, driver_id, target):
+    """v0.4: the total cost of signing a driver, computed the exact
+    way sign_driver() / sign_tr_driver() charge it — the single
+    source of truth, so the number shown in the Driver Market is
+    always the number charged.
 
-    current_round is the 1-indexed round about to be played and
-    contract_years is the outgoing driver's remaining contract years
-    including the current season. In winter break the current season
-    is over, so rounds_remaining = contract_years * 12.
+    target is ("seat", 1 | 2) for a main seat or ("tr", None) for a
+    T&R slot. The cost is:
+      break fee for the occupant of the target main seat (0 for an
+        empty seat, and 0 for a T&R slot — it is a new affiliation)
+    + break fee for the driver being signed, IF they are currently
+        under contract with another team (poaching, main or T&R).
+    Signing itself is FREE — a driver's MV is their salary per
+    season, paid salary/12 after each race, never upfront (v0.3).
 
-    Matthew's example: Gasly, contract 3, start of round 9 (4 rounds
-    left this season), salary $4.0M -> 28 x $4.0M/12 + $2.0M = $11.33M.
-
-    Returns {total, break_fee, affordable} or None when the
-    team/driver/seat is invalid."""
+    Returns {total, break_fee, poach_fee, affordable} or None when
+    the team/driver/target is invalid."""
     team = get_team(career, team_id)
     if not team:
         return None
+    d = get_driver(career, driver_id)
+    if not d:
+        return None
+    if target[0] == "seat":
+        if target[1] not in (1, 2):
+            return None
+    elif target[0] != "tr":
+        return None
+    break_fee = 0.0
+    if target[0] == "seat":
+        slot = "driver1_id" if target[1] == 1 else "driver2_id"
+        current = get_driver(career, team[slot]) if team[slot] else None
+        if current:
+            break_fee = break_fee_for_driver(career, current)
+    poach_fee = 0.0
+    # Poaching: the driver is under contract with another team
+    # (a main driver there, or a T&R driver there).
+    if d.get("status") in ("f1", "tr") and d.get("team_id") and d["team_id"] != team["id"]:
+        poach_fee = break_fee_for_driver(career, d)
+    total = round(break_fee + poach_fee, 2)
+    return {"total": total, "break_fee": break_fee, "poach_fee": poach_fee,
+            "affordable": total <= team["money"]}
+
+
+def break_cost(career, team_id, driver_id, seat):
+    """Cost of signing a free-agent / F2 driver into a main seat —
+    the v0.3 helper, kept for the market UI and the old tests. It is
+    sign_cost() for ("seat", seat) with a free/F2 driver (no poaching
+    fee, since the driver is not under contract with another team).
+    Returns {total, break_fee, affordable} or None."""
     if seat not in (1, 2):
         return None
     d = get_driver(career, driver_id)
     if not d or d["status"] not in ("free", "f2"):
         return None
-    slot = "driver1_id" if seat == 1 else "driver2_id"
-    current = get_driver(career, team[slot]) if team[slot] else None
-    if not current:
-        return {"total": 0.0, "break_fee": 0.0, "affordable": True}
-    if career.get("phase") == "winter_break":
-        rounds_remaining = current["contract_left"] * SEASON_LENGTH
-    else:
-        rounds_remaining = ((SEASON_LENGTH - career["round"] + 1)
-                            + max(0, current["contract_left"] - 1) * SEASON_LENGTH)
-    fee = rounds_remaining * current["salary"] / SEASON_LENGTH + 2.0
-    return {"total": round(fee, 2), "break_fee": round(fee, 2),
-            "affordable": fee <= team["money"]}
+    quote = sign_cost(career, team_id, driver_id, ("seat", seat))
+    if quote is None:
+        return None
+    return {"total": quote["total"], "break_fee": quote["break_fee"],
+            "affordable": quote["affordable"]}
 
 
 def _release_driver(career, driver, team):
@@ -364,17 +543,42 @@ def _release_driver(career, driver, team):
     driver["contract_left"] = 0
 
 
-def sign_driver(career, team_id, driver_id, seat, contract_years=2):
-    """Sign a free-agent / F2 driver into a seat (1 or 2).
+def _sign_driver_common(career, team, d, contract_years):
+    """Shared tail of a signing: the driver joins the team with a
+    fresh per-team tally (championship points/wins/best finish follow
+    the driver; an F2 driver starts at 0 — their F2 points must not
+    carry into F1)."""
+    if d["status"] == "f2":
+        d["points"] = 0
+        d["season_wins"] = 0
+        d["season_podiums"] = 0
+        d["season_qual_h2h"] = 0
+        d["best_pos"] = None
+        d["best_finish_round"] = None
+        d["finish_sum"] = 0
+        d["finish_count"] = 0
+    # A free agent keeps championship points/wins/best finish from an
+    # earlier stint; either way the per-team tally restarts at 0.
+    d["team_points"] = 0
+    d["last_team_id"] = None
+    d["contract_left"] = contract_years
 
+
+def sign_driver(career, team_id, driver_id, seat, contract_years=2):
+    """Sign a driver into a main seat (1 or 2).
+
+    v0.4: the driver may come from free agency, F2, or another team
+    (poaching — main driver or T&R driver, with the break fee from
+    sign_cost()). The signed driver takes the seat offered. During
+    the winter break, signings go through the offer system instead —
+    use winter offers, not this direct signing.
     v0.3: signing is FREE — no upfront fee. A driver's MV is their
     salary per season, paid salary/12 after each race (see
     run_race_weekend). The only charge is breaking the current
-    driver's contract when the seat is occupied: break_cost()
-    (rounds left x salary/12 + $2.0M). The new driver gets the
-    contract length the signing manager picked: an integer 1–4
-    years (the player picks in the Driver Market confirm step;
-    bots pick via ai_contract_years()).
+    driver's contract when the seat is occupied, plus the poaching
+    break fee when the driver is under contract elsewhere.
+    The new driver gets the contract length the signing manager
+    picked: an integer 1–4 years.
 
     v0.2.1 (real F1, per Matthew's correction): the outgoing driver
     KEEPS their championship points and stays in the driver standings,
@@ -388,6 +592,8 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
+    if career.get("phase") == "winter_break":
+        return False, "Winter break: sign drivers with offers, not directly."
     if seat not in (1, 2):
         return False, "Seat must be 1 or 2."
     try:
@@ -397,36 +603,41 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     if not 1 <= contract_years <= 4:
         return False, "Contract length must be 1–4 years."
     d = get_driver(career, driver_id)
-    if not d or d["status"] not in ("free", "f2"):
+    if not d or d["status"] not in ("free", "f2", "f1", "tr"):
         return False, "That driver is not available to sign."
+    if d.get("status") in ("f1", "tr") and d.get("team_id") == team["id"]:
+        return False, "That driver already races for your team."
     slot = "driver1_id" if seat == 1 else "driver2_id"
     current = get_driver(career, team[slot]) if team[slot] else None
-    quote = break_cost(career, team_id, driver_id, seat)
+    quote = sign_cost(career, team_id, driver_id, ("seat", seat))
+    if quote is None:
+        return False, "That signing is not possible."
     cost = quote["total"]
     if cost > team["money"]:
-        if current:
-            return False, (f"Need ${cost:.2f}M to break "
-                           f"{current['name']}'s contract.")
-        return False, f"Need ${cost:.2f}M."
+        return False, f"Need ${cost:.2f}M to sign {d['name']}."
+    # Poaching: the driver leaves their current team first (their
+    # points scored FOR that team stay there, banked — real F1).
+    source_team = None
+    if d.get("status") in ("f1", "tr") and d.get("team_id"):
+        source_team = get_team(career, d["team_id"])
+        if source_team is not None:
+            if source_team["driver1_id"] == d["id"]:
+                source_team["driver1_id"] = None
+            if source_team["driver2_id"] == d["id"]:
+                source_team["driver2_id"] = None
+            _release_driver(career, d, source_team)
+            _recompute_team_points(career, source_team)
+            career["transfers"].append(
+                f"{d['name']} left {source_team['name']} (poached by {team['name']})")
     team["money"] -= cost
     if current:
         _release_driver(career, current, team)
         current["status"] = "free"
         career["transfers"].append(
             f"{current['name']} left {team['name']} (contract broken)")
-    if d["status"] == "f2":
-        # F2 points are a different championship — a promoted driver
-        # starts their F1 tally at 0.
-        d["points"] = 0
-        d["season_wins"] = 0
-        d["best_pos"] = None
-    # A free agent keeps championship points/wins/best finish from an
-    # earlier stint; either way the per-team tally restarts at 0.
-    d["team_points"] = 0
-    d["last_team_id"] = None
+    _sign_driver_common(career, team, d, contract_years)
     d["status"] = "f1"
     d["team_id"] = team["id"]
-    d["contract_left"] = contract_years
     team[slot] = d["id"]
     # Team points are the current drivers' per-team points plus any
     # points banked from drivers who scored for this team and have
@@ -441,22 +652,145 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
                   f"(Seat {seat}, {contract_years}-year contract) — Free")
 
 
+def sign_tr_driver(career, team_id, driver_id, contract_years=2):
+    """v0.4: sign a driver as a Test & Reserve driver for a team.
+    The driver may come from free agency, F2, or another team
+    (poaching — with the break fee). At most 2 T&R drivers per team.
+    T&R drivers are paid their FULL salary (salary/12 after each
+    race) even though they do not race, and each adds +25% to
+    research gained. During the winter break, T&R signings go
+    through the offer system instead."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    if career.get("phase") == "winter_break":
+        return False, "Winter break: sign drivers with offers, not directly."
+    try:
+        contract_years = int(contract_years)
+    except (TypeError, ValueError):
+        return False, "Contract length must be a whole number of years (1–4)."
+    if not 1 <= contract_years <= 4:
+        return False, "Contract length must be 1–4 years."
+    if len(team_tr_drivers(career, team)) >= MAX_TR_DRIVERS:
+        return False, f"{team['name']} already has {MAX_TR_DRIVERS} T&R drivers."
+    d = get_driver(career, driver_id)
+    if not d or d["status"] not in ("free", "f2", "f1", "tr"):
+        return False, "That driver is not available to sign."
+    if d.get("status") in ("f1", "tr") and d.get("team_id") == team["id"]:
+        return False, "That driver already races for your team."
+    quote = sign_cost(career, team_id, driver_id, ("tr", None))
+    if quote is None:
+        return False, "That signing is not possible."
+    cost = quote["total"]
+    if cost > team["money"]:
+        return False, f"Need ${cost:.2f}M to sign {d['name']}."
+    source_team = None
+    if d.get("status") in ("f1", "tr") and d.get("team_id"):
+        source_team = get_team(career, d["team_id"])
+        if source_team is not None:
+            if source_team["driver1_id"] == d["id"]:
+                source_team["driver1_id"] = None
+            if source_team["driver2_id"] == d["id"]:
+                source_team["driver2_id"] = None
+            _release_driver(career, d, source_team)
+            _recompute_team_points(career, source_team)
+            career["transfers"].append(
+                f"{d['name']} left {source_team['name']} (poached by {team['name']})")
+    team["money"] -= cost
+    _sign_driver_common(career, team, d, contract_years)
+    d["status"] = "tr"
+    d["team_id"] = team["id"]
+    career["transfers"].append(
+        f"{d['name']} signed for {team['name']} as Test & Reserve")
+    if cost > 0:
+        return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
+                      f"({contract_years}-year contract) — ${cost:.2f}M break fee")
+    return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
+                  f"({contract_years}-year contract) — Free")
+
+
+def swap_main_tr(career, team_id, seat, tr_driver_id):
+    """v0.4: swap a main driver with a T&R driver — free, instant,
+    between races (not during a race weekend). The two simply swap
+    roles: the main driver becomes T&R (keeping their contract and
+    championship points), the T&R driver takes the main seat.
+    Points rule (same as v0.2.1): the outgoing main driver's
+    team_points are banked into the team's points_kept; the incoming
+    driver starts with team_points 0 for this team; championship
+    points/wins/best finish always follow the driver."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    if career.get("phase") not in ("round", "winter_break"):
+        return False, "You can only swap drivers between races."
+    if seat not in (1, 2):
+        return False, "Seat must be 1 or 2."
+    slot = "driver1_id" if seat == 1 else "driver2_id"
+    main = get_driver(career, team[slot]) if team[slot] else None
+    if not main:
+        return False, f"Seat {seat} is empty — promote a T&R driver instead."
+    tr = get_driver(career, tr_driver_id)
+    if not tr or tr.get("status") != "tr" or tr.get("team_id") != team["id"]:
+        return False, "That driver is not one of your T&R drivers."
+    # Outgoing main driver: bank their per-team points (real F1),
+    # keep their contract and championship tally, become T&R.
+    team["points_kept"] = team.get("points_kept", 0) + main.get("team_points", 0)
+    main["team_points"] = 0
+    main["last_team_id"] = None
+    main["status"] = "tr"
+    # Incoming T&R driver: take the seat, fresh per-team tally.
+    tr["team_points"] = 0
+    tr["last_team_id"] = None
+    tr["status"] = "f1"
+    team[slot] = tr["id"]
+    _recompute_team_points(career, team)
+    career["transfers"].append(
+        f"{tr['name']} swapped with {main['name']} at {team['name']}")
+    return True, (f"{tr['name']} swapped with {main['name']} ✓ "
+                  f"({tr['name']} is now Seat {seat}, {main['name']} is Test & Reserve)")
+
+
+def promote_tr_to_main(career, team_id, tr_driver_id, seat):
+    """v0.4: promote one of the team's own T&R drivers into an empty
+    main seat — free, keeps their contract. Used by the winter-break
+    auto-fill (and by a manager with an empty seat mid-season)."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    if seat not in (1, 2):
+        return False, "Seat must be 1 or 2."
+    slot = "driver1_id" if seat == 1 else "driver2_id"
+    if team[slot]:
+        return False, f"Seat {seat} is not empty."
+    tr = get_driver(career, tr_driver_id)
+    if not tr or tr.get("status") != "tr" or tr.get("team_id") != team["id"]:
+        return False, "That driver is not one of your T&R drivers."
+    tr["team_points"] = 0
+    tr["last_team_id"] = None
+    tr["status"] = "f1"
+    team[slot] = tr["id"]
+    _recompute_team_points(career, team)
+    career["transfers"].append(
+        f"{tr['name']} promoted to a race seat at {team['name']}")
+    return True, f"{tr['name']} promoted to Seat {seat} at {team['name']} ✓"
+
+
 def _recompute_team_points(career, team):
-    """Team points / best finish: the points its current drivers scored
-    FOR this team (team_points), plus points banked from departed
-    drivers who scored for this team. A driver's championship total
-    never counts here — it may include points scored for another
-    team earlier in the season."""
+    """Team points: the points its current drivers scored FOR this
+    team (team_points), plus points banked from departed drivers who
+    scored for this team. A driver's championship total never counts
+    here — it may include points scored for another team earlier in
+    the season. The team's best finish is NOT recomputed here: it is
+    the team's season record, tracked at race time (race.py) — a
+    driver's best finish may have been scored for another team
+    earlier in the season, and it must not inflate this team's
+    record."""
     pts = team.get("points_kept", 0)
-    bps = []
     for did in (team["driver1_id"], team["driver2_id"]):
         dd = get_driver(career, did) if did else None
         if dd:
             pts += dd.get("team_points", 0)
-            if dd["best_pos"] is not None:
-                bps.append(dd["best_pos"])
     team["points"] = pts
-    team["best_pos"] = min(bps) if bps else None
 
 
 # ---------------------------------------------------------------------------
@@ -538,17 +872,43 @@ def ai_act(career, team, rng=None):
         return
     salaries = salary_per_round(career, team)
     temp_funds = team["money"] - salaries
+    # v0.4 bot parity: fill an empty main seat before the race, from
+    # the best available free agent / F2 driver (highest reputation).
+    # An empty seat scores nothing, so this is the first priority.
+    for seat in (1, 2):
+        slot = "driver1_id" if seat == 1 else "driver2_id"
+        if not team[slot]:
+            best = _best_available_driver(career)
+            if best is not None:
+                sign_driver(career, team["id"], best["id"], seat,
+                            contract_years=ai_contract_years(best))
+    # v0.4 bot parity: optional T&R signing, preferring young, cheap
+    # talent — one T&R driver, signed early in the season, for the
+    # +25% research bonus. Only when the team can comfortably afford
+    # it (salaries + a buffer), and only once per season.
+    if (not team_tr_drivers(career, team)
+            and career.get("round", 1) <= 6
+            and team["money"] > salaries + 10):
+        young = [d for d in career["drivers"]
+                 if d["status"] in ("free", "f2") and d["age"] <= 25]
+        if young:
+            young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
+            sign_tr_driver(career, team["id"], young[0]["id"],
+                           contract_years=ai_contract_years(young[0]))
     if temp_funds >= 10:
         round_funds = (temp_funds - 1) * (rng.random() * 0.35 + 0.2)
     else:
         round_funds = (temp_funds - 1) * (rng.random() * 0.35)
     if round_funds > 0.5:
-        temp_inv = round_funds * rng.random() * 0.50
-        team["perf_res"] += temp_inv
-        team["money"] -= temp_inv
-        rest = round_funds - temp_inv
-        team["reli_res"] += rest
-        team["money"] -= rest
+        # v0.4: the T&R research bonus applies to bots too — each
+        # T&R driver adds +25% to the research POOL gained, for the
+        # same money spent (the pool is what the investment buys).
+        mult = research_multiplier(career, team)
+        perf_money = round_funds * rng.random() * 0.50
+        reli_money = round_funds - perf_money
+        team["perf_res"] += perf_money * mult
+        team["reli_res"] += reli_money * mult
+        team["money"] -= round_funds
         if (team["perf_res"] + team["reli_res"]) > (rng.random() + 2.0) \
                 and rng.random() > 0.5:
             team["perf"] += add_perf_gain(team["perf"], team["perf_res"])
@@ -566,12 +926,91 @@ def ai_act(career, team, rng=None):
             team["tuning"] = 0
     else:
         team["tuning"] = 0
-    # Reg research: a modest share of what is left over.
-    if temp_funds > 5 and team["money"] > salaries + 1:
-        reg_amt = round(min(0.10 * temp_funds, team["money"] - salaries - 1), 2)
-        if reg_amt > 0:
-            team["reg_research"] += reg_amt
-            team["money"] -= reg_amt
+    # v0.4 bot parity: regulation research from round 7 onward.
+    # Adapt first (the unadapted part of the car), then research once
+    # fully adapted. Bots spend a modest share of what is left over
+    # after salaries — the same share the old code spent on reg
+    # research, now routed through the adaptation model.
+    if reg_open_for(career, team) and temp_funds > 5 \
+            and team["money"] > salaries + 1:
+        budget = round(min(0.10 * temp_funds, team["money"] - salaries - 1), 2)
+        unadapted = float(team.get("reg_unadapted") or 0.0)
+        if unadapted > 0 and budget > 0:
+            points = min(unadapted, budget / REG_ADAPT_COST_PER_POINT)
+            ok, _why = do_reg_adapt(career, team["id"], points=points)
+            if ok:
+                budget = round(budget - points * REG_ADAPT_COST_PER_POINT, 2)
+        if budget > 0 and float(team.get("reg_unadapted") or 0.0) <= 0:
+            do_reg_research(career, team["id"], budget)
+
+
+def _best_available_driver(career):
+    """Best free-agent / F2 driver by reputation (bots may use rep;
+    players never see it). Ties: cheaper salary, then name. None when
+    nobody is available."""
+    cands = [d for d in career["drivers"] if d["status"] in ("free", "f2")]
+    if not cands:
+        return None
+    cands.sort(key=lambda d: (-d["rep"], d["salary"], d["name"]))
+    return cands[0]
+
+
+def bot_post_race(career, rng=None):
+    """v0.4 bot parity: dropping a driver for really bad performance,
+    and using the swap. After each race from round 6 onward, if a bot
+    team's main driver has 0 points this season AND an average finish
+    of 18th or worse, the bot acts:
+      - if the team has a T&R driver, SWAP the underperforming main
+        driver with the (highest-rep) T&R driver (free, same points
+        rules as a player swap);
+      - otherwise DROP the driver (contract broken — the team pays
+        break_cost(); if it cannot afford the break fee, it does not
+        drop) and the seat becomes empty to fill via the market /
+        winter break.
+    Never in the last 2 rounds of a season (round >= 11). At most one
+    action per team per race (the worst underperformer). Applies to
+    AI teams only, not to disconnected humans' teams. Every action is
+    logged in the Transfers log (History & Rumours)."""
+    rng = rng or random
+    if career.get("round", 1) < 6 or career.get("round", 1) >= SEASON_LENGTH - 1:
+        return
+    for team in career["teams"]:
+        if not team["is_ai"]:
+            continue
+        worst = None
+        worst_avg = 0.0
+        for seat in (1, 2):
+            slot = "driver1_id" if seat == 1 else "driver2_id"
+            d = get_driver(career, team[slot]) if team[slot] else None
+            if not d:
+                continue
+            count = d.get("finish_count", 0)
+            if count == 0:
+                continue
+            avg = d.get("finish_sum", 0) / count
+            if d.get("points", 0) == 0 and avg >= 18.0:
+                if worst is None or avg > worst_avg:
+                    worst, worst_avg = (seat, d), avg
+        if worst is None:
+            continue
+        seat, d = worst
+        trs = team_tr_drivers(career, team)
+        if trs:
+            trs.sort(key=lambda x: (-x["rep"], x["name"]))
+            # swap_main_tr logs the swap in the Transfers log.
+            swap_main_tr(career, team["id"], seat, trs[0]["id"])
+            continue
+        fee = break_fee_for_driver(career, d)
+        if fee > team["money"]:
+            continue  # cannot afford the break fee: do not drop
+        slot = "driver1_id" if seat == 1 else "driver2_id"
+        team["money"] -= fee
+        _release_driver(career, d, team)
+        d["status"] = "free"
+        team[slot] = None
+        _recompute_team_points(career, team)
+        career["transfers"].append(
+            f"{d['name']} dropped by {team['name']} (poor results, ${fee:.2f}M break fee)")
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +1130,11 @@ def complete_race_weekend(career, rng=None):
         career["round"] += 1
         career["phase"] = "round"
         set_circuit_for_round(career)
+        # v0.4: regulation research opens at the start of round 7 —
+        # initialise every team's adaptation state from the car perf
+        # at round 7 (before any round-7 research or development).
+        if career["round"] == REG_OPENS_ROUND:
+            init_reg_state(career)
 
 
 def run_race_weekend(career, connected_player_ids, rng=None):
@@ -710,6 +1154,17 @@ def run_race_weekend(career, connected_player_ids, rng=None):
                                           if d["status"] == "f1"]))
     gp = circuit_for_round(career["round"])
     qual = race_mod.simulate_qual(career, rng=rng)
+    # v0.4: qualifying head-to-head for the winter-break review — the
+    # driver who out-qualified their teammate in this session gains
+    # one. Tracked per season (reset at season end).
+    for team in career["teams"]:
+        d1 = get_driver(career, team["driver1_id"]) if team["driver1_id"] else None
+        d2 = get_driver(career, team["driver2_id"]) if team["driver2_id"] else None
+        if d1 and d2 and d1.get("qual_pos") is not None and d2.get("qual_pos") is not None:
+            if d1["qual_pos"] < d2["qual_pos"]:
+                d1["season_qual_h2h"] = d1.get("season_qual_h2h", 0) + 1
+            elif d2["qual_pos"] < d1["qual_pos"]:
+                d2["season_qual_h2h"] = d2.get("season_qual_h2h", 0) + 1
     leader = qual[0][0]["qual_time"] if qual else 0
     career["last_qual"] = [
         result_row(d, t, i + 1,
@@ -727,11 +1182,26 @@ def run_race_weekend(career, connected_player_ids, rng=None):
     # F2 race in parallel.
     f2_order = race_mod.simulate_f2(career, rng=rng)
     for pos, d in enumerate(f2_order, start=1):
+        # v0.4: F2 drivers track wins / best finish / best-finish
+        # round too, so the F2 standings use the same sort as F1.
+        if d.get("best_pos") is None or pos < d["best_pos"]:
+            d["best_pos"] = pos
+            d["best_finish_round"] = career["round"]
+        if pos == 1:
+            d["season_wins"] = d.get("season_wins", 0) + 1
+        if pos <= 3:
+            d["season_podiums"] = d.get("season_podiums", 0) + 1
+        d["finish_sum"] = d.get("finish_sum", 0) + pos
+        d["finish_count"] = d.get("finish_count", 0) + 1
         if pos <= len(points_dist):
             d["points"] += points_dist[pos - 1]
         new_rep = ((2 - (pos / (len(f2_order) * 2)) * 1) * 1 + d["rep"] * 11) / 12
         d["rep"] = new_rep
         d["race_pos"] = pos
+    # v0.4 bot parity: after each race, a bot team may drop or swap
+    # a main driver for really bad performance (0 pts, avg finish
+    # 18th or worse, from round 6, never in the last 2 rounds).
+    bot_post_race(career, rng=rng)
     # Money: salaries out, per-race gains (EPRG) in.
     for team in career["teams"]:
         team["money"] -= salary_per_round(career, team)
@@ -771,8 +1241,20 @@ def run_race_weekend(career, connected_player_ids, rng=None):
 
 def end_of_season(career, rng=None):
     """Champion, prize money, EPSCI, retirements, ageing, contracts, F2
-    promotion, reg change. Leaves the career in winter_break so humans can
-    fill empty seats; AI teams fill theirs immediately."""
+    promotion. Leaves the career in winter_break — the 3-round offer
+    flow (feature 6) — so humans AND bots fill empty seats one round
+    at a time; nobody signs instantly at season end any more.
+
+    v0.4: the regulation change is NOT applied here any more. The
+    adaptation/research state was initialised at round 7 and stays
+    pending through the winter break (teams can still adapt/research
+    during it); start_next_season() applies it, so the winter break
+    "last-minute R&D" has something to act on. career["next_reg_year"]
+    / ["next_reg_kind"] already point at the change AFTER the season
+    about to start (e.g. 2030 Major at the end of 2028); the pending
+    change (into the new season) is recorded in pending_reg_* by
+    init_reg_state at round 7.
+    """
     rng = rng or random
     standings = race_mod.constructor_standings(career)
     # v0.2: driver_standings() also lists replaced drivers (free agents
@@ -783,6 +1265,31 @@ def end_of_season(career, rng=None):
     # v0.2: record this season's final driver order BEFORE the points
     # reset below, so the next season opens in this order (all on 0).
     career["prev_driver_order"] = [d["id"] for d in drivers]
+    # v0.4: record this season's final constructors' order too — the
+    # next season opens in this order, and the winter-break offer
+    # resolution processes teams in this order (champion first).
+    career["prev_team_order"] = [t["id"] for t in standings]
+    # v0.4: snapshot the season just finished for the winter-break
+    # review (stats, final standings, head-to-head) — taken BEFORE
+    # the points reset below, so it shows the real final numbers.
+    career["last_season"] = {
+        "year": career["year"],
+        "drivers": [{
+            "id": d["id"], "name": d["name"],
+            "team": (get_team(career, d["team_id"]) or {}).get("name", ""),
+            "team_id": d.get("team_id"),
+            "points": d["points"], "wins": d.get("season_wins", 0),
+            "podiums": d.get("season_podiums", 0),
+            "best_pos": d.get("best_pos"),
+            "qual_h2h": d.get("season_qual_h2h", 0),
+            "avg_finish": round(d.get("finish_sum", 0) / d["finish_count"], 1)
+                          if d.get("finish_count") else None,
+        } for d in drivers],
+        "teams": [{
+            "id": t["id"], "name": t["name"], "points": t["points"],
+            "wins": t.get("season_wins", 0), "best_pos": t.get("best_pos"),
+        } for t in standings],
+    }
     if drivers:
         champ = drivers[0]
         champ["cha"] += 1
@@ -805,14 +1312,20 @@ def end_of_season(career, rng=None):
         if champ_team:
             champ_team["c_wins"] += 1
     # F2 champion is promoted to the free-agent pool.
-    f2_sorted = sorted([d for d in career["drivers"] if d["status"] == "f2"],
-                       key=lambda d: (-d["points"], d["best_pos"] or 99))
+    f2_sorted = race_mod.f2_standings(career)
     if f2_sorted:
         f2_champ = f2_sorted[0]
         f2_champ["status"] = "free"
         f2_champ["team_id"] = None
         f2_champ["points"] = 0
         f2_champ["team_points"] = 0  # v0.2.1: F2 points never carry to F1
+        f2_champ["season_wins"] = 0
+        f2_champ["season_podiums"] = 0
+        f2_champ["season_qual_h2h"] = 0
+        f2_champ["best_pos"] = None
+        f2_champ["best_finish_round"] = None
+        f2_champ["finish_sum"] = 0
+        f2_champ["finish_count"] = 0
         f2_champ["last_team_id"] = None
         career["transfers"].append(
             f"{f2_champ['name']} won F2 and joins the free-agent pool")
@@ -863,7 +1376,12 @@ def end_of_season(career, rng=None):
             # on departure instead). Retired drivers keep theirs.
             d["last_team_id"] = None
         d["season_wins"] = 0
+        d["season_podiums"] = 0
+        d["season_qual_h2h"] = 0
         d["best_pos"] = None
+        d["best_finish_round"] = None
+        d["finish_sum"] = 0
+        d["finish_count"] = 0
     for d in free_agents(career):
         if d not in retired:
             d["age"] += 1
@@ -874,13 +1392,52 @@ def end_of_season(career, rng=None):
             d["points"] = 0
             d["team_points"] = 0  # v0.2.1
             d["season_wins"] = 0
+            d["season_podiums"] = 0
+            d["season_qual_h2h"] = 0
             d["best_pos"] = None
+            d["best_finish_round"] = None
+            d["finish_sum"] = 0
+            d["finish_count"] = 0
     for d in f2_drivers(career):
         d["age"] += 1
         d["perf"] += dsus(d["age"], d["perf"], rng=rng)
         d["points"] = 0
         d["team_points"] = 0  # v0.2.1
+        d["season_wins"] = 0
+        d["season_podiums"] = 0
+        d["season_qual_h2h"] = 0
         d["best_pos"] = None
+        d["best_finish_round"] = None
+        d["finish_sum"] = 0
+        d["finish_count"] = 0
+    # v0.4: T&R drivers age and their contracts tick down too. An
+    # expired T&R contract ends the affiliation — the driver becomes
+    # a free agent (and is then available for winter-break offers).
+    # Their salary is unchanged (no race results to re-price on).
+    # Their season tallies reset too: a T&R driver may have raced
+    # earlier in the season (then been swapped out), and a stale
+    # best finish would otherwise sort them above every carried-over
+    # driver when they return to a race seat next season.
+    for team in career["teams"]:
+        for d in team_tr_drivers(career, team):
+            d["age"] += 1
+            d["contract_left"] = max(0, d["contract_left"] - 1)
+            d["perf"] += dsus(d["age"], d["perf"], rng=rng)
+            d["points"] = 0
+            d["team_points"] = 0
+            d["season_wins"] = 0
+            d["season_podiums"] = 0
+            d["season_qual_h2h"] = 0
+            d["best_pos"] = None
+            d["best_finish_round"] = None
+            d["finish_sum"] = 0
+            d["finish_count"] = 0
+            if d["contract_left"] <= 0:
+                d["status"] = "free"
+                d["team_id"] = None
+                d["last_team_id"] = team["id"]
+                career["transfers"].append(
+                    f"{d['name']} left {team['name']} (T&R contract ended)")
     # Contracts that expired: the driver leaves the team and becomes a free agent.
     for team in career["teams"]:
         for slot in ("driver1_id", "driver2_id"):
@@ -902,36 +1459,32 @@ def end_of_season(career, rng=None):
         team["points"] = 0
         team["points_kept"] = 0  # v0.2: banked points reset with the season
         team["best_pos"] = None
+        team["best_finish_round"] = None
+        team["season_wins"] = 0
         team["tuning"] = 0
     # Refill the F2 grid from queued / pool rookies.
     refill_f2(career, rng=rng)
-    # Regulation change into the new year.
+    # v0.4: the regulation change into the new year is NOT applied
+    # here — it waits for start_next_season(), after the winter
+    # break's last-minute R&D. Record the new year and the NEXT
+    # change (the one after the season about to start) for the UI.
     new_year = career["year"] + 1
-    kind = "Major" if new_year % 4 == 2 else "Minor"
-    target = REG_MAJOR_TARGET if kind == "Major" else REG_MINOR_TARGET
-    grid_avg = sum(t["perf"] for t in career["teams"]) / len(career["teams"])
-    changes = []
-    for team in career["teams"]:
-        old = team["perf"]
-        team["perf"] = reg_change(grid_avg, target, team["perf"],
-                                  team["reg_research"], rng=rng)
-        team["reg_research"] = 0.0
-        changes.append({"team": team["name"], "old": round(old, 2),
-                        "new": team["perf"]})
-    career["last_reg_change"] = {"year": new_year, "kind": kind, "changes": changes}
     career["year"] = new_year
     career["season_index"] += 1
     career["next_reg_year"] = new_year + 1
     career["next_reg_kind"] = "Major" if (new_year + 1) % 4 == 2 else "Minor"
     career["round"] = SEASON_LENGTH
-    # AI teams fill empty seats straight away.
-    for team in career["teams"]:
-        if team["is_ai"]:
-            fill_empty_seats_ai(career, team, rng=rng)
+    # Winter break: 3 rounds of offers (feature 6). Round 1 starts
+    # now — bot offers for round 1 are generated when the round opens.
+    career["wb_round"] = 1
+    career["wb_offers"] = {}
+    career["wb_ready"] = []
+    career["wb_done"] = False
     if career["season_index"] >= MAX_SEASONS:
         career["phase"] = "finished"
     else:
         career["phase"] = "winter_break"
+        start_winter_break_round(career, rng=rng)
 
 
 def refill_f2(career, rng=None):
@@ -966,47 +1519,376 @@ def ai_contract_years(driver, rng=None):
     return rng.randint(1, 2)
 
 
-def fill_empty_seats_ai(career, team, rng=None):
-    """AI winter-break signing, results-based (ContractOffer logic)."""
-    rng = rng or random
-    for slot in ("driver1_id", "driver2_id"):
-        if team[slot]:
-            continue
-        pool = free_agents(career) + f2_drivers(career)
-        if not pool:
-            continue
-        pick = ai_best_candidate(career, team, pool)
-        if pick is None:
-            continue
-        pick["status"] = "f1"
-        pick["team_id"] = team["id"]
-        pick["team_points"] = 0  # v0.2.1: fresh per-team tally
-        pick["last_team_id"] = None
-        # v0.3: bots also pick a 1–4 year contract (ai_contract_years).
-        pick["contract_left"] = ai_contract_years(pick, rng=rng)
-        team[slot] = pick["id"]
-        career["transfers"].append(f"{pick['name']} signed for {team['name']}")
-
-
 def empty_seats(career, team):
     return [s for s in (1, 2)
             if not team["driver1_id" if s == 1 else "driver2_id"]]
 
 
+# ---------------------------------------------------------------------------
+# Winter break — 3 rounds of offers (feature 6)
+# ---------------------------------------------------------------------------
+
+def wb_constructors_order(career):
+    """Last season's final constructors' order (champion first) —
+    the order winter-break offers are processed in, and the order a
+    driver picks from. Falls back to the current constructor
+    standings when there is no snapshot (migrated v5 save)."""
+    snap = career.get("last_season") or {}
+    order = [t["id"] for t in (snap.get("teams") or [])]
+    if order:
+        known = {t["id"] for t in career["teams"]}
+        return [tid for tid in order if tid in known] + \
+               [t["id"] for t in career["teams"] if t["id"] not in order]
+    return [t["id"] for t in race_mod.constructor_standings(career)]
+
+
+def start_winter_break_round(career, rng=None):
+    """Open a winter-break round: bot teams make their offers for
+    this round (one round at a time, like humans — no more
+    insta-signing the best drivers), and bot teams do last-minute
+    regulation R&D (adapt, then research) while the change is
+    pending. Human offers are submitted by the players themselves."""
+    rng = rng or random
+    for team in career["teams"]:
+        if team["is_ai"]:
+            bot_winter_offers(career, team, rng=rng)
+            bot_winter_rd(career, team)
+
+
+def bot_winter_offers(career, team, rng=None):
+    """v0.4 bot parity: a bot team's winter-break offers for one
+    round — up to 3 offers (max 2 main, max 1 T&R), from the best
+    available drivers by reputation. A team with an empty main seat
+    MUST offer (main-seat offers are mandatory then); a full team
+    may still offer to poach or to improve. T&R offers prefer young,
+    cheap talent. Offers are stored in career["wb_offers"] by team
+    id, in the order the team made them (main seats first)."""
+    rng = rng or random
+    offers = []
+    pool = [d for d in career["drivers"] if d["status"] in ("free", "f2")]
+    # Main seats: offer for each empty seat, best available first.
+    # A bot with a full lineup may still try to poach one better
+    # driver for its weaker seat — only if it can afford the break
+    # fee of the driver it would replace.
+    seats = empty_seats(career, team)
+    if not seats:
+        # Full lineup: consider one poach/improvement offer for the
+        # weaker main driver, only when a clearly better driver is
+        # available and the team can afford both break fees.
+        drivers = team_drivers(career, team)
+        if drivers and pool:
+            weakest = min(drivers, key=lambda d: d["rep"])
+            best = max(pool, key=lambda d: d["rep"])
+            if best["rep"] > weakest["rep"] + 0.5:
+                seat = 1 if team["driver1_id"] == weakest["id"] else 2
+                quote = sign_cost(career, team["id"], best["id"], ("seat", seat))
+                if quote and quote["affordable"]:
+                    seats = [seat]
+    for seat in seats[:2]:
+        if not pool:
+            break
+        pool.sort(key=lambda d: (-d["rep"], d["salary"], d["name"]))
+        pick = pool[0]
+        quote = sign_cost(career, team["id"], pick["id"], ("seat", seat))
+        if quote is None or not quote["affordable"]:
+            # The best candidate is unaffordable (break fee): try the
+            # next-cheapest available driver instead.
+            affordable = [d for d in pool
+                          if (sign_cost(career, team["id"], d["id"], ("seat", seat)) or {})
+                          .get("affordable")]
+            if not affordable:
+                continue
+            pick = affordable[0]
+        offers.append({"driver_id": pick["id"], "target": "seat", "seat": seat,
+                       "years": ai_contract_years(pick, rng=rng)})
+        pool.remove(pick)
+    # T&R: one offer, youngest cheapest available, when a slot is free.
+    if len(team_tr_drivers(career, team)) < MAX_TR_DRIVERS and pool:
+        young = [d for d in pool if d["age"] <= 25]
+        young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
+        if young:
+            pick = young[0]
+            quote = sign_cost(career, team["id"], pick["id"], ("tr", None))
+            if quote and quote["affordable"]:
+                offers.append({"driver_id": pick["id"], "target": "tr", "seat": None,
+                               "years": ai_contract_years(pick, rng=rng)})
+    career.setdefault("wb_offers", {})[team["id"]] = offers
+
+
+def bot_winter_rd(career, team):
+    """v0.4 bot parity: last-minute regulation R&D during the winter
+    break. Adapt first (up to what the team can afford, keeping a
+    $1M buffer), then put a tenth of what is left into research once
+    fully adapted."""
+    if not team.get("reg_pending"):
+        return
+    if team["money"] is None:
+        return
+    unadapted = float(team.get("reg_unadapted") or 0.0)
+    if unadapted > 0:
+        budget = max(0.0, team["money"] - 1.0)
+        points = min(unadapted, budget / REG_ADAPT_COST_PER_POINT)
+        if points > 0:
+            do_reg_adapt(career, team["id"], points=points)
+    if float(team.get("reg_unadapted") or 0.0) <= 0:
+        leftover = max(0.0, team["money"] - 1.0)
+        if leftover > 5:
+            do_reg_research(career, team["id"], round(leftover * 0.10, 2))
+
+
+def submit_winter_offers(career, team_id, offers):
+    """A human team submits its offers for the current winter-break
+    round. offers is a list of {driver_id, target: 'seat'|'tr',
+    seat: 1|2|null, years: 1-4}. At most 3 offers, at most 2 for
+    main seats, at most 1 for a T&R slot. A team with an empty main
+    seat MUST include at least one main-seat offer. Returns
+    (ok, message)."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    if career.get("phase") != "winter_break":
+        return False, "Not in winter break."
+    if not isinstance(offers, list):
+        return False, "Offers must be a list."
+    if len(offers) > 3:
+        return False, "At most 3 offers per round."
+    seats_seen = []
+    tr_seen = 0
+    seen_drivers = set()
+    cleaned = []
+    for off in offers:
+        if not isinstance(off, dict):
+            return False, "Each offer needs a driver and a target."
+        d = get_driver(career, off.get("driver_id"))
+        if not d or d["status"] not in ("free", "f2"):
+            return False, "That driver is not available for offers."
+        if d["id"] in seen_drivers:
+            return False, f"{d['name']} already has an offer from you this round."
+        seen_drivers.add(d["id"])
+        try:
+            years = int(off.get("years", 2))
+        except (TypeError, ValueError):
+            return False, "Contract length must be 1–4 years."
+        if not 1 <= years <= 4:
+            return False, "Contract length must be 1–4 years."
+        target = off.get("target")
+        if target == "seat":
+            seat = off.get("seat")
+            if seat not in (1, 2):
+                return False, "A main-seat offer needs seat 1 or 2."
+            if seat in seats_seen:
+                return False, f"Seat {seat} already has an offer this round."
+            seats_seen.append(seat)
+            cleaned.append({"driver_id": d["id"], "target": "seat",
+                            "seat": seat, "years": years})
+        elif target == "tr":
+            if tr_seen >= 1:
+                return False, "At most one T&R offer per round."
+            if len(team_tr_drivers(career, team)) >= MAX_TR_DRIVERS:
+                return False, f"{team['name']} already has {MAX_TR_DRIVERS} T&R drivers."
+            tr_seen += 1
+            cleaned.append({"driver_id": d["id"], "target": "tr",
+                            "seat": None, "years": years})
+        else:
+            return False, "An offer must target a main seat or a T&R slot."
+    if empty_seats(career, team) and not seats_seen:
+        return False, "Your lineup is not full — offer at least one driver a main seat."
+    career.setdefault("wb_offers", {})[team["id"]] = cleaned
+    return True, f"Offers submitted ({len(cleaned)}) ✓"
+
+
+def winter_next(career, team_id, rng=None):
+    """A team hits NEXT for the current winter-break round. When
+    every team (human and bot) has hit NEXT, the round's offers
+    resolve and the next round opens (or the break ends after round
+    3). Returns (ok, advanced, message)."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, False, "No such team."
+    if career.get("phase") != "winter_break":
+        return False, False, "Not in winter break."
+    if empty_seats(career, team):
+        mine = (career.get("wb_offers") or {}).get(team["id"]) or []
+        if not any(o.get("target") == "seat" for o in mine):
+            return False, False, "Your lineup is not full — offer at least one driver a main seat."
+    if team["id"] not in (career.get("wb_ready") or []):
+        career.setdefault("wb_ready", []).append(team["id"])
+    # Only human teams need to hit NEXT — bot teams' offers are
+    # already submitted when the round opens (start_winter_break_round).
+    human_ids = [t["id"] for t in human_teams(career)]
+    if not all(tid in (career.get("wb_ready") or []) for tid in human_ids):
+        n = len([tid for tid in (career.get("wb_ready") or []) if tid in human_ids])
+        return True, False, f"Winter break: waiting for the other teams ({n}/{len(human_ids)}) ✓"
+    # Everyone is ready: resolve this round.
+    resolve_winter_break_round(career, rng=rng)
+    if career.get("wb_round", 1) >= WINTER_BREAK_ROUNDS:
+        autofill_winter_break(career, rng=rng)
+        career["wb_done"] = True
+        return True, True, "Winter break complete — the new season is ready to start."
+    career["wb_round"] = career.get("wb_round", 1) + 1
+    career["wb_ready"] = []
+    start_winter_break_round(career, rng=rng)
+    return True, True, f"Winter-break round {career['wb_round']} — make your offers."
+
+
+def resolve_winter_break_round(career, rng=None):
+    """Resolve one winter-break round: process teams in last
+    season's final constructors' order (champion first); a driver
+    accepts the first offer they receive (from the best-placed team
+    offering them). A team's main-seat offers are processed before
+    its T&R offer. Signing is free (salary only); the break fee of
+    the driver being replaced is charged, as in sign_driver()."""
+    rng = rng or random
+    offers_by_team = career.get("wb_offers") or {}
+    taken = set()
+    for team_id in wb_constructors_order(career):
+        team = get_team(career, team_id)
+        if not team:
+            continue
+        mine = list(offers_by_team.get(team_id) or [])
+        # Main-seat offers first, then the T&R offer.
+        mine.sort(key=lambda o: 0 if o.get("target") == "seat" else 1)
+        for off in mine:
+            if off["driver_id"] in taken:
+                continue
+            d = get_driver(career, off["driver_id"])
+            if not d or d["status"] not in ("free", "f2"):
+                continue
+            if off["target"] == "seat":
+                slot = "driver1_id" if off["seat"] == 1 else "driver2_id"
+                if team[slot]:
+                    continue  # seat already filled by an earlier offer
+                ok, _why = sign_driver_wb(career, team, d, off["seat"], off["years"])
+            else:
+                if len(team_tr_drivers(career, team)) >= MAX_TR_DRIVERS:
+                    continue
+                ok, _why = sign_tr_driver_wb(career, team, d, off["years"])
+            if ok:
+                taken.add(d["id"])
+    career["wb_offers"] = {}
+
+
+def sign_driver_wb(career, team, d, seat, contract_years):
+    """Sign a driver into a main seat during the winter break — the
+    same charges as sign_driver(), but allowed in winter break (the
+    direct sign_driver() is blocked then so signings go through
+    offers). The break fee for the seat's current occupant is
+    charged from the winter-break formula (contract x 12 rounds)."""
+    slot = "driver1_id" if seat == 1 else "driver2_id"
+    current = get_driver(career, team[slot]) if team[slot] else None
+    fee = 0.0
+    if current:
+        fee = break_fee_for_driver(career, current)
+    if fee > team["money"]:
+        return False, f"Need ${fee:.2f}M to break {current['name']}'s contract."
+    team["money"] -= fee
+    if current:
+        _release_driver(career, current, team)
+        current["status"] = "free"
+        career["transfers"].append(
+            f"{current['name']} left {team['name']} (contract broken)")
+    _sign_driver_common(career, team, d, contract_years)
+    d["status"] = "f1"
+    d["team_id"] = team["id"]
+    team[slot] = d["id"]
+    _recompute_team_points(career, team)
+    career["transfers"].append(f"{d['name']} signed for {team['name']}")
+    return True, "ok"
+
+
+def sign_tr_driver_wb(career, team, d, contract_years):
+    """Sign a driver as a T&R driver during the winter break — the
+    same as sign_tr_driver(), but allowed in winter break."""
+    _sign_driver_common(career, team, d, contract_years)
+    d["status"] = "tr"
+    d["team_id"] = team["id"]
+    career["transfers"].append(
+        f"{d['name']} signed for {team['name']} as Test & Reserve")
+    return True, "ok"
+
+
+def autofill_winter_break(career, rng=None):
+    """After the 3 winter-break rounds, any team still with an empty
+    main seat gets the bot manager temporarily kicking in:
+      - if the team has a T&R driver, PROMOTE the highest-reputation
+        one to the main seat;
+      - otherwise sign one of the five worst-reputation free agents
+        (picked at random among the five lowest-reputation free
+        agents), on a 1-year contract.
+    This is the user-approved fallback (2026-11-11) — no team starts
+    a season with an empty seat."""
+    rng = rng or random
+    for team in career["teams"]:
+        for seat in empty_seats(career, team):
+            trs = team_tr_drivers(career, team)
+            if trs:
+                trs.sort(key=lambda x: (-x["rep"], x["name"]))
+                promote_tr_to_main(career, team["id"], trs[0]["id"], seat)
+                continue
+            free = [d for d in career["drivers"] if d["status"] == "free"]
+            if not free:
+                continue
+            free.sort(key=lambda d: (d["rep"], d["salary"], d["name"]))
+            worst_five = free[:5]
+            pick = rng.choice(worst_five)
+            _sign_driver_common(career, team, pick, 1)
+            pick["status"] = "f1"
+            pick["team_id"] = team["id"]
+            slot = "driver1_id" if seat == 1 else "driver2_id"
+            team[slot] = pick["id"]
+            _recompute_team_points(career, team)
+            career["transfers"].append(
+                f"{pick['name']} signed for {team['name']} (winter-break auto-fill)")
+
+
 def winter_break_ready(career):
-    """Every human team has both seats filled."""
-    for team in human_teams(career):
+    """Every team has both main seats filled (used by the UI to show
+    whether the season can start)."""
+    for team in career["teams"]:
         if empty_seats(career, team):
             return False
     return True
 
 
-def start_next_season(career):
-    """Leave winter break once every human team is satisfied."""
-    if career["phase"] != "winter_break":
+def start_next_season(career, rng=None):
+    """Leave winter break once the 3 rounds are done and every team
+    has both main seats filled. Applies the pending regulation change
+    (v0.4: adapted perf + research gains, from the state built up
+    since round 7 and during the winter break). A migrated v5 save
+    has no pending reg change — its change was already applied under
+    v0.3 — so nothing is applied for it."""
+    rng = rng or random
+    if career.get("phase") != "winter_break":
         return False, "Not in winter break."
+    if not career.get("wb_done"):
+        return False, "Finish the winter break first (3 rounds of offers)."
     if not winter_break_ready(career):
         return False, "Fill every empty seat on your team first."
+    # v0.4: apply the pending reg change now — the winter break's
+    # last-minute R&D is included because it ran before this point.
+    pending = any(t.get("reg_pending") for t in career["teams"])
+    if pending:
+        kind = career.get("pending_reg_kind") or career.get("next_reg_kind") or "Minor"
+        target = REG_MAJOR_TARGET if kind == "Major" else REG_MINOR_TARGET
+        changes = []
+        for team in career["teams"]:
+            old = team["perf"]
+            if team.get("reg_pending"):
+                team["perf"] = reg_change_v2(
+                    team.get("reg_adapted", 0.0),
+                    team.get("reg_research", 0.0), target, rng=rng)
+            team["reg_research"] = 0.0
+            team["reg_total"] = 0.0
+            team["reg_adapted"] = 0.0
+            team["reg_unadapted"] = 0.0
+            team["reg_pending"] = False
+            changes.append({"team": team["name"], "old": round(old, 2),
+                            "new": team["perf"]})
+        career["last_reg_change"] = {
+            "year": career.get("pending_reg_year") or career["year"],
+            "kind": kind, "changes": changes}
+    career["pending_reg_year"] = None
+    career["pending_reg_kind"] = None
     career["round"] = 1
     career["phase"] = "round"
     career["advanced"] = []
@@ -1014,6 +1896,10 @@ def start_next_season(career):
     career["results_stage"] = None
     career["transfers"] = []
     career["retired_this_season"] = []
+    career["wb_round"] = 0
+    career["wb_offers"] = {}
+    career["wb_ready"] = []
+    career["wb_done"] = False
     set_circuit_for_round(career)
     return True, "ok"
 
@@ -1043,6 +1929,9 @@ def finances_view(career, team):
     pos = constructor_pos(career, team["id"])
     est = finance_estimates(pos)
     drivers = team_drivers(career, team)
+    # v0.4: T&R drivers are paid their full salary too — list them
+    # separately so the manager can see the cost of the affiliation.
+    tr = team_tr_drivers(career, team)
     return {
         "money": round(team["money"], 2),
         "constructor_pos": pos,
@@ -1052,6 +1941,9 @@ def finances_view(career, team):
         "driver_costs": [{"driver": d["name"],
                           "per_race": round(d["salary"] / SEASON_LENGTH, 2)}
                          for d in drivers],
+        "tr_costs": [{"driver": d["name"],
+                      "per_race": round(d["salary"] / SEASON_LENGTH, 2)}
+                     for d in tr],
     }
 
 
@@ -1073,21 +1965,48 @@ def public_state(career, chart_on, viewer_team_id=None):
     # reads it from there); only this broadcast copy is stripped.
     for d in state["drivers"]:
         d.pop("rep", None)
-    # v0.3: replacement costs for the viewer's team, computed
-    # server-side from the exact formula sign_driver() charges, so the
-    # Driver Market always shows the number that will be charged.
-    # {driver_id: {"1": {...}, "2": {...}}} — attached to the broadcast
-    # copy only, never saved. The cost is the contract-break fee for
-    # the driver in the seat (0 / Free for an empty seat); signing
-    # itself is free.
+    # v0.4: winter-break offers NEVER leave the server in full — they
+    # would reveal what the bot teams (and other humans) are bidding
+    # on. Each client only gets its own team's offers, attached as
+    # wb_my_offers below. The wb_offers map is stripped here.
+    state.pop("wb_offers", None)
+    # v0.4: regulation raw numbers NEVER leave the server — a player
+    # sees only the percentages and the money cost (reg_view), never
+    # the true car performance value. Strip the raw fields from every
+    # team; the client rebuilds the progress bar from reg_view.
+    for team in state["teams"]:
+        team.pop("reg_total", None)
+        team.pop("reg_adapted", None)
+        team.pop("reg_unadapted", None)
+    # v0.4: replacement / signing costs for the viewer's team,
+    # computed server-side from the exact formula the signing
+    # functions charge, so the Driver Market always shows the number
+    # that will be charged. {driver_id: {"1": {...}, "2": {...},
+    # "tr": {...}}} — attached to the broadcast copy only, never
+    # saved. The cost is the contract-break fee for the driver in the
+    # seat (0 / Free for an empty seat, and for a T&R slot) PLUS the
+    # poaching break fee when the driver is under contract with
+    # another team (main driver or T&R driver). Signing itself is free.
     if viewer_team_id:
         viewer = get_team(career, viewer_team_id)
         if viewer is not None:
             state["market_costs"] = {
-                d["id"]: {str(seat): break_cost(career, viewer["id"], d["id"], seat)
-                         for seat in (1, 2)}
+                d["id"]: {str(seat): sign_cost(career, viewer["id"], d["id"], ("seat", seat))
+                         for seat in (1, 2)} | {"tr": sign_cost(career, viewer["id"], d["id"], ("tr", None))}
                 for d in career["drivers"]
-                if d["status"] in ("free", "f2")}
+                if d["status"] in ("free", "f2", "f1", "tr")
+                and not (d.get("team_id") == viewer["id"])}
+            # v0.4: the viewer's own reg progress (percentages + cost
+            # only) and their own winter-break offers for this round.
+            state["reg_view"] = reg_view(career, viewer)
+            state["wb_my_offers"] = list(
+                (career.get("wb_offers") or {}).get(viewer["id"]) or [])
+            state["wb_status"] = {
+                "round": career.get("wb_round", 0),
+                "total_rounds": WINTER_BREAK_ROUNDS,
+                "ready": list(career.get("wb_ready") or []),
+                "done": bool(career.get("wb_done")),
+            }
     if chart_on:
         return state
     for team in state["teams"]:
