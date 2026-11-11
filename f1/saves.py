@@ -53,6 +53,14 @@ def _reconstruct_last_season(doc):
                                            "best_pos": None, "best_round": None,
                                            "finish_sum": 0, "finish_count": 0})
                 s["points"] += pts
+                # v0.4.1: the team the driver raced for — from the race
+                # rows, not the driver's current team_id (a driver who
+                # left at contract end, e.g. Piastri, has team_id None
+                # in the save, but still raced for the team last
+                # season). Overwritten per row, so it ends as the team
+                # of their last race of the season.
+                if tid:
+                    s["team_id"] = tid
                 if pos == 1:
                     s["wins"] += 1
                 if pos <= 3:
@@ -93,10 +101,10 @@ def _reconstruct_last_season(doc):
     drv_list = []
     for did, s in sorted(dstat.items(), key=dkey):
         d = drivers[did]
-        team = teams.get(d.get("team_id")) or {}
+        team = teams.get(s.get("team_id")) or {}
         drv_list.append({
             "id": did, "name": d["name"],
-            "team": team.get("name", ""), "team_id": d.get("team_id"),
+            "team": team.get("name", ""), "team_id": s.get("team_id"),
             "points": s["points"], "wins": s["wins"],
             "podiums": s["podiums"], "best_pos": s["best_pos"],
             "qual_h2h": qual_h2h.get(did, 0),
@@ -201,7 +209,9 @@ def migrate_save(doc):
         # round 1 (its reg change was already applied under v0.3, so
         # reg_pending stays False and no reg change is applied again
         # when the break ends). Bot offers for round 1 are generated
-        # when the room loads the career (server.py).
+        # when the career starts (server.py start_career), after the
+        # humans have picked their teams — never at load, when every
+        # team is still flagged AI (v0.4.1).
         if not doc.get("wb_round"):
             doc["wb_round"] = 1
         doc.setdefault("wb_offers", {})

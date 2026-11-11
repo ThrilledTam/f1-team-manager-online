@@ -204,7 +204,14 @@ def salary_per_round(career, team):
 # ---------------------------------------------------------------------------
 
 def choose_team(career, team_id, player_id):
-    """A human takes over an AI team (new career pick, or mid-career takeover)."""
+    """A human takes over an AI team (new career pick, or mid-career takeover).
+
+    v0.4.1: taking over also clears any auto-generated winter-break
+    offers for the team — those were made by the bot manager while
+    the team was AI (e.g. when a career was loaded and every team
+    was still flagged AI), and the human must choose their own
+    offers. The team is also taken out of wb_ready, so a bot's
+    readiness never counts as the human's."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
@@ -212,6 +219,10 @@ def choose_team(career, team_id, player_id):
         return False, "That team is already taken."
     team["is_ai"] = False
     team["owner_player_id"] = player_id
+    if career.get("phase") == "winter_break":
+        (career.get("wb_offers") or {}).pop(team["id"], None)
+        if team["id"] in (career.get("wb_ready") or []):
+            career["wb_ready"].remove(team["id"])
     return True, f"You took over {team['name']} ✓"
 
 
@@ -1542,6 +1553,38 @@ def wb_constructors_order(career):
     return [t["id"] for t in race_mod.constructor_standings(career)]
 
 
+def winter_break_review(career, team_id=None):
+    """v0.4.1: the last-season review for the winter-break card —
+    final driver standings (top 5), final constructors (top 5), and
+    the head-to-head of the given team's two main drivers LAST
+    season. The head-to-head is read from the last_season snapshot,
+    not the current lineup, so it still works when a driver has
+    since left (e.g. Piastri after his McLaren contract ended):
+    the team's current main drivers are preferred, and any gap is
+    filled from the snapshot's other drivers for that team. No
+    reputation is ever included — it is bot-only data."""
+    snap = career.get("last_season") or {}
+    drivers = list(snap.get("drivers") or [])
+    teams = list(snap.get("teams") or [])
+    h2h = []
+    if team_id:
+        team = get_team(career, team_id)
+        by_id = {d["id"]: d for d in drivers}
+        current = [team["driver1_id"], team["driver2_id"]] if team else []
+        h2h = [by_id[did] for did in current if did in by_id]
+        for d in drivers:
+            if len(h2h) >= 2:
+                break
+            if d.get("team_id") == team_id and d not in h2h:
+                h2h.append(d)
+    return {
+        "year": snap.get("year"),
+        "drivers": drivers[:5],
+        "teams": teams[:5],
+        "head_to_head": h2h,
+    }
+
+
 def start_winter_break_round(career, rng=None):
     """Open a winter-break round: bot teams make their offers for
     this round (one round at a time, like humans — no more
@@ -2007,6 +2050,12 @@ def public_state(career, chart_on, viewer_team_id=None):
                 "ready": list(career.get("wb_ready") or []),
                 "done": bool(career.get("wb_done")),
             }
+    # v0.4.1: the winter-break review — last season's final driver
+    # standings (top 5), constructors, and the head-to-head of the
+    # viewer's team's two main drivers last season. Built from the
+    # last_season snapshot, so it is there for a migrated save too.
+    if career.get("phase") == "winter_break":
+        state["wb_review"] = winter_break_review(career, viewer_team_id)
     if chart_on:
         return state
     for team in state["teams"]:
