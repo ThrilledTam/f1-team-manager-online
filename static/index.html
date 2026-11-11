@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.2.1</title>
+<title>F1 Team Manager Online — v0.3</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -53,6 +53,25 @@
   .gl-up { color:#3fb950; font-weight:700; }
   .gl-down { color:#f85149; font-weight:700; }
   .medal { font-size:16px; }
+  /* v0.3 compact Driver Market: dense rows so 55+ drivers do not take
+     forever to scroll. Market buttons stay tappable (40px) but are
+     smaller than the global 44px action buttons, and the two seat
+     buttons sit side by side in one cell. */
+  .market-table td, .market-table th { padding:4px 6px; font-size:13px; }
+  .market-table button { min-height:40px; padding:6px 10px; font-size:13px; margin:2px 4px 2px 0; }
+  .market-seats { display:flex; gap:6px; flex-wrap:wrap; }
+  .market-seat { display:flex; flex-direction:column; align-items:flex-start; }
+  .market-seat .note { font-size:12px; }
+  .sign-confirm { background:#0e2a18; border:1px solid #238636; border-radius:8px; padding:10px; margin:10px 0; }
+  .sign-confirm button { min-height:44px; }
+  /* v0.3 race history grid: seasons as rows, R1..R12 as columns, top-3
+     initials stacked in each cell (Matthew's PyCharm layout). */
+  .hist-grid td, .hist-grid th { padding:4px 6px; font-size:13px; text-align:center; vertical-align:top; }
+  .hist-grid td:first-child, .hist-grid th:first-child { text-align:left; font-weight:700; }
+  .hist-cell { cursor:pointer; border:1px solid #21262d; border-radius:6px; padding:4px 6px; background:#161b22; min-width:64px; line-height:1.35; }
+  .hist-cell:hover { border-color:#1f6feb; }
+  .hist-cell.empty { cursor:default; background:transparent; color:#8b949e; }
+  .hist-cell.empty:hover { border-color:#21262d; }
   /* v0.1 toasts: every action confirms (or errors) where you can see it. */
   #toasts { position:fixed; left:0; right:0; bottom:16px; display:flex; flex-direction:column; align-items:center; gap:8px; z-index:50; pointer-events:none; padding:0 12px; }
   .toast { background:#0e2a18; border:1px solid #238636; color:#a9e8bd; border-radius:8px; padding:12px 16px; font-size:15px; max-width:560px; box-shadow:0 4px 16px rgba(0,0,0,.5); }
@@ -81,7 +100,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.2.1 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.3 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -272,6 +291,10 @@ const $ = id => document.getElementById(id);
 const PALETTE = ["#e74c3c","#e67e22","#f1c40f","#2ecc71","#1abc9c","#3498db","#9b59b6","#fd79a8","#00cec9","#6c5ce7"];
 let ws = null, myId = null, myCode = null, myColour = PALETTE[0], room = null, myTeam = null;
 let chartDefault = true, lastRound = null, lastPhase = null, viewingGP = null;
+/* v0.3: a Driver Market signing is a two-step flow — tap a seat, then
+   pick the contract length (1–4 years). pendingSign holds the seat
+   the player is about to sign into until they pick (or cancel). */
+let pendingSign = null;
 
 function showErr(box, msg){ toast(msg, true); const el = $(box); if(!el) return; el.innerHTML = `<div class="err">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 6000); }
 function showOk(box, msg){ toast(msg, false); const el = $(box); if(!el) return; el.innerHTML = `<div class="ok">${esc(msg)}</div>`; setTimeout(()=>{ el.innerHTML=""; }, 4000); }
@@ -305,6 +328,13 @@ function splitName(name){
   const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
   const last = parts.pop() || "";
   return { first: parts.join(" "), last };
+}
+/* v0.3 race-history initials, like Matthew's PyCharm grid: first
+   initial + "." + first 3 surname letters, uppercased (L.HAM). */
+function driverInitials(name){
+  const f = splitName(name);
+  const first = f.first ? f.first[0].toUpperCase() : "?";
+  return first + "." + f.last.slice(0, 3).toUpperCase();
 }
 function driverNameHtml(name, teamColour, cha, withBar){
   const f = splitName(name);
@@ -349,7 +379,7 @@ function classificationTable(rows, opts){
   return `<div class="table-scroll"><table>${head}${body}</table></div>`;
 }
 /* Exposed for the automated markup tests (see tests/test_f1.py). */
-window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor };
+window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor, driverInitials };
 
 function colourPicker(elId, current, onPick){
   const el = $(elId); el.innerHTML = "";
@@ -548,7 +578,7 @@ function renderTeamList(){
   $("custom-team").classList.toggle("hidden", !canCustom);
   if(canCustom){
     const pool = c.drivers.filter(d => d.status === "free" || d.status === "f2");
-    const opts = pool.map(d => `<option value="${d.id}">${esc(d.name)} (${d.status === "free" ? "Free agent" : "F2"}, ${d.age}, rep ${Number(d.rep).toFixed(2)})</option>`).join("");
+    const opts = pool.map(d => `<option value="${d.id}">${esc(d.name)} (${d.status === "free" ? "Free agent" : "F2"}, ${d.age})</option>`).join("");
     $("custom-d1").innerHTML = opts; $("custom-d2").innerHTML = opts;
     $("custom-d2").selectedIndex = Math.min(1, pool.length - 1);
   }
@@ -614,7 +644,7 @@ function renderGame(){
 function renderMyTeam(){
   if(!myTeam){ $("my-team").innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby, or ask the host to restart the career setup.</p>"; return; }
   const t = myTeam;
-  const drivers = (t.drivers || []).map(d => d ? `${driverNameHtml(d.name, t.colour, d.cha, false)} (${d.age}, rep ${Number(d.rep).toFixed(2)}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)` : "[empty seat]").join("<br>");
+  const drivers = (t.drivers || []).map(d => d ? `${driverNameHtml(d.name, t.colour, d.cha, false)} (${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)` : "[empty seat]").join("<br>");
   const perfLine = room.chart_on && ("perf" in t) ? ` · Perf ${Number(t.perf).toFixed(1)} · Reliability ${(t.rel * 100).toFixed(1)}%` : "";
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
     · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}`;
@@ -630,29 +660,51 @@ function renderMyTeam(){
 
 function renderTabs(){
   const c = room.career; if(!c) return;
-  // Market — v0.2.1: every driver shows the TOTAL cost of signing them
-  // into each seat, computed server-side from the exact formula
-  // sign_driver() charges (signing fee + contract-break fee when the
-  // seat is occupied), so nobody has to work out the formula.
+  // Market — v0.3: signing is FREE (no upfront cost — a driver's MV
+  // is their salary per season, paid salary/12 after each race). The
+  // only charge is breaking the current driver's contract when the
+  // seat is occupied: (rounds left × salary ÷ 12) + $2.0M. An empty
+  // seat shows "Seat N — Free". The cost shown is computed
+  // server-side from the exact formula sign_driver() charges.
   // Unaffordable seats are disabled and show the amount needed.
+  // Reputation is never shown: it is only for the bot teams.
+  // The list is compact (dense rows, both seat buttons side by side)
+  // and signing is two steps: tap a seat, then pick 1–4 contract years.
   const market = [...c.drivers.filter(d => d.status === "free"), ...c.drivers.filter(d => d.status === "f2")];
   const marketCosts = c.market_costs || {};
   const costCell = (d, s) => {
     const q = (marketCosts[d.id] || {})[String(s)];
     if(!q) return `<button data-sign="${d.id}" data-seat="${s}">Seat ${s}</button>`;
-    const breakdown = q.break_fee > 0
-      ? `Signing ${money(q.signing)} + break ${money(q.break_fee)}`
-      : `Signing ${money(q.signing)}`;
+    if(q.total <= 0)
+      return `<div class="market-seat"><button data-sign="${d.id}" data-seat="${s}">Seat ${s} — Free</button><span class="note">No break fee</span></div>`;
+    const breakdown = `Break ${money(q.break_fee)}`;
     const btn = q.affordable
       ? `<button data-sign="${d.id}" data-seat="${s}">Seat ${s} — ${money(q.total)}</button>`
       : `<button disabled title="Need ${money(q.total)}">Need ${money(q.total)}</button>`;
-    return `${btn}<br><span class="note">${breakdown}</span>`;
+    return `<div class="market-seat">${btn}<span class="note">${breakdown}</span></div>`;
   };
-  const signBtns = d => [1, 2].map(s => costCell(d, s)).join("<br>");
-  $("market-box").innerHTML = `<p class="note">Signing costs the driver's market value${myTeam ? ", plus a contract-break fee (1 + salary × years left) if the seat is occupied." : ""} The total for each seat is shown on its button. New contract: 2 years. Driver perf is hidden when the chart is off.</p>` +
-    `<div class="table-scroll"><table><tr><th>Driver</th><th>Age</th><th>Rep</th><th>Titles</th><th>Status</th><th>MV</th><th>Cost to sign</th></tr>` +
-    market.map(d => `<tr><td>${driverNameHtml(d.name, null, d.cha, false)}</td><td>${d.age}</td><td>${Number(d.rep).toFixed(2)}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.mv)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
-  document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => send({type:"sign_driver", driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat)}));
+  const signBtns = d => `<div class="market-seats">${[1, 2].map(s => costCell(d, s)).join("")}</div>`;
+  let confirmHtml = "";
+  if(pendingSign && myTeam){
+    const pd = driverById(pendingSign.driver_id);
+    const pq = (marketCosts[pendingSign.driver_id] || {})[String(pendingSign.seat)];
+    const costTxt = pq ? (pq.total <= 0 ? "Free" : money(pq.total) + " break fee") : "";
+    confirmHtml = `<div class="sign-confirm"><b>Sign ${pd ? esc(pd.name) : "?"} into Seat ${pendingSign.seat}?</b>
+      <span class="note">Cost: ${costTxt} · Salary ${pd ? money(pd.salary) : ""}/season (paid ${pd ? money(pd.salary / 12) : ""} after each race).</span><br>
+      <span class="note">Pick the contract length:</span>
+      ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
+      <button class="secondary" id="btn-sign-cancel">Cancel</button></div>`;
+  }
+  $("market-box").innerHTML = confirmHtml +
+    `<p class="note">Signing is free — no upfront cost. If a seat is occupied, breaking that driver's contract costs (rounds left × salary ÷ 12) + $2.0M; an empty seat is free. A driver's MV is their salary per season, paid after each race. Pick 1–4 contract years when you sign. Driver perf is hidden when the chart is off.</p>` +
+    `<div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    market.map(d => `<tr><td>${driverNameHtml(d.name, null, d.cha, false)}</td><td>${d.age}</td><td>${d.cha}</td><td>${d.status === "free" ? "Free agent" : "F2"}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`).join("") + "</table></div>";
+  document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => { pendingSign = { driver_id: b.dataset.sign, seat: parseInt(b.dataset.seat) }; renderTabs(); });
+  document.querySelectorAll("[data-contract-years]").forEach(b => b.onclick = () => {
+    const p = pendingSign; pendingSign = null;
+    if(p) send({type:"sign_driver", driver_id: p.driver_id, seat: p.seat, contract_years: parseInt(b.dataset.contractYears)});
+  });
+  const cancelBtn = $("btn-sign-cancel"); if(cancelBtn) cancelBtn.onclick = () => { pendingSign = null; renderTabs(); };
   // Standings — v0.2: a replaced driver keeps their points and stays in
   // the standings (free agents with points this season are listed), and
   // ties break by last season's finishing order (prev_driver_order),
@@ -668,9 +720,9 @@ function renderTabs(){
       || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name));
   const teams = [...c.teams].sort((a,b) => b.points - a.points);
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, false)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
+    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th></tr>` +
-    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
+    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td></tr>`).join("") + "</table></div>";
   // Chart
   if(room.chart_on){
     const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
@@ -680,19 +732,52 @@ function renderTabs(){
   } else {
     $("chart-box").innerHTML = `<p class="note">The performance chart is OFF. No perf numbers are shown anywhere — judge teams on results only. The host can turn it back on in the lobby before the career starts.</p>`;
   }
-  // History — every previous Grand Prix can be reopened with its full
-  // qualifying + race tables (v0.1). v0 saves have no full tables.
-  const histEntries = (c.race_history || []).slice().reverse();
-  const hist = histEntries.map((r, i) =>
-    `<div class="bar-row"><b>${r.year} R${r.round} — ${esc(r.circuit || ("Round " + r.round))}</b><span class="note">${r.top3.map((x,j) => `${j+1}. ${esc(x.driver)} (${esc(x.team)})`).join(" · ")}</span>
-     <button class="secondary" data-gp="${i}">View full GP</button></div>`).join("") || "<p class='note'>No races yet.</p>";
-  const champs = (c.champion_history || []).map(h => {
-    const tm = c.teams.find(t => t.name === h.team);
-    return `<div>${h.year}: ${driverNameHtml(h.driver, tm ? tm.colour : null, 0, false)} (${tm ? teamNameHtml(tm) : esc(h.team)}) — ${h.points} pts</div>`;
-  }).join("") || "<p class='note'>No champions yet.</p>";
+  // History — v0.3 race history GRID, like Matthew's PyCharm version:
+  // rows = seasons (2026 first; a new row appears as each season
+  // starts), columns = R1..R12. Each cell shows the top 3 finishers'
+  // initials (L.HAM), each coloured by the team they raced for at the
+  // time. Unplayed rounds show a dash. CLICKING a cell opens the full
+  // Grand Prix (qualifying + race tables), the same view as before.
+  const histByKey = {};
+  (c.race_history || []).forEach((r, idx) => { histByKey[r.year + "-" + r.round] = idx; });
+  const seasons = [];
+  const firstYear = 2026;
+  for(let y = firstYear; y <= c.year; y++) seasons.push(y);
+  const gridHead = `<tr><th>Season</th>${Array.from({length: 12}, (_, i) => `<th>R${i + 1}</th>`).join("")}</tr>`;
+  const gridRows = seasons.map(y => {
+    const cells = Array.from({length: 12}, (_, i) => {
+      const idx = histByKey[y + "-" + (i + 1)];
+      if(idx === undefined) return `<td><div class="hist-cell empty">—</div></td>`;
+      const r = c.race_history[idx];
+      const tops = (r.top3 || []).map(x => {
+        const tm = x.team_id ? teamById(x.team_id) : c.teams.find(t => t.name === x.team);
+        const col = tm ? tm.colour : "#8b949e";
+        return `<div style="color:${col}; font-weight:700">${esc(driverInitials(x.driver))}</div>`;
+      }).join("");
+      return `<td><div class="hist-cell" data-gp="${idx}" title="${esc(r.circuit || "")} — click for the full GP">${tops}</div></td>`;
+    }).join("");
+    return `<tr><td>${y}</td>${cells}</tr>`;
+  }).join("");
+  const hist = `<div class="table-scroll"><table class="hist-grid">${gridHead}${gridRows}</table></div>
+    <p class="note">Tap a race to see its full qualifying + race tables.</p>`;
+  // Champion history — v0.3 table: YEAR, DRIVER, AGE (at season
+  // start), CAR (team), PTS, TROPHIES (🏆 xN, cumulative career
+  // championships at that year), WINNING TEAM (constructors
+  // champion). Pre-filled with the real 2010–2025 table; in-game
+  // seasons append as they complete.
+  const champs = (c.champion_history || []).length
+    ? `<div class="table-scroll"><table><tr><th>Year</th><th>Driver</th><th>Age</th><th>Car</th><th>Pts</th><th>Trophies</th><th>Winning team</th></tr>` +
+      (c.champion_history || []).map(h => {
+        const tm = c.teams.find(t => t.name === h.team);
+        const wt = c.teams.find(t => t.name === h.winning_team);
+        const age = (h.age === null || h.age === undefined) ? "—" : h.age;
+        const trophies = (h.trophies === null || h.trophies === undefined) ? "—" : `🏆 x${h.trophies}`;
+        return `<tr><td>${h.year}</td><td>${driverNameHtml(h.driver, tm ? tm.colour : null, 0, false)}</td><td>${age}</td><td>${tm ? teamNameHtml(tm) : esc(h.team || "")}</td><td>${h.points}</td><td>${trophies}</td><td>${wt ? teamNameHtml(wt) : esc(h.winning_team || "—")}</td></tr>`;
+      }).join("") + "</table></div>"
+    : "<p class='note'>No champions yet.</p>";
   let gpView = "";
-  if(viewingGP != null && histEntries[viewingGP]){
-    const r = histEntries[viewingGP];
+  if(viewingGP != null && (c.race_history || [])[viewingGP]){
+    const r = c.race_history[viewingGP];
     const tables = (r.qual && r.race)
       ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true })}`
       : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
