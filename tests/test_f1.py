@@ -1202,7 +1202,9 @@ def test_replaced_driver_old_team_in_standings_ui():
             # picking 2 years signs the driver.
             p1.click("#market-box button[data-sign][data-seat='1']")
             p1.wait_for_selector("[data-contract-years]", timeout=15000)
-            assert "Pick the contract length" in p1.inner_text("#market-box")
+            # v0.3.1: the picker is an overlay pop-up now, not inline
+            # in the market box.
+            assert "Pick the contract length" in p1.inner_text("#ov-root")
             p1.click("[data-contract-years='2']")
             p1.wait_for_selector("text=signed for McLaren", timeout=15000)
             toast = p1.inner_text("body")
@@ -1213,6 +1215,21 @@ def test_replaced_driver_old_team_in_standings_ui():
             assert surname in standings, standings
             row = next(r for r in standings.splitlines() if surname in r)
             assert "McLaren" in row, row
+            # v0.3.1: the free agent's row carries the '|' bar in the
+            # LAST team's colour (McLaren orange) — while the surname
+            # itself stays uncoloured (v0.1 free-agent rule).
+            bar = p1.evaluate("""(surname) => {
+                const rows = [...document.querySelectorAll('#standings-box table tr')];
+                const row = rows.find(r => r.textContent.includes(surname));
+                if (!row) return null;
+                const barEl = row.querySelector('.team-bar');
+                const surnameEl = row.querySelector('.surname');
+                return { bar: barEl ? barEl.style.color : null,
+                         surnameStyle: surnameEl ? surnameEl.getAttribute('style') : null };
+            }""", surname)
+            assert bar is not None, "outgoing driver row missing from standings"
+            assert bar["bar"] == "rgb(239, 155, 51)", bar  # McLaren #EF9B33
+            assert bar["surnameStyle"] is None, bar  # name stays uncoloured
             browser.close()
     finally:
         proc.terminate()
@@ -1647,22 +1664,214 @@ def test_v03_market_compact_no_rep_history_grid():
             assert "2010" in history and "VETTEL" in history
             assert "🏆 x1" in history and "Winning team" in history
             assert "2025" in history and "NORRIS" in history
-            # Clicking the R1 cell opens the full Grand Prix.
+            # Clicking the R1 cell opens the full Grand Prix — as an
+            # overlay pop-up (v0.3.1), not inline in the history box.
             page.click("#history-box .hist-cell:not(.empty)")
             page.wait_for_selector("#btn-gp-back", timeout=15000)
-            gp = page.inner_text("#history-box")
+            gp = page.inner_text("#ov-root")
             assert "Qualifying —" in gp and "Race —" in gp
             browser.close()
     finally:
         proc.terminate()
 
 
-def test_health_reports_v03():
-    """The live version string is v0.3 everywhere it is shown."""
+def test_health_reports_v031():
+    """The live version string is v0.3.1 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.3"
+    assert client.get("/api/health").json()["version"] == "v0.3.1"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.3</title>" in html
-    assert "Online · v0.3 beta" in html
+    assert "<title>F1 Team Manager Online — v0.3.1</title>" in html
+    assert "Online · v0.3.1 beta" in html
+
+
+# ---------------------------------------------------------------------------
+# v0.3.1 — minimizable pop-ups: every pop-up (full-GP view, contract
+# picker, confirm dialogs, home settings) gets a minimize ("—") and a
+# close ("×") button; minimizing collapses it to a floating chip at
+# the bottom-left, and clicking the chip restores it exactly as it
+# was. Escape and a backdrop click dismiss the topmost open pop-up.
+# ---------------------------------------------------------------------------
+
+def _play_one_round(page):
+    """Advance through one round (qual vote, race vote) to round 2."""
+    page.click("#btn-advance")
+    page.wait_for_selector("#screen-results:not(.hidden)", timeout=15000)
+    page.click("#btn-vote-next")
+    page.wait_for_selector("text=Race Results", timeout=15000)
+    page.click("#btn-vote-next")
+    page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+
+
+def test_popups_minimize_restore_close_escape():
+    """v0.3.1: the contract picker, the full-GP view, the delete-save
+    confirm and the home settings panel can all be minimized to a
+    chip (dashboard stays usable), restored by clicking the chip,
+    and dismissed with the × button, Cancel, Escape, or a backdrop
+    click — without signing anything or losing state."""
+    pytest.importorskip("playwright")
+    import subprocess
+    import time
+    import urllib.request
+    port = 8801
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/")
+            # --- Home settings panel: minimize / restore / close. ---
+            page.click("#btn-settings")
+            page.wait_for_selector("#home-settings:not(.hidden)", timeout=15000)
+            assert page.is_visible("#home-settings")
+            page.click("#btn-settings-min")
+            page.wait_for_selector(".ov-chip[data-chip='settings']", timeout=15000)
+            assert not page.is_visible("#home-settings")
+            assert "Settings" in page.inner_text(".ov-chip[data-chip='settings']")
+            page.click(".ov-chip[data-chip='settings'] span")
+            page.wait_for_selector("#home-settings:not(.hidden)", timeout=15000)
+            assert page.is_visible("#home-settings")
+            page.click("#btn-settings-close")
+            page.wait_for_function(
+                "() => document.getElementById('home-settings')"
+                ".classList.contains('hidden')")
+            assert not page.is_visible("#home-settings")
+            assert page.query_selector(".ov-chip[data-chip='settings']") is None
+            # --- Start a solo McLaren career, play one round. ---
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            page.click("#btn-new-career")
+            page.wait_for_selector("[data-team]", timeout=15000)
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            page.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            page.click("#btn-start-career")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            _play_one_round(page)
+            my_team_before = page.inner_text("#my-team")
+            assert "NORRIS" in my_team_before and "PIASTRI" in my_team_before
+
+            def open_picker():
+                page.click("button[data-tab='market']")
+                page.wait_for_selector("#market-box .market-table", timeout=15000)
+                page.click("#market-box button[data-sign][data-seat='1']")
+                page.wait_for_selector("[data-contract-years]", timeout=15000)
+                assert page.is_visible(".ov-panel")
+                assert page.is_visible("#ov-backdrop")
+                assert "Sign" in page.inner_text(".ov-panel .ov-head h3")
+
+            def assert_picker_gone():
+                assert page.query_selector("[data-contract-years]") is None
+                assert page.query_selector(".ov-panel") is None
+                # Nothing was signed: the original line-up is intact.
+                assert "NORRIS" in page.inner_text("#my-team")
+                assert "PIASTRI" in page.inner_text("#my-team")
+
+            # --- Contract picker: minimize, dashboard stays usable,
+            #     restore, then dismiss with Escape. ---
+            open_picker()
+            page.click("[data-ov-min='sign']")
+            page.wait_for_selector(".ov-chip[data-chip='sign']", timeout=15000)
+            assert not page.is_visible(".ov-panel")
+            assert page.query_selector("#ov-backdrop.hidden") is not None
+            assert "Sign" in page.inner_text(".ov-chip[data-chip='sign']")
+            # Dashboard usable while minimized: switch tabs freely.
+            page.click("button[data-tab='standings']")
+            page.wait_for_selector("#standings-box .team-bar", timeout=15000)
+            assert page.is_visible("#standings-box")
+            page.click(".ov-chip[data-chip='sign'] span")
+            page.wait_for_selector("[data-contract-years]", timeout=15000)
+            assert page.is_visible(".ov-panel")
+            assert "Pick the contract length" in page.inner_text("#ov-root")
+            page.keyboard.press("Escape")
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            assert_picker_gone()
+            # --- Same picker: close with ×, then with a backdrop click,
+            #     then with Cancel. ---
+            open_picker()
+            page.click("[data-ov-close='sign']")
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            assert_picker_gone()
+            open_picker()
+            page.mouse.click(20, 20)  # top-left corner: the backdrop, not the panel
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            assert_picker_gone()
+            open_picker()
+            page.click("#btn-sign-cancel")
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            assert_picker_gone()
+            # --- Full-GP view: minimize / restore / Escape / backdrop. ---
+            page.click("button[data-tab='history']")
+            page.wait_for_selector("#history-box .hist-grid", timeout=15000)
+            page.click("#history-box .hist-cell:not(.empty)")
+            page.wait_for_selector("#btn-gp-back", timeout=15000)
+            assert page.is_visible(".ov-panel")
+            assert "Bahrain" in page.inner_text(".ov-panel .ov-head h3")
+            gp_text = page.inner_text("#ov-root")
+            assert "Qualifying —" in gp_text and "Race —" in gp_text
+            page.click("[data-ov-min='gp']")
+            page.wait_for_selector(".ov-chip[data-chip='gp']", timeout=15000)
+            assert not page.is_visible(".ov-panel")
+            assert "Bahrain" in page.inner_text(".ov-chip[data-chip='gp']")
+            # Dashboard usable while minimized.
+            page.click("button[data-tab='market']")
+            page.wait_for_selector("#market-box .market-table", timeout=15000)
+            assert page.is_visible("#market-box")
+            page.click(".ov-chip[data-chip='gp'] span")
+            page.wait_for_selector("#btn-gp-back", timeout=15000)
+            assert page.is_visible(".ov-panel")
+            assert "Qualifying —" in page.inner_text("#ov-root")
+            page.keyboard.press("Escape")
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            # (The Market tab was active while the GP was minimized, so
+            # switch back to History before checking the grid.)
+            page.click("button[data-tab='history']")
+            page.wait_for_selector("#history-box .hist-grid", timeout=15000)
+            assert page.is_visible("#history-box .hist-grid")
+            page.click("#history-box .hist-cell:not(.empty)")
+            page.wait_for_selector("#btn-gp-back", timeout=15000)
+            page.mouse.click(20, 20)
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            assert page.is_visible("#history-box .hist-grid")
+            # --- Delete-save confirm: Escape cancels, Yes deletes. ---
+            # (Unique name: earlier runs may have left saves behind.)
+            import time as _time
+            save_name = f"Popup test {_time.time():.0f}"
+            page.click("button[data-tab='saves']")
+            page.wait_for_selector("#tab-saves:not(.hidden)", timeout=15000)
+            page.fill("#save-name", save_name)
+            page.click("#btn-save")
+            # (The same saves list also renders in the hidden lobby
+            # screen, so scope every selector to the game tab's list,
+            # and to this run's save name.)
+            del_sel = f"#saves-list-game [data-del-name='{save_name}']"
+            page.wait_for_selector(del_sel, timeout=15000)
+            page.click(del_sel)
+            page.wait_for_selector(".ov-panel", timeout=15000)
+            assert "Delete save" in page.inner_text(".ov-panel .ov-head h3")
+            assert page.is_visible("[data-confirm-yes]")
+            page.keyboard.press("Escape")
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            assert page.query_selector(del_sel) is not None  # save kept
+            page.click(del_sel)
+            page.wait_for_selector("[data-confirm-yes]", timeout=15000)
+            page.click("[data-confirm-yes]")
+            page.wait_for_selector(del_sel, state="detached", timeout=15000)
+            browser.close()
+    finally:
+        proc.terminate()
