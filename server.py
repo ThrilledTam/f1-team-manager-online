@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0 (beta)
+F1 Team Manager Online — v0.3 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -56,7 +56,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     develop      {}
     tuning       {value}                  # -3..3
     reg_research {amount}
-    sign_driver  {driver_id, seat}        # round or winter break
+    sign_driver  {driver_id, seat, contract_years}  # round or winter break;
+                                                     # contract_years 1-4,
+                                                     # picked by the signer
     advance      {}
     start_next_season {}                  # winter break, when seats are filled
     ping         {}
@@ -106,7 +108,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.3", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -224,6 +226,8 @@ def my_team_public(room, player_id):
             d = dict(d)
             if not room["chart_on"]:
                 d.pop("perf", None)
+            # v0.3: reputation is never shown to players, in any payload.
+            d.pop("rep", None)
             d.pop("qual_time", None)
             d.pop("race_time", None)
             out["drivers"].append(d)
@@ -295,7 +299,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.2.1"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.3"}
 
 
 @app.get("/api/saves")
@@ -619,7 +623,8 @@ async def ws_endpoint(ws: WebSocket):
                         ok, why = game.do_reg_research(career, team["id"], msg.get("amount"))
                     elif mtype == "sign_driver":
                         ok, why = game.sign_driver(career, team["id"],
-                                                   msg.get("driver_id"), msg.get("seat"))
+                                                   msg.get("driver_id"), msg.get("seat"),
+                                                   msg.get("contract_years", 2))
                     elif mtype == "advance":
                         ok, _raced, why = game.advance_team(
                             career, team["id"], connected_ids(room), rng=rng)

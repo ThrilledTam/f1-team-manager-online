@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.2.1 (beta)
+# F1 Team Manager Online — v0.3 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.2.1 is a beta:
+for playing together at the same time (not pass-and-play). v0.3 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -192,6 +192,12 @@ The repo includes `render.yaml` for a free Web Service:
   `last_team_id` (last team raced for). v0/v0.1/v0.2 saves still load:
   the loader fills in both fields with safe defaults (`team_points`
   from championship points for current F1 drivers, 0 otherwise).
+- **Save format v5 (v0.3):** saves now also store the champion
+  history (pre-filled real 2010–2025 table, plus one row per
+  in-game season completed) and `team_id` on race-history top-3
+  entries. Older saves still load: the loader adds the 2010–2025
+  table for any year it does not already have, keeping any in-game
+  champion rows.
 - **Reliability** is a developed/displayed stat; the original race sim never
   used it for DNFs, so v0 does not either.
 - **Disconnected humans:** their team is AI-driven for that round so the
@@ -270,6 +276,76 @@ complete" before the race results page had been shown — it now says
   "e.g. [name]" instead of "e.g. Matthew".
 - **Save format v3:** see above — `prev_driver_order` and per-team
   `points_kept`, with safe defaults when loading v0/v0.1 saves.
+
+## v0.3 — hidden reputation, compact market, contract choice, free signing, new break cost, 2025 order, history grid + champions
+
+Matthew's "iron out a few things before I forget them" round (2026-11-10):
+
+- **Reputation hidden from players:** `rep` is only for the bot teams
+  to judge who's good. It is stripped from every payload sent to the
+  browser (`public_state` and `my_team_public`, chart on or off) and
+  from every UI surface (Driver Market column, My Team line, custom
+  team picker). It stays in the server-side data and the AI still
+  reads it (`ai_visible_score`, `ai_best_candidate`) exactly as
+  before.
+- **Compact Driver Market:** dense rows (13px, 4px padding, both seat
+  buttons side by side, 40px tap targets) so 55+ drivers scroll in
+  about half the space. The Rep column is gone; Salary/yr replaces MV.
+- **Contract length on every signing:** player or bot, F2 / free
+  agency / F1 — the signing manager picks 1–4 years. The player
+  picks in a confirm step after tapping a seat (1/2/3/4 buttons);
+  bots pick by `ai_contract_years()` — rep 4+ gets 4 years, rep 3+
+  gets 2–4, rep 2+ gets 1–3, below that 1–2. The server validates
+  1–4 and stores the choice as the new driver's `contract_left`.
+  (Custom-team creation still gives 1-year contracts, per the
+  original game's rule.)
+- **No upfront signing cost:** a driver's MV is their salary per
+  season, paid salary/12 directly after each race (the existing
+  per-race deduction, verified: `salary_per_round()` =
+  sum(salaries)/12). `sign_driver()` no longer charges a signing
+  fee at all.
+- **New break-cost formula** (replaces 1 + salary × contract_left):
+  `rounds_remaining = (12 - round + 1) + max(0, contract_years - 1) × 12`
+  (in winter break: `contract_years × 12`), and
+  `break_cost = rounds_remaining × salary/12 + $2.0M`. Matthew's
+  example passes as a test: Gasly, contract 3, start of round 9,
+  salary $4.0M → 28 × $4.0M/12 + $2.0M = $11.33M. `break_cost()` is
+  the single source of truth that `sign_driver()` charges. The
+  market shows "Seat N — Free" for an empty seat and the break fee
+  only for an occupied seat ("Break $X.XXM" underneath); unaffordable
+  seats stay disabled with "Need $X.XXM"; the sign toast states the
+  break fee charged (or Free).
+- **Standings open in last season's order:** season 1 (2026) uses
+  the real 2025 final standings — drivers Norris, Verstappen,
+  Piastri, Russell, Leclerc, Hamilton, Antonelli, Albon, Sainz,
+  Alonso, Hülkenberg, Hadjar, Bearman, Lawson, Ocon, Stroll, Gasly,
+  Bortoleto, Colapinto, then Pérez, Bottas, Lindblad (did not race
+  in F1 in 2025, ordered by perf); constructors McLaren, Mercedes,
+  Red Bull, Ferrari, Williams, Racing Bulls, Aston Martin, Haas,
+  Audi (Sauber's slot), Alpine, Cadillac (new, last). Stored as
+  `PREV_SEASON_DRIVER_ORDER` / `PREV_SEASON_TEAM_ORDER` in
+  `f1/data.py` and applied when a new career is created (all on 0
+  points). Later seasons keep the v0.2 carry-over (`prev_driver_order`
+  from the season just finished). Standings rows now carry the
+  coloured '|' bar, like qualifying/race results (drivers and
+  constructors).
+- **Race history grid:** the History & Rumours tab now mirrors
+  Matthew's PyCharm grid — rows = seasons (2026 first, a new row
+  appears as each season starts), columns = R1..R12, each cell the
+  top 3 finishers' initials (L.HAM), each coloured by the team they
+  raced for at the time. Unplayed rounds show a dash. Clicking a
+  cell opens the full Grand Prix (qualifying + race tables).
+- **Champion history table:** YEAR, DRIVER, AGE (at season start),
+  CAR, PTS, TROPHIES (🏆 xN, cumulative career championships at
+  that year), WINNING TEAM (constructors champion). Pre-filled with
+  the real 2010–2025 table (Hamilton's counts include his 2008
+  title, so 2014 is x2; 2021 and 2024 winning teams differ from the
+  drivers' champion's team, intentionally). In-game seasons append
+  a row as they complete, from the actual sim results. 2026 is NOT
+  pre-filled — it has not been played yet online.
+- **Save format v5:** old saves gain the 2010–2025 champion table
+  on load (in-game champion rows are kept), and race-history top-3
+  entries gain `team_id`.
 
 ## v0.2.1 — points follow the driver, last team shown, cost upfront
 
@@ -369,7 +445,19 @@ races (best combo wins ~45%, not every race), mid-season replacement
 constructor total keeps the banked points), standings carry-over into
 the next season (exact order before round 1, points sort takes over),
 old saves still loading with the new fields defaulted, and the nickname
-placeholder reading exactly "e.g. [name]".
+placeholder reading exactly "e.g. [name]"; and v0.2.1: a driver moving
+teams keeps their points while the points stay with the old team, an
+F2 signing starts at 0, the market shows the exact cost sign_driver()
+charges, and the replaced driver's old team shows in the standings
+(verified in a real browser); and v0.3: the Gasly $11.33M break-cost
+example, free signing into an empty seat, contract length 1–4
+validated and stored, rep absent from every client payload while the
+AI still uses it, season 1 standings in the real 2025 order, driver
+initials, champion history pre-filled 2010–2025 and appended on
+season end, save format v5 migration, and the market/history/standings
+smoke check in headless Chromium (compact market rows, break-cost /
+Free display, no rep, standings '|' bar, clickable history grid,
+champions table).
 
 ## Known limits
 
