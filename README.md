@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.3.1 (beta)
+# F1 Team Manager Online — v0.4.0 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.3.1 is a beta:
+for playing together at the same time (not pass-and-play). v0.4.0 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -297,6 +297,20 @@ showing its title; clicking the chip restores it exactly as it was,
 and the dashboard underneath stays usable while a pop-up is minimized.
 Escape closes the topmost open pop-up, and clicking the backdrop
 outside a modal pop-up dismisses it too.
+
+## v0.4.0 — standings sort, F2 table, T&R drivers, winter break, reg revamp, bot parity
+
+The biggest update yet (2026-11-11):
+
+- **Standings sort (drivers' and constructors'):** points, then wins, then best finish, then whoever achieved that best finish FIRST (earliest round); non-point scorers sort by best finish, then earliest. The final tie-break is last season's finishing order, so a new season opens in last season's order. Constructors get a **wins** column like the drivers' table.
+- **F2 championship standings** in the dashboard Standings tab, below the F1 tables (drivers only, same sort).
+- **Test & Reserve (T&R) drivers:** each team may have 1–2, signed from the market / F2 / free agents with a 1–4 year contract, paid their FULL salary, +25% research each. Swap a main driver with a T&R driver for free between races (the outgoing driver's team points are banked, as when a driver leaves). Any team may **poach** another team's driver (main or T&R) by paying the break fee, shown upfront in the market.
+- **Continue a saved career (home screen):** the home screen lists the saves on the server (name, season/year, round, saved date); clicking one creates a room with that career loaded. The in-room Saves-tab Load path still works. Server saves are still wiped on a Render free restart — Export stays the durable backup.
+- **Winter break — 3 rounds:** after a season ends, every team makes up to 3 offers per round (max 2 main seats, max 1 T&R). Offers are only mandatory when the lineup is not full. When every team hits NEXT, each driver signs with the best-placed constructors' team that offered them (main-seat offers before T&R offers). Bots make their offers one round at a time, like humans. After 3 rounds, a team still short of a driver gets the bot manager: it promotes its highest-reputation T&R driver, or signs one of the five worst-reputation free agents. The winter-break card reviews last season's stats, final standings, and your two drivers' head-to-head (wins, podiums, points, best finish, qualifying head-to-head), and regulation R&D stays available.
+- **Regulation research revamp:** opens at the start of round 7 (greyed out before). The Research tab shows a progress bar (% fitted, % still to adapt, cost to adapt the rest — never the true perf value). Minor year: unadapted = own car perf − bottom team's perf (the bottom team is fully adapted and can research straight away). Major year (2030, 2034, …): ALL parts are unadapted, so a team that adapts nothing starts the new cycle at 0 perf. Adaptation costs $0.25M/pt (Adapt all / Adapt 10 pts); once 100% adapted, normal reg research is available. The reg change applies at season start (after the winter break's last-minute R&D), from adapted perf + research gains (12×log1p, capped at 70% of target, chaos ±4).
+- **Bot parity:** bot teams research + Develop Parts, adapt/research regulations from round 7 (including winter-break R&D), sign main drivers, sign T&R drivers (young, cheap), and drop/swap bad drivers: after each race from round 6 onward, a bot main driver with 0 points and an average finish of 18th or worse is swapped with the team's highest-rep T&R driver, or dropped (paying the break fee; no drop if unaffordable) — never in the last 2 rounds. Every bot drop/swap is logged in Transfers.
+- **Save format v6** with migration from v5 (and older). The Season 3 save ("Matthew & Max — Season 3 complete") loads into v0.4.0 and enters the new winter-break flow at round 1, with its last season (2028: Bearman 221, Ferrari 331) reconstructed from race history.
+- Tests: 66 (was 54).
 
 ## v0.3 — hidden reputation, compact market, contract choice, free signing, new break cost, 2025 order, history grid + champions
 

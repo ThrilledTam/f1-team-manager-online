@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.3.1 (beta)
+F1 Team Manager Online — v0.4.0 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -56,11 +56,24 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     develop      {}
     tuning       {value}                  # -3..3
     reg_research {amount}
-    sign_driver  {driver_id, seat, contract_years}  # round or winter break;
+    reg_adapt    {points?}             # adapt unadapted parts, $0.25M/pt;
+                                       # no points = adapt all
+    sign_driver  {driver_id, seat, contract_years}  # round only (winter
+                                                     # break uses offers);
                                                      # contract_years 1-4,
-                                                     # picked by the signer
+                                                     # picked by the signer;
+                                                     # may poach another
+                                                     # team's driver
+    sign_tr      {driver_id, contract_years}  # sign a T&R driver (1-4 yrs)
+    swap_driver  {seat, tr_driver_id}  # swap a main driver with a T&R driver
+    promote_tr   {tr_driver_id, seat}  # promote a T&R driver to an empty seat
+    winter_offers {offers}             # winter break: [{driver_id, target,
+                                       # seat, years}] — max 3, max 2 main,
+                                       # max 1 T&R
+    winter_next  {}                    # winter break: ready for the round
     advance      {}
-    start_next_season {}                  # winter break, when seats are filled
+    start_next_season {}                  # winter break, when the 3 rounds
+                                          # are done and seats are filled
     ping         {}
   Server -> client:
     joined       {code, player_id, room}  # this player only
@@ -108,7 +121,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.3.1", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.4.0", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -216,6 +229,12 @@ def my_team_public(room, player_id):
         return None
     career = room["career"]
     out = {k: v for k, v in team.items() if k != "perf"}
+    # v0.4: raw regulation numbers never reach a client — only the
+    # percentages + cost in reg_view. Strip the raw fields here too.
+    out.pop("reg_total", None)
+    out.pop("reg_adapted", None)
+    out.pop("reg_unadapted", None)
+    out["reg_view"] = game.reg_view(career, team)
     # Copy the driver dicts: never mutate the live career state here.
     out["drivers"] = []
     for did in (team["driver1_id"], team["driver2_id"]):
@@ -231,9 +250,35 @@ def my_team_public(room, player_id):
             d.pop("qual_time", None)
             d.pop("race_time", None)
             out["drivers"].append(d)
+    # v0.4: your Test & Reserve drivers, with the same stripping.
+    out["tr_drivers"] = []
+    for d in game.team_tr_drivers(career, team):
+        d = dict(d)
+        if not room["chart_on"]:
+            d.pop("perf", None)
+        d.pop("rep", None)
+        d.pop("qual_time", None)
+        d.pop("race_time", None)
+        out["tr_drivers"].append(d)
     out["finances"] = game.finances_view(career, team)
     out["empty_seats"] = game.empty_seats(career, team)
     return out
+
+
+def ensure_winter_break_open(career, rng=None):
+    """v0.4: when a winter-break career is loaded (Continue / Load),
+    make sure the current round has been opened — bot teams make
+    their offers and do last-minute R&D when the round opens. A round
+    is opened when every AI team has an entry in wb_offers (even an
+    empty one); if any AI team is missing, open (or re-open) the round.
+    Safe to call on every load: it never re-runs for an already-open
+    round, so bots never double-spend on R&D."""
+    if career.get("phase") != "winter_break":
+        return
+    offers = career.get("wb_offers") or {}
+    ai_ids = [t["id"] for t in career["teams"] if t["is_ai"]]
+    if any(tid not in offers for tid in ai_ids):
+        game.start_winter_break_round(career, rng=rng)
 
 
 async def broadcast(room, exclude=None):
@@ -299,7 +344,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.3.1"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.0"}
 
 
 @app.get("/api/saves")
@@ -390,6 +435,35 @@ async def ws_endpoint(ws: WebSocket):
                 player["ws"] = ws
                 room["empty_since"] = None
                 promote_host_if_needed(room)
+                await ws.send_json({"type": "joined", "code": room["code"],
+                                    "player_id": player["player_id"],
+                                    "room": room_public(room, player["player_id"])})
+                await broadcast(room)
+                continue
+
+            if mtype == "create_from_save":
+                # v0.4: "Continue a saved career" from the home screen —
+                # creates a room with that career loaded, with the host
+                # in it; friends join by the room code/link as usual.
+                doc = load_save(SAVES_DIR, msg.get("save_id"))
+                if doc is None:
+                    await send_error(ws, "Could not load that save.")
+                    continue
+                if doc.get("phase") == "finished":
+                    await send_error(ws, "That career is finished (30 seasons played).")
+                    continue
+                room = new_room(msg.get("nickname"), msg.get("colour"))
+                player = add_player(room, msg.get("nickname"), msg.get("colour"))
+                player["ws"] = ws
+                for t in doc["teams"]:
+                    t["is_ai"] = True
+                    t["owner_player_id"] = None
+                doc["advanced"] = []
+                doc["save_id"] = doc.get("save_id")
+                room["career"] = doc
+                room["career_mode"] = "loaded"
+                room["chart_on"] = bool(doc.get("settings", {}).get("chart_on", True))
+                ensure_winter_break_open(doc, rng=random)
                 await ws.send_json({"type": "joined", "code": room["code"],
                                     "player_id": player["player_id"],
                                     "room": room_public(room, player["player_id"])})
@@ -490,6 +564,10 @@ async def ws_endpoint(ws: WebSocket):
                         room["career"] = doc
                         room["career_mode"] = "loaded"
                         room["chart_on"] = bool(doc.get("settings", {}).get("chart_on", True))
+                        # v0.4: a loaded winter-break career enters the
+                        # new 3-round offer flow at its current round —
+                        # make sure the round is opened (bot offers).
+                        ensure_winter_break_open(doc, rng=rng)
                         await broadcast(room)
 
             elif mtype == "delete_save":
@@ -602,13 +680,19 @@ async def ws_endpoint(ws: WebSocket):
                     await broadcast(room)
 
             elif mtype in ("research", "develop", "tuning", "reg_research",
-                           "sign_driver", "advance"):
+                           "reg_adapt", "sign_driver", "sign_tr",
+                           "swap_driver", "promote_tr", "advance",
+                           "winter_offers", "winter_next"):
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
                 elif not team:
                     await send_error(ws, "Pick a team first (take over an AI team).")
-                elif career.get("phase") == "winter_break" and mtype != "sign_driver":
-                    await send_error(ws, "Winter break: fill empty seats first.")
+                elif mtype in ("winter_offers", "winter_next") \
+                        and career.get("phase") != "winter_break":
+                    await send_error(ws, "That is only for the winter break.")
+                elif mtype in ("research", "develop", "tuning", "advance") \
+                        and career.get("phase") == "winter_break":
+                    await send_error(ws, "Winter break: make your offers, then hit NEXT.")
                 elif career.get("phase") not in ("round", "winter_break"):
                     await send_error(ws, "You cannot do that right now.")
                 else:
@@ -621,10 +705,36 @@ async def ws_endpoint(ws: WebSocket):
                         ok, why = game.do_tuning(career, team["id"], msg.get("value"))
                     elif mtype == "reg_research":
                         ok, why = game.do_reg_research(career, team["id"], msg.get("amount"))
+                    elif mtype == "reg_adapt":
+                        # v0.4: adapt unadapted parts ($0.25M/pt); no
+                        # points = adapt everything still unadapted.
+                        ok, why = game.do_reg_adapt(career, team["id"], msg.get("points"))
                     elif mtype == "sign_driver":
                         ok, why = game.sign_driver(career, team["id"],
                                                    msg.get("driver_id"), msg.get("seat"),
                                                    msg.get("contract_years", 2))
+                    elif mtype == "sign_tr":
+                        # v0.4: sign a Test & Reserve driver (1–4 yrs).
+                        ok, why = game.sign_tr_driver(career, team["id"],
+                                                      msg.get("driver_id"),
+                                                      msg.get("contract_years", 2))
+                    elif mtype == "swap_driver":
+                        # v0.4: swap a main driver with a T&R driver.
+                        ok, why = game.swap_main_tr(career, team["id"],
+                                                    msg.get("seat"), msg.get("tr_driver_id"))
+                    elif mtype == "promote_tr":
+                        # v0.4: promote a T&R driver to an empty seat.
+                        ok, why = game.promote_tr_to_main(career, team["id"],
+                                                         msg.get("tr_driver_id"),
+                                                         msg.get("seat"))
+                    elif mtype == "winter_offers":
+                        # v0.4: submit this round's offers (max 3).
+                        ok, why = game.submit_winter_offers(career, team["id"],
+                                                           msg.get("offers") or [])
+                    elif mtype == "winter_next":
+                        # v0.4: ready for the round — resolves when every
+                        # human team is ready (bots are always ready).
+                        ok, _advanced, why = game.winter_next(career, team["id"], rng=rng)
                     elif mtype == "advance":
                         ok, _raced, why = game.advance_team(
                             career, team["id"], connected_ids(room), rng=rng)
@@ -641,7 +751,7 @@ async def ws_endpoint(ws: WebSocket):
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
                 else:
-                    ok, why = game.start_next_season(career)
+                    ok, why = game.start_next_season(career, rng=rng)
                     if not ok:
                         await send_error(ws, why)
                     else:
