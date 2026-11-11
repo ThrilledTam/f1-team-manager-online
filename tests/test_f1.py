@@ -48,6 +48,31 @@ def play_full_round(career, connected, rng):
     assert career["phase"] in ("round", "winter_break")
 
 
+def play_winter_break(career, connected, rng):
+    """Drive the 3-round winter-break offer flow (v0.4): each round,
+    every human team with an empty main seat offers a free agent / F2
+    driver for it, then every human hits NEXT. Bot offers are made
+    when the round opens (bots are always ready), and the round
+    resolves when every human is ready."""
+    assert career["phase"] == "winter_break"
+    for _ in range(3):
+        assert career["wb_round"] <= 3
+        for team in game.human_teams(career):
+            offers = []
+            for seat in game.empty_seats(career, team):
+                pool = game.free_agents(career) + game.f2_drivers(career)
+                assert pool, "no drivers left to fill a seat"
+                offers.append({"driver_id": pool[0]["id"], "target": "seat",
+                               "seat": seat, "years": 2})
+            if offers:
+                ok, why = game.submit_winter_offers(career, team["id"], offers)
+                assert ok, why
+        for team in game.human_teams(career):
+            ok, _adv, why = game.winter_next(career, team["id"], rng=rng)
+            assert ok, why
+    assert career.get("wb_done")
+
+
 # ---------------------------------------------------------------------------
 # 1. New 2026 career
 # ---------------------------------------------------------------------------
@@ -226,22 +251,25 @@ def test_full_season_rollover_applies_minor_reg_change():
         play_full_round(career, connected, rng)
     assert career["phase"] == "winter_break"
     assert career["year"] == 2027
-    assert career["last_reg_change"]["year"] == 2027
-    assert career["last_reg_change"]["kind"] == "Minor"
     assert career["next_reg_year"] == 2028
+    # v0.4: the reg change is NOT applied at season end any more — it
+    # waits until the winter break is done (start_next_season), so the
+    # winter break's last-minute R&D counts. The pending change is the
+    # 2027 Minor one, initialised at round 7.
+    assert career.get("pending_reg_kind") == "Minor"
+    assert career.get("pending_reg_year") == 2027
+    assert career.get("last_reg_change") is None
     # Points reset for the new season.
     assert all(t["points"] == 0 for t in career["teams"])
     assert all(d["points"] == 0 for d in career["drivers"] if d["status"] == "f1")
-    # Winter break can be completed: fill any empty human seats, then start.
-    for team in game.human_teams(career):
-        for seat in game.empty_seats(career, team):
-            pool = game.free_agents(career) + game.f2_drivers(career)
-            assert pool, "no drivers left to fill a seat"
-            ok, why = game.sign_driver(career, team["id"], pool[0]["id"], seat)
-            assert ok, why
-    ok, why = game.start_next_season(career)
+    # Winter break can be completed: 3 rounds of offers, then start.
+    play_winter_break(career, connected, rng)
+    ok, why = game.start_next_season(career, rng=rng)
     assert ok, why
     assert career["phase"] == "round" and career["round"] == 1
+    # The reg change applied at season start, into 2027 (Minor).
+    assert career["last_reg_change"]["year"] == 2027
+    assert career["last_reg_change"]["kind"] == "Minor"
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +296,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 5  # v0.3 save format
+        assert loaded["version"] == 6  # v0.4 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -545,6 +573,15 @@ def test_button_actions_confirm_and_reflect_state():
     # A failed action says so clearly instead of failing silently.
     ok, msg = game.do_research(career, team["id"], "perf", 10**9)
     assert not ok and "Not enough money" in msg
+    # v0.4: regulation research opens at round 7 — before that the
+    # control is greyed out, and research needs a fully adapted car.
+    ok, msg = game.do_reg_research(career, team["id"], 1.0)
+    assert not ok and "round 7" in msg
+    team["money"] = 50.0
+    career["round"] = 7
+    game.init_reg_state(career)
+    ok, msg = game.do_reg_adapt(career, team["id"])
+    assert ok and "Adapted" in msg
     ok, msg = game.do_reg_research(career, team["id"], 1.0)
     assert ok and "regulation research" in msg
     assert team["reg_research"] == 1.0
@@ -966,13 +1003,9 @@ def test_standings_order_carries_into_next_season():
     assert career["phase"] == "winter_break"
     order = career["prev_driver_order"]
     assert len(order) == 22
-    # Fill empty human seats, then start the next season.
-    for team in game.human_teams(career):
-        for seat in game.empty_seats(career, team):
-            pool = game.free_agents(career) + game.f2_drivers(career)
-            ok, why = game.sign_driver(career, team["id"], pool[0]["id"], seat)
-            assert ok, why
-    ok, why = game.start_next_season(career)
+    # Fill empty human seats via the winter-break offer flow, then start.
+    play_winter_break(career, connected, rng)
+    ok, why = game.start_next_season(career, rng=rng)
     assert ok, why
     assert career["round"] == 1 and career["year"] == 2027
     assert all(d["points"] == 0 for d in career["drivers"]
@@ -1357,7 +1390,14 @@ def test_bot_contract_length_rule():
     career = game.build_new_career("Test", "Matthew")
     team = next(t for t in career["teams"] if t["name"] == "Alpine")
     team["driver2_id"] = None
-    game.fill_empty_seats_ai(career, team, rng=random.Random(3))
+    # v0.4: bots fill empty seats through the winter-break offer flow
+    # (one round at a time, like humans) — no more instant AI signing
+    # at season end.
+    career["phase"] = "winter_break"
+    career["wb_round"] = 1
+    career["wb_offers"] = {}
+    game.bot_winter_offers(career, team, rng=random.Random(3))
+    game.resolve_winter_break_round(career, rng=random.Random(3))
     assert team["driver2_id"] is not None
     picked = game.get_driver(career, team["driver2_id"])
     assert 1 <= picked["contract_left"] <= 4
@@ -1562,12 +1602,12 @@ def test_save_v5_migration_prefills_champion_history():
     assert migrated["champion_history"][-1]["year"] == 2026
     assert migrated["champion_history"][-1]["driver"] == "Kimi Antonelli"
     assert migrated["champion_history"][-1]["age"] is None  # pre-v0.3 row
-    # And a save round-trip writes version 5 with the pre-filled table.
+    # And a save round-trip writes version 6 with the pre-filled table.
     career = two_human_career()
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 5
+        assert loaded["version"] == 6
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -1675,15 +1715,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v031():
-    """The live version string is v0.3.1 everywhere it is shown."""
+def test_health_reports_v040():
+    """The live version string is v0.4.0 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.3.1"
+    assert client.get("/api/health").json()["version"] == "v0.4.0"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.3.1</title>" in html
-    assert "Online · v0.3.1 beta" in html
+    assert "<title>F1 Team Manager Online — v0.4.0</title>" in html
+    assert "Online · v0.4.0 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1875,3 +1915,495 @@ def test_popups_minimize_restore_close_escape():
             browser.close()
     finally:
         proc.terminate()
+
+
+# ---------------------------------------------------------------------------
+# v0.4.0 — standings sort, T&R drivers, winter break, reg revamp, bot parity
+# ---------------------------------------------------------------------------
+
+def test_standings_sort_tiebreaks_points_wins_best_finish_earliest():
+    """Feature 1: ties sort by points, then wins, then best finish,
+    then whoever achieved that best finish FIRST. Non-point scorers
+    sort by best finish, then earliest."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    f1 = [d for d in career["drivers"] if d["status"] == "f1"][:3]
+    a, b, c = f1
+    for x in (a, b, c):
+        x["points"] = 10
+        x["season_wins"] = 1
+    a["best_pos"] = 2
+    a["best_finish_round"] = 3
+    b["best_pos"] = 2
+    b["best_finish_round"] = 5
+    c["best_pos"] = 3
+    c["best_finish_round"] = 1
+    top = [d["id"] for d in race_mod.driver_standings(career)[:3]]
+    # a before b (same best finish, a got it first); c last (worse finish).
+    assert top == [a["id"], b["id"], c["id"]]
+    # Non-point scorers: same rule, wins 0.
+    for x in (a, b, c):
+        x["points"] = 0
+        x["season_wins"] = 0
+    top = [d["id"] for d in race_mod.driver_standings(career)[:3]]
+    assert top == [a["id"], b["id"], c["id"]]
+    # Wins break a points tie before best finish does.
+    a["points"] = b["points"] = c["points"] = 10
+    a["season_wins"] = 0
+    b["season_wins"] = 2
+    c["season_wins"] = 1
+    top = [d["id"] for d in race_mod.driver_standings(career)[:3]]
+    assert top == [b["id"], c["id"], a["id"]]
+
+
+def test_constructors_sort_tiebreaks_and_wins():
+    """Feature 1 (constructors): points, wins, best finish, earliest."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    teams = career["teams"][:3]
+    for t in teams:
+        t["points"] = 20
+        t["season_wins"] = 1
+    teams[0]["best_pos"] = 2
+    teams[0]["best_finish_round"] = 4
+    teams[1]["best_pos"] = 2
+    teams[1]["best_finish_round"] = 2
+    teams[2]["best_pos"] = 1
+    teams[2]["best_finish_round"] = 6
+    top = [t["id"] for t in race_mod.constructor_standings(career)[:3]]
+    # Best finish 1 wins outright; then the earlier round wins the tie.
+    assert top == [teams[2]["id"], teams[1]["id"], teams[0]["id"]]
+
+
+def test_f2_standings_use_same_sort():
+    """Feature 2: the background F2 championship, drivers only, same sort."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    f2 = [d for d in career["drivers"] if d["status"] == "f2"]
+    assert len(f2) == 22
+    f2[0]["points"] = 50
+    f2[0]["season_wins"] = 2
+    f2[0]["best_pos"] = 1
+    f2[0]["best_finish_round"] = 5
+    f2[1]["points"] = 50
+    f2[1]["season_wins"] = 2
+    f2[1]["best_pos"] = 1
+    f2[1]["best_finish_round"] = 3
+    standings = race_mod.f2_standings(career)
+    assert all(d["status"] == "f2" for d in standings)
+    # Same points/wins/best finish — the earlier round wins.
+    assert standings[0]["id"] == f2[1]["id"]
+    assert standings[1]["id"] == f2[0]["id"]
+
+
+def test_tr_signing_research_bonus_swap_and_poaching():
+    """Feature 4: T&R signing (1–4 yrs), +25% research per T&R driver,
+    full salary, free swap (points banked), and poaching with the
+    break fee."""
+    career = game.build_new_career("Test", "Matthew")
+    team = career["teams"][0]  # McLaren
+    team["money"] = 100.0
+    pool = [d for d in game.free_agents(career) if d["age"] <= 25]
+    assert pool
+    tr = pool[0]
+    ok, msg = game.sign_tr_driver(career, team["id"], tr["id"], contract_years=2)
+    assert ok, msg
+    assert tr["status"] == "tr" and tr["team_id"] == team["id"]
+    assert tr["contract_left"] == 2
+    assert game.team_tr_drivers(career, team) == [tr]
+    # Research bonus: the pool gained is +25% with one T&R driver.
+    ok, msg = game.do_research(career, team["id"], "perf", 4.0)
+    assert ok, msg
+    assert team["perf_res"] == pytest.approx(4.0 * 1.25)
+    assert team["money"] == pytest.approx(100.0 - 4.0)
+    # T&R drivers are paid their full salary.
+    main_salaries = sum(d["salary"] for d in game.team_drivers(career, team))
+    assert game.salary_per_round(career, team) == pytest.approx(
+        (main_salaries + tr["salary"]) / 12)
+    # Swap: the Seat 2 driver's per-team points are banked, the T&R
+    # driver takes the seat with a fresh per-team tally.
+    seat2 = game.get_driver(career, team["driver2_id"])
+    seat2["team_points"] = 15
+    team["points_kept"] = 0
+    ok, msg = game.swap_main_tr(career, team["id"], 2, tr["id"])
+    assert ok, msg
+    assert game.get_driver(career, team["driver2_id"])["id"] == tr["id"]
+    assert tr["status"] == "f1" and tr["team_points"] == 0
+    assert seat2["status"] == "tr" and seat2["team_id"] == team["id"]
+    assert team["points_kept"] == 15
+    # Poaching: another team signs McLaren's T&R driver (the old Seat
+    # 2 driver) by paying the break fee.
+    other = career["teams"][1]
+    other["money"] = 100.0
+    quote = game.sign_cost(career, other["id"], seat2["id"], ("tr", None))
+    assert quote is not None and quote["poach_fee"] > 0
+    assert quote["total"] == quote["poach_fee"]
+    money_before = other["money"]
+    ok, msg = game.sign_tr_driver(career, other["id"], seat2["id"], contract_years=1)
+    assert ok, msg
+    assert other["money"] == pytest.approx(money_before - quote["total"])
+    assert seat2["status"] == "tr" and seat2["team_id"] == other["id"]
+    # At most 2 T&R drivers per team.
+    team["money"] = 100.0
+    for _ in range(2):
+        p = next(d for d in game.free_agents(career) if d["age"] <= 25)
+        ok, msg = game.sign_tr_driver(career, team["id"], p["id"], contract_years=1)
+        assert ok, msg
+    p = next(d for d in game.free_agents(career) if d["age"] <= 25)
+    ok, msg = game.sign_tr_driver(career, team["id"], p["id"], contract_years=1)
+    assert not ok and "2 T&R" in msg
+
+
+def test_winter_break_offer_resolution_champion_first():
+    """Feature 6: offers resolve in last season's constructors' order
+    (champion first); a driver accepts the first offer they get."""
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    career["wb_round"] = 1
+    career["wb_offers"] = {}
+    career["wb_ready"] = []
+    career["wb_done"] = False
+    teams = career["teams"]
+    # Mercedes is the "champion", McLaren last — offers resolve in
+    # that order.
+    career["last_season"] = {
+        "year": 2026, "drivers": [],
+        "teams": [{"id": t["id"], "name": t["name"], "points": 0, "wins": 0,
+                   "best_pos": None} for t in reversed(teams)],
+    }
+    mclaren, mercedes = teams[0], teams[1]
+    mclaren["driver1_id"] = None
+    mercedes["driver1_id"] = None
+    mclaren["money"] = mercedes["money"] = 100.0
+    target = game.free_agents(career)[0]
+    # Both teams offer the same driver for Seat 1; Mercedes (champion)
+    # is processed first and signs them.
+    career["wb_offers"] = {
+        mclaren["id"]: [{"driver_id": target["id"], "target": "seat", "seat": 1, "years": 2}],
+        mercedes["id"]: [{"driver_id": target["id"], "target": "seat", "seat": 1, "years": 2}],
+    }
+    game.resolve_winter_break_round(career, rng=random.Random(1))
+    assert mercedes["driver1_id"] == target["id"]
+    assert target["status"] == "f1" and target["team_id"] == mercedes["id"]
+    assert mclaren["driver1_id"] is None
+    # A team's main-seat offers are processed before its T&R offer.
+    career["wb_offers"] = {
+        mclaren["id"]: [
+            {"driver_id": game.free_agents(career)[0]["id"], "target": "tr", "seat": None, "years": 1},
+            {"driver_id": game.free_agents(career)[1]["id"], "target": "seat", "seat": 1, "years": 2},
+        ],
+    }
+    game.resolve_winter_break_round(career, rng=random.Random(1))
+    assert mclaren["driver1_id"] is not None
+    assert len(game.team_tr_drivers(career, mclaren)) == 1
+
+
+def test_winter_break_autofill_promotes_tr_then_worst_free_agent():
+    """Feature 6 auto-fill: a team with a T&R driver promotes the
+    highest-rep one; a team with none signs one of the five
+    worst-reputation free agents."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren, mercedes = career["teams"][0], career["teams"][1]
+    mclaren["money"] = mercedes["money"] = 100.0
+    # McLaren has two T&R drivers — the higher-rep one is promoted.
+    # (T&R signings happen before the winter break: direct signing is
+    # blocked once the break starts, offers only.)
+    trs = [d for d in game.free_agents(career) if d["age"] <= 25][:2]
+    for tr in trs:
+        ok, msg = game.sign_tr_driver(career, mclaren["id"], tr["id"], contract_years=2)
+        assert ok, msg
+    career["phase"] = "winter_break"
+    mclaren["driver1_id"] = None
+    mercedes["driver1_id"] = None
+    # The five worst-reputation free agents, before the auto-fill.
+    worst_five = sorted([d for d in career["drivers"] if d["status"] == "free"],
+                        key=lambda d: (d["rep"], d["salary"], d["name"]))[:5]
+    worst_ids = {d["id"] for d in worst_five}
+    game.autofill_winter_break(career, rng=random.Random(2))
+    assert mclaren["driver1_id"] is not None
+    promoted = game.get_driver(career, mclaren["driver1_id"])
+    assert promoted["status"] == "f1"
+    assert promoted["id"] == max(trs, key=lambda d: d["rep"])["id"]
+    # Mercedes has no T&R driver: it signs one of the five
+    # worst-reputation free agents.
+    assert mercedes["driver1_id"] is not None
+    signed = game.get_driver(career, mercedes["driver1_id"])
+    assert signed["status"] == "f1"
+    assert signed["id"] in worst_ids
+
+
+def test_reg_adaptation_math_and_gating():
+    """Feature 7: greyed out before round 7; minor unadapted = own
+    perf − bottom team's perf; major = full perf; $0.25M/pt; 0 perf
+    if nothing is adapted on a major year."""
+    from f1.rules import reg_change_v2
+    career = game.build_new_career("Test", "Matthew")
+    team = career["teams"][0]
+    assert not game.reg_open_for(career, team)
+    ok, msg = game.do_reg_research(career, team["id"], 1.0)
+    assert not ok and "round 7" in msg
+    ok, msg = game.do_reg_adapt(career, team["id"])
+    assert not ok and "round 7" in msg
+    career["round"] = 7
+    game.init_reg_state(career)
+    bottom = min(t["perf"] for t in career["teams"])
+    assert team["reg_unadapted"] == pytest.approx(team["perf"] - bottom)
+    assert team["reg_adapted"] == pytest.approx(bottom)
+    assert game.reg_open_for(career, team)
+    # The bottom team is fully adapted and can research straight away.
+    bottom_team = min(career["teams"], key=lambda t: t["perf"])
+    assert bottom_team["reg_unadapted"] == 0
+    ok, msg = game.do_reg_research(career, bottom_team["id"], 1.0)
+    assert ok, msg
+    # Adaptation costs $0.25M per point.
+    team["money"] = 100.0
+    unadapted = team["reg_unadapted"]
+    ok, msg = game.do_reg_adapt(career, team["id"], points=10)
+    assert ok, msg
+    assert team["money"] == pytest.approx(100.0 - 10 * 0.25)
+    assert team["reg_unadapted"] == pytest.approx(unadapted - 10)
+    assert team["reg_adapted"] == pytest.approx(bottom + 10)
+    # Research is refused until the car is fully adapted.
+    ok, msg = game.do_reg_research(career, team["id"], 1.0)
+    assert not ok and "Adapt" in msg
+    # The reg view shows percentages and money only — never perf.
+    view = game.reg_view(career, team)
+    assert set(view) == {"open", "adapted_pct", "unadapted_pct",
+                         "adapt_cost", "research", "kind", "year"}
+    assert view["adapted_pct"] + view["unadapted_pct"] == pytest.approx(100.0)
+    # reg_change_v2: nothing adapted and nothing researched = 0 perf.
+    assert reg_change_v2(0.0, 0.0, 35.0, rng=random.Random(1)) == 0.0
+    assert reg_change_v2(0.0, 0.0, 12.0, rng=random.Random(1)) == 0.0
+    # Fully adapted + research gives a real car back.
+    assert reg_change_v2(150.0, 10.0, 12.0, rng=random.Random(1)) > 100
+    # Major year: every team starts fully unadapted.
+    career2 = game.build_new_career("Test2", "Matthew")
+    career2["next_reg_kind"] = "Major"
+    career2["round"] = 7
+    game.init_reg_state(career2)
+    for t in career2["teams"]:
+        assert t["reg_unadapted"] == pytest.approx(t["perf"])
+        assert t["reg_adapted"] == 0
+
+
+def test_save_v6_migration_and_season3_save_enters_winter_break():
+    """Feature 5/6: save format v6; a v5 doc gains the v0.4 fields;
+    the real Season 3 save (v5, winter break) migrates into the new
+    3-round winter-break flow with its last season reconstructed."""
+    from f1.saves import SAVE_VERSION
+    assert SAVE_VERSION == 6
+    doc = {"version": 5, "phase": "round", "round": 3, "year": 2026,
+           "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
+           "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
+                        "points": 5, "team_id": "t1"}],
+           "race_history": [], "champion_history": []}
+    migrated = migrate_save(doc)
+    assert migrated["prev_team_order"] == []
+    assert migrated["wb_round"] == 0
+    assert migrated["wb_offers"] == {}
+    assert migrated["wb_done"] is False
+    assert migrated["last_season"] is None
+    assert migrated["drivers"][0]["best_finish_round"] is None
+    assert migrated["drivers"][0]["season_podiums"] == 0
+    assert migrated["teams"][0]["reg_pending"] is False
+    assert migrated["teams"][0]["season_wins"] == 0
+    # A v5 winter-break save enters the new flow at round 1.
+    doc["phase"] = "winter_break"
+    migrated = migrate_save(doc)
+    assert migrated["wb_round"] == 1
+    # The real Season 3 save (if present in this checkout).
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-season3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    real = json.loads(path.read_text())
+    assert real["version"] == 5
+    migrated = migrate_save(real)
+    assert migrated["phase"] == "winter_break"
+    assert migrated["wb_round"] == 1
+    assert migrated["wb_done"] is False
+    ls = migrated["last_season"]
+    assert ls is not None and ls["year"] == 2028
+    assert ls["drivers"][0]["name"] == "Oliver Bearman"
+    assert ls["drivers"][0]["points"] == 221
+    assert ls["drivers"][0]["wins"] == 5
+    assert ls["teams"][0]["name"] == "Ferrari"
+    assert ls["teams"][0]["points"] == 331
+    assert len(migrated["prev_team_order"]) == 11
+    # And it loads through load_save (the path the server uses).
+    with tempfile.TemporaryDirectory() as tmp:
+        import shutil
+        shutil.copy(path, Path(tmp) / "matthew-max-season3-complete.json")
+        loaded = load_save(tmp, "matthew-max-season3-complete")
+        assert loaded is not None
+        assert loaded["phase"] == "winter_break"
+        assert loaded["wb_round"] == 1
+        assert loaded["last_season"]["drivers"][0]["name"] == "Oliver Bearman"
+
+
+def test_continue_saved_career_from_home():
+    """Feature 5: the home screen's Continue action creates a room
+    with the saved career loaded; the saves list endpoint serves it."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Point the server's saves dir at the temp dir for this test.
+        old_dir = srv.SAVES_DIR
+        srv.SAVES_DIR = Path(tmp)
+        try:
+            career = two_human_career()
+            meta = save_career(career, "Continue test", tmp)
+            client = TestClient(srv.app)
+            assert any(s["save_id"] == meta["save_id"]
+                       for s in client.get("/api/saves").json()["saves"])
+
+            def recv_until(ws, want, limit=40, check=None):
+                for _ in range(limit):
+                    m = ws.receive_json()
+                    if m.get("type") == want and (check is None or check(m)):
+                        return m
+                raise AssertionError(f"never got {want}")
+
+            with client.websocket_connect("/ws") as ws:
+                ws.send_json({"type": "create_from_save",
+                              "save_id": meta["save_id"],
+                              "nickname": "Matthew", "colour": "#e74c3c"})
+                joined = recv_until(ws, "joined")
+                assert joined["room"]["career"] is not None
+                assert joined["room"]["career"]["name"] == "Continue test"
+                assert joined["room"]["career_mode"] == "loaded"
+                # The host is in the room; the career is the saved one.
+                assert joined["room"]["career"]["year"] == 2026
+        finally:
+            srv.SAVES_DIR = old_dir
+
+
+def test_bot_drops_or_swaps_bad_driver():
+    """Bot parity: from round 6, a bot drops (or swaps, when it has a
+    T&R driver) a main driver with 0 points and an average finish of
+    18th or worse — never in the last 2 rounds, and never when it
+    cannot afford the break fee. Every action is logged."""
+    career = game.build_new_career("Test", "Matthew")
+    team = next(t for t in career["teams"] if t["name"] == "Alpine")
+    team["money"] = 100.0
+    career["round"] = 8
+    bad = game.get_driver(career, team["driver2_id"])
+    bad["points"] = 0
+    bad["finish_sum"] = 19 * 6
+    bad["finish_count"] = 6
+    # No T&R driver: the bot DROPS the driver and pays the break fee.
+    money_before = team["money"]
+    game.bot_post_race(career, rng=random.Random(1))
+    assert team["driver2_id"] is None
+    assert bad["status"] == "free"
+    assert team["money"] < money_before
+    assert any("dropped" in t and bad["name"] in t for t in career["transfers"])
+    # With a T&R driver, the bot SWAPS instead of dropping.
+    ok, msg = game.sign_driver(career, team["id"], game.free_agents(career)[0]["id"], 2)
+    assert ok, msg
+    new_bad = game.get_driver(career, team["driver2_id"])
+    new_bad["points"] = 0
+    new_bad["finish_sum"] = 20 * 6
+    new_bad["finish_count"] = 6
+    tr = next(d for d in game.free_agents(career) if d["age"] <= 25)
+    ok, msg = game.sign_tr_driver(career, team["id"], tr["id"], contract_years=1)
+    assert ok, msg
+    game.bot_post_race(career, rng=random.Random(1))
+    assert game.get_driver(career, team["driver2_id"])["id"] == tr["id"]
+    assert new_bad["status"] == "tr"
+    assert any("swapped" in t for t in career["transfers"])
+    # Last 2 rounds: no drop or swap, however bad the driver is.
+    career["round"] = 11
+    seat1 = game.get_driver(career, team["driver1_id"])
+    seat1["points"] = 0
+    seat1["finish_sum"] = 22 * 11
+    seat1["finish_count"] = 11
+    game.bot_post_race(career, rng=random.Random(1))
+    assert team["driver1_id"] == seat1["id"]
+    # Unaffordable break fee: no drop either.
+    career["round"] = 8
+    team["money"] = 0.5
+    # Remove the team's T&R driver (new_bad, swapped out above) so the
+    # only option is a drop — which the team cannot afford.
+    new_bad["status"] = "free"
+    new_bad["team_id"] = None
+    game.bot_post_race(career, rng=random.Random(1))
+    assert team["driver1_id"] == seat1["id"]
+
+
+def test_bot_reg_participation():
+    """Bot parity: from round 7 a bot team adapts its car to the new
+    regulations (and researches once fully adapted), like a player."""
+    career = game.build_new_career("Test", "Matthew")
+    team = next(t for t in career["teams"] if t["name"] == "Alpine")
+    team["money"] = 100.0
+    career["round"] = 7
+    game.init_reg_state(career)
+    unadapted_before = team["reg_unadapted"]
+    assert unadapted_before > 0
+    game.ai_act(career, team, rng=random.Random(5))
+    assert team["reg_unadapted"] < unadapted_before or team["reg_research"] > 0
+    # A fully adapted bot researches instead.
+    team["reg_unadapted"] = 0.0
+    team["reg_adapted"] = team["reg_total"]
+    team["money"] = 100.0
+    game.ai_act(career, team, rng=random.Random(5))
+    assert team["reg_research"] > 0
+
+
+def test_ws_winter_break_offers_next_and_start():
+    """Feature 6 over the real WebSocket: a human submits offers and
+    hits NEXT for 3 rounds, then starts the next season. Bot offers
+    are made when each round opens."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+
+    def recv_until(ws, want, limit=60, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "create_room", "nickname": "Matthew", "colour": "#e74c3c"})
+        joined = recv_until(ws, "joined")
+        code = joined["code"]
+        ws.send_json({"type": "new_career", "name": "WS Winter"})
+        state = recv_until(ws, "room_state",
+                           check=lambda m: m["room"]["career"] is not None)
+        team_id = state["room"]["career"]["teams"][0]["id"]
+        ws.send_json({"type": "choose_team", "team_id": team_id})
+        ws.send_json({"type": "start_career"})
+        recv_until(ws, "room_state", check=lambda m: m["room"]["started"] is True)
+        # Drive 12 rounds at the game level (the room's career dict is
+        # the same object the socket serves).
+        room = srv.ROOMS[code]
+        career = room["career"]
+        connected = {joined["player_id"]}
+        rng = seeded(11)
+        for _ in range(12):
+            play_full_round(career, connected, rng)
+        assert career["phase"] == "winter_break"
+        # The human's team has an empty seat (its driver left at season
+        # end) or not — either way, offers + NEXT work over the socket.
+        my_team = next(t for t in career["teams"] if t["id"] == team_id)
+        for rnd in (1, 2, 3):
+            assert career["wb_round"] == rnd
+            if game.empty_seats(career, my_team):
+                pool = game.free_agents(career) + game.f2_drivers(career)
+                offers = [{"driver_id": pool[0]["id"], "target": "seat",
+                           "seat": game.empty_seats(career, my_team)[0], "years": 2}]
+                ws.send_json({"type": "winter_offers", "offers": offers})
+                act = recv_until(ws, "action", check=lambda m: m.get("action") == "winter_offers")
+                assert act["ok"]
+            ws.send_json({"type": "winter_next"})
+            act = recv_until(ws, "action", check=lambda m: m.get("action") == "winter_next")
+            assert act["ok"]
+        assert career.get("wb_done")
+        ws.send_json({"type": "start_next_season"})
+        act = recv_until(ws, "action", check=lambda m: m.get("action") == "start_next_season")
+        assert act["ok"]
+        assert career["phase"] == "round" and career["round"] == 1
