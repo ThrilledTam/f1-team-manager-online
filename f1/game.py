@@ -655,6 +655,9 @@ def _sign_driver_common(career, team, d, contract_years):
         d["best_finish_round"] = None
         d["finish_sum"] = 0
         d["finish_count"] = 0
+        # v0.4.4: their F2 starts do not count as F1 races — a promoted
+        # driver is not registered in the F1 standings until they
+        # actually race in F1.
     # A free agent keeps championship points/wins/best finish from an
     # earlier stint; either way the per-team tally restarts at 0.
     d["team_points"] = 0
@@ -1519,8 +1522,9 @@ def end_of_season(career, rng=None):
     rng = rng or random
     standings = race_mod.constructor_standings(career)
     # v0.2: driver_standings() also lists replaced drivers (free agents
-    # with points), but the champion / retirements / ageing below are
-    # for F1 drivers only.
+    # with points), and v0.4.4: any driver who raced in F1 this season
+    # (0 points included) — but the champion / retirements / ageing
+    # below are for F1 drivers only.
     drivers = [d for d in race_mod.driver_standings(career)
                if d["status"] == "f1"]
     # v0.2: record this season's final driver order BEFORE the points
@@ -1649,6 +1653,7 @@ def end_of_season(career, rng=None):
         d["best_finish_round"] = None
         d["finish_sum"] = 0
         d["finish_count"] = 0
+        d["f1_races"] = 0
     for d in free_agents(career):
         if d not in retired:
             old_age = d["age"]
@@ -1668,6 +1673,7 @@ def end_of_season(career, rng=None):
             d["best_finish_round"] = None
             d["finish_sum"] = 0
             d["finish_count"] = 0
+            d["f1_races"] = 0
     for d in f2_drivers(career):
         old_age = d["age"]
         d["age"] += 1
@@ -1683,6 +1689,7 @@ def end_of_season(career, rng=None):
         d["best_finish_round"] = None
         d["finish_sum"] = 0
         d["finish_count"] = 0
+        d["f1_races"] = 0
     # v0.4: T&R drivers age and their contracts tick down too. An
     # expired T&R contract ends the affiliation — the driver becomes
     # a free agent (and is then available for winter-break offers).
@@ -1708,6 +1715,7 @@ def end_of_season(career, rng=None):
             d["best_finish_round"] = None
             d["finish_sum"] = 0
             d["finish_count"] = 0
+            d["f1_races"] = 0
             if d["contract_left"] <= 0:
                 d["status"] = "free"
                 d["team_id"] = None
@@ -2265,7 +2273,8 @@ def retirement_rumours(career):
     """isRetiring(isRumour=True) for every F1 driver, as in Main.py's rumours."""
     out = []
     # v0.2: driver_standings() also lists replaced drivers (free agents
-    # with points) — rumours are for current F1 drivers only.
+    # with points), and v0.4.4: any driver who raced in F1 this season
+    # — rumours are for current F1 drivers only.
     drivers = [d for d in race_mod.driver_standings(career)
                if d["status"] == "f1"]
     for d in drivers:

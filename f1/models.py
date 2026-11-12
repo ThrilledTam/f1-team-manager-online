@@ -54,14 +54,26 @@ def make_driver(data, status="free", team_id=None):
                                # this season (bot drop rule uses the
                                # average: finish_sum / finish_count)
         "finish_count": 0,
+        # v0.4.4: F1 Grands Prix started this season (the F1 race loop
+        # only — F2 races do not count). A driver who raced in F1
+        # stays registered in the Drivers' Championship even with 0
+        # points, even if they are no longer a main driver (swapped to
+        # T&R, dropped to free agency) — like real F1, where a replaced
+        # driver stays in the table. Reset with the season; an F2
+        # driver signed into F1 starts at 0 (their F2 starts do not
+        # carry over).
+        "f1_races": 0,
         "qual_time": None,
         "qual_pos": None,
         "race_time": None,
         "race_pos": None,
         # v0.4: status gains "tr" (Test & Reserve). A T&R driver is
         # affiliated with a team (team_id set, contract_left 1-4,
-        # full salary paid) but does not race and never appears in
-        # the F1 standings. See game.py team_tr_drivers().
+        # full salary paid) but does not race. v0.4.4: a T&R driver
+        # who raced earlier this season DOES appear in the F1
+        # standings (their f1_races keep them registered, like real
+        # F1) — only a T&R driver who has never raced in F1 is absent.
+        # See game.py team_tr_drivers().
         "status": status,          # "f1" | "free" | "f2" | "queued" | "pool" | "retired" | "tr"
         "team_id": team_id,
         # v0.4.2: Driver Academy affiliation — the team whose junior

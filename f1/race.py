@@ -232,6 +232,10 @@ def apply_race_results(career, race_entries, points_dist):
             d["season_podiums"] = d.get("season_podiums", 0) + 1
         d["finish_sum"] = d.get("finish_sum", 0) + pos
         d["finish_count"] = d.get("finish_count", 0) + 1
+        # v0.4.4: F1 starts this season — the standings rule (a driver
+        # who raced in F1 stays registered even with 0 points). The F2
+        # loop has its own finish_count and must NOT touch this.
+        d["f1_races"] = d.get("f1_races", 0) + 1
         if pos <= len(points_dist):
             # Championship points follow the driver; team_points are
             # the points scored FOR this team (v0.2.1) — only these
@@ -289,9 +293,17 @@ def driver_standings(career):
     free-agent points are reset at season end (game.end_of_season), so
     a listed free agent always scored this season. Callers that need
     F1 drivers only (season rollover, retirement rumours) filter on
-    status == 'f1' themselves."""
+    status == 'f1' themselves.
+    v0.4.4 (Matthew's rule): a driver who COMPETED in an F1 race this
+    season is registered in the standings even with 0 points — so a
+    driver swapped to T&R or dropped to free agency after racing
+    (e.g. Stroll, P19 in Bahrain, then swapped for Vandoorne) stays
+    listed, like real F1, where a replaced driver stays in the table.
+    f1_races counts F1 starts only (F2 races do not count, and an F2
+    driver signed into F1 starts at 0), so F2 drivers never leak in."""
     f1 = [d for d in career["drivers"]
-          if d["status"] == "f1" or (d["status"] == "free" and d["points"] > 0)]
+          if d["status"] == "f1" or (d["status"] == "free" and d["points"] > 0)
+          or d.get("f1_races", 0) > 0]
     prev = {did: i for i, did in enumerate(career.get("prev_driver_order") or [])}
     return sorted(f1, key=lambda d: _driver_sort_key(d, prev))
 

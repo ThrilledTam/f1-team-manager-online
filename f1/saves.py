@@ -188,6 +188,15 @@ def migrate_save(doc):
         d.setdefault("season_qual_h2h", 0)
         d.setdefault("finish_sum", 0)
         d.setdefault("finish_count", 0)
+    # v0.4.4: F1 starts this season (the standings rule — a driver who
+    # raced in F1 stays registered even with 0 points). Old saves have
+    # no f1_races, so backfill it from finish_count for every driver
+    # who was NOT racing F2 (their finishes came from F1 races);
+    # F2 drivers start at 0, and a promoted F2 driver is reset to 0
+    # on signing anyway (game._sign_driver_common).
+    for d in doc.get("drivers") or []:
+        d.setdefault("f1_races",
+                     d.get("finish_count", 0) if d.get("status") != "f2" else 0)
     # v0.4.2: Driver Academy affiliation on every driver (None =
     # no academy) and the bot academy quota on every team. Existing
     # saves migrate with empty academies and their current T&R state
