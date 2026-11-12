@@ -213,7 +213,7 @@ def test_research_and_develop_formulas():
 
 
 # ---------------------------------------------------------------------------
-# v0.5.2 — Develop gain: headroom x sqrt(pool), no hard cap.
+# v0.5.3 — Develop gain: headroom x sqrt(pool), no hard cap.
 # The old formula ((400/perf)**2.5 * pool/3) exploded at low perf with
 # a big pool (verified live: $7M at perf 125 gave +88.7, Aston
 # 125 -> 213.7, top of the chart). The new formula fades to zero at
@@ -222,7 +222,7 @@ def test_research_and_develop_formulas():
 # ---------------------------------------------------------------------------
 
 def test_dev_gain_worked_examples():
-    """v0.5.2: the approved formula's worked examples, before the
+    """v0.5.3: the approved formula's worked examples, before the
     driver factor is applied in do_develop."""
     # Normal round: $3M at McLaren, perf 165, pool 6.0 (x2 T&R
     # bonus) -> ~17.27 raw, ~20.9 with the x1.21 driver factor
@@ -242,7 +242,7 @@ def test_dev_gain_worked_examples():
 
 
 def test_dev_gain_exploit_no_longer_tops_chart():
-    """v0.5.2: the exact live exploit — Aston Martin, perf 125,
+    """v0.5.3: the exact live exploit — Aston Martin, perf 125,
     $7M of Performance research (pool 12.25 after the x1.75 T&R
     bonus) — now gains ~34 and lands at ~159, below Mercedes 210,
     instead of +88.7 to 213.7."""
@@ -260,7 +260,7 @@ def test_dev_gain_exploit_no_longer_tops_chart():
 
 
 def test_dev_gain_banked_dump_is_inefficient():
-    """v0.5.2: saving up and dumping is inefficient — developing
+    """v0.5.3: saving up and dumping is inefficient — developing
     the same 18.0 of research in three 6.0 chunks (perf rising
     after each one) gains more in total than one 18.0 dump, and
     doubling a pool only multiplies the gain by sqrt(2) ~ 1.41x."""
@@ -277,7 +277,7 @@ def test_dev_gain_banked_dump_is_inefficient():
 
 
 def test_dev_gain_edge_cases():
-    """v0.5.2: perf >= 400 gains nothing (headroom is zero); a
+    """v0.5.3: perf >= 400 gains nothing (headroom is zero); a
     zero or negative pool gains nothing and never crashes (pools
     go negative via the research cross-penalty). A 0-perf car —
     possible after a reg change with no adaptation — CAN recover
@@ -1919,15 +1919,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v052():
-    """The live version string is v0.5.2 everywhere it is shown."""
+def test_health_reports_v053():
+    """The live version string is v0.5.3 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.5.2"
+    assert client.get("/api/health").json()["version"] == "v0.5.3"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.5.2</title>" in html
-    assert "Online · v0.5.2 beta" in html
+    assert "<title>F1 Team Manager Online — v0.5.3</title>" in html
+    assert "Online · v0.5.3 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2690,6 +2690,30 @@ def test_bot_reg_participation():
     team["money"] = 100.0
     game.ai_act(career, team, rng=random.Random(5))
     assert team["reg_research"] > 0
+
+
+def test_bot_develops_more_v053():
+    """v0.5.3: bots develop whenever the banked research is worth
+    converting (combined pool > 2.0) and put most of their research
+    into Performance (50-75%). The old code gated develop behind a
+    50% coin flip and split 0-50% to Performance, so bot cars
+    barely developed."""
+    career = game.build_new_career("Test", "Matthew")
+    team = next(t for t in career["teams"] if t["name"] == "Alpine")
+    team["money"] = 100.0
+    # A banked pool worth converting must develop, every time.
+    team["perf_res"] = 3.0
+    team["reli_res"] = 1.0
+    perf_before = team["perf"]
+    game.ai_act(career, team, rng=random.Random(7))
+    assert team["perf"] > perf_before
+    assert team["perf_res"] == 0.0 and team["reli_res"] == 0.0
+    # Over several rounds a bot car should gain real performance.
+    team["money"] = 10.0
+    perf_before = team["perf"]
+    for i in range(6):
+        game.ai_act(career, team, rng=random.Random(100 + i))
+    assert team["perf"] - perf_before > 5.0
 
 
 def test_ws_winter_break_offers_next_and_start():
