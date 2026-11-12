@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from f1 import game
 from f1.data import CALENDAR, circuit_for_round
 from f1.rules import (
-    add_perf_gain, finance_estimates, reg_change, retirement_chance,
+    POINTS_DIST, add_perf_gain, finance_estimates, reg_change,
+    retirement_chance,
 )
 from f1.saves import delete_save, list_saves, load_save, migrate_save, save_career
 
@@ -383,7 +384,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 9  # v0.6.0 save format
+        assert loaded["version"] == 9  # v0.6.1 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -554,7 +555,8 @@ def test_results_payloads_never_contain_absolute_times():
         assert len(rows) == 22
         for r in rows:
             assert "time" not in r, f"absolute time leaked in {key}: {r}"
-            assert r["gap"] == "LEADER" or r["gap"].startswith("+")
+            # v0.6.1: a DNF row's gap is "DNF" — not an absolute time.
+            assert r["gap"] in ("LEADER", "DNF") or r["gap"].startswith("+")
         assert rows[0]["gap"] == "LEADER"
     # public_state must not leak qual_time / race_time either, chart on or off.
     for chart_on in (True, False):
@@ -579,17 +581,22 @@ def test_race_is_full_distance_with_plausible_gaps():
         # v0.2 form widens qual gaps a little (sim median 3.0s, max 4.1s
         # over 120 races) — still a few seconds, not tens.
         assert qtimes[-1] - qtimes[0] <= 4.5
-        race_entries = race_mod.simulate_race(c, laps=57, rng=rng)
+        race_entries, _dnfs = race_mod.simulate_race(c, laps=57, rng=rng)
         rtimes = [d["race_time"] for d, _ in race_entries]
         winner = rtimes[0]
         assert 4000 <= winner <= 7000, f"winner total {winner:.0f}s is not a GP distance"
-        assert 10 <= rtimes[-1] - winner <= 150  # P22 gap plausible, not hundreds
+        # v0.6.1: the last row of race_entries is the last FINISHER
+        # (DNFs are returned separately) — its gap is still plausible.
+        assert 10 <= rtimes[-1] - winner <= 150  # last finisher's gap
         assert 5 <= rtimes[9] - winner <= 120    # P10 gap plausible
     # The played round agrees (server-side times are what the gaps came from).
     play_full_round(career, connected, seeded(5))
     assert career["last_race"][0]["gap"] == "LEADER"
-    assert career["last_race"][-1]["gap"].startswith("+")
-    last_gap = float(career["last_race"][-1]["gap"][1:-1])
+    # v0.6.1: DNF rows (gap "DNF") sit after the finishers — the gap
+    # check is on the last FINISHER, not the last row.
+    finishers = [r for r in career["last_race"] if r["pos"] != "DNF"]
+    assert finishers[-1]["gap"].startswith("+")
+    last_gap = float(finishers[-1]["gap"][1:-1])
     assert 10 <= last_gap <= 150
 
 
@@ -792,6 +799,17 @@ def test_driver_surname_markup_bold_uppercase_team_coloured():
             assert "Time" not in table and "GAP" in table and "G/L" in table
             assert "🥇" in table and "▲" not in table  # P1 gl=0 shows 0
             assert "▼1" in table
+            # v0.6.1: a DNF row shows "DNF" for position and gap, 0
+            # points, and a dash (not 0) for gain/loss.
+            dnf_table = page.evaluate(
+                "window.F1UI.classificationTable("
+                "[{pos:1,driver:'Lewis Hamilton',driver_id:'x',team:'Ferrari',"
+                "team_id:null,cha:7,gap:'LEADER',points:25,gl:0},"
+                "{pos:'DNF',driver:'Lance Stroll',driver_id:'z',team:'Aston Martin',"
+                "team_id:null,cha:0,gap:'DNF',points:0}], {showGL:true})")
+            assert "DNF" in dnf_table
+            assert "—" in dnf_table  # DNF gain/loss is a dash, not 0
+            assert ">0<" in dnf_table  # the DNF row scores 0 points
             browser.close()
     finally:
         proc.terminate()
@@ -984,7 +1002,7 @@ def _simulate_many_races(n=120, base_seed=10000):
         poles[qual[0][0]["name"]] += 1
         qtimes = [d["qual_time"] for d, _ in qual]
         q_gaps.append(qtimes[-1] - qtimes[0])
-        entries = race_mod.simulate_race(c, laps=57, rng=rng)
+        entries, _dnfs = race_mod.simulate_race(c, laps=57, rng=rng)
         wins[entries[0][0]["name"]] += 1
         rtimes = [d["race_time"] for d, _ in entries]
         totals.append(rtimes[0])
@@ -1014,6 +1032,147 @@ def test_session_form_pole_diversity():
     q_sorted = sorted(q_gaps)
     assert q_sorted[len(q_sorted) // 2] <= 3.5
     assert q_sorted[-1] <= 5.0
+
+
+# ---------------------------------------------------------------------------
+# v0.6.1 — mechanical failures (DNFs) driven by reliability
+# ---------------------------------------------------------------------------
+
+def test_dnf_chance_and_deterministic_dnfs():
+    """v0.6.1: DNF chance is 1 - rel per car, each car rolling its own
+    team's reliability. rel 0.0 is a 100% DNF chance (both cars DNF);
+    rel 1.0 is 0% (never DNFs)."""
+    from f1 import race as race_mod
+    assert race_mod.dnf_chance(0.95) == pytest.approx(0.05)
+    assert race_mod.dnf_chance(0.90) == pytest.approx(0.10)
+    assert race_mod.dnf_chance(1.0) == 0.0
+    assert race_mod.dnf_chance(1.2) == 0.0
+    assert race_mod.dnf_chance(0.0) == 1.0
+    career = game.build_new_career("Test", "Matthew")
+    # One team is a guaranteed DNF (rel 0.0); the rest never DNF (rel 1.0).
+    bad = next(t for t in career["teams"] if t["name"] == "Aston Martin")
+    bad["rel"] = 0.0
+    for t in career["teams"]:
+        if t is not bad:
+            t["rel"] = 1.0
+    entries, dnfs = race_mod.simulate_race(career, laps=57, rng=random.Random(3))
+    assert len(entries) == 20
+    assert len(dnfs) == 2
+    assert {d["name"] for d, _t in dnfs} == {
+        game.get_driver(career, bad["driver1_id"])["name"],
+        game.get_driver(career, bad["driver2_id"])["name"],
+    }
+    # All reliable: nobody DNFs.
+    for t in career["teams"]:
+        t["rel"] = 1.0
+    entries, dnfs = race_mod.simulate_race(career, laps=57, rng=random.Random(3))
+    assert len(entries) == 22
+    assert dnfs == []
+
+
+def test_dnf_rate_near_five_percent_at_rel_095():
+    """v0.6.1: with rel 0.95 the per-car DNF rate is near 5% — over
+    200 one-lap races (4,400 car-races) it lands in 2-8%, a wide band
+    around the 5% expectation, so the test is not flaky."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    for t in career["teams"]:
+        t["rel"] = 0.95
+    rng = random.Random(11)
+    dnfs = 0
+    total = 0
+    for _ in range(200):
+        _entries, d = race_mod.simulate_race(career, laps=1, rng=rng)
+        dnfs += len(d)
+        total += 22
+    rate = dnfs / total
+    assert 0.02 <= rate <= 0.08, f"DNF rate {rate:.3f} is not near 5%"
+
+
+def test_dnf_driver_consequences_and_move_up():
+    """v0.6.1: a DNF driver scores 0 points, keeps their best finish,
+    still counts as having raced (f1_races +1, so they stay in the
+    standings), rep unchanged, and the team pays a $1.0M repair bill
+    per DNF with no prize money for that car. The other cars move up —
+    the 10th finisher (11th overall) scores a point."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    f1_drivers = [d for d in career["drivers"] if d["status"] == "f1"]
+    assert len(f1_drivers) == 22
+    # The first two F1 drivers (both from the same team) DNF.
+    dnf_drivers = f1_drivers[:2]
+    team_of = {}
+    for t in career["teams"]:
+        for did in (t["driver1_id"], t["driver2_id"]):
+            if did:
+                team_of[did] = t
+    dnf_team = team_of[dnf_drivers[0]["id"]]
+    assert team_of[dnf_drivers[1]["id"]] is dnf_team
+    finishers = f1_drivers[2:]
+    # Give the DNF drivers a known best finish and rep to check they
+    # are untouched, and a known f1_races count.
+    for d in dnf_drivers:
+        d["best_pos"] = 3
+        d["best_finish_round"] = 1
+        d["f1_races"] = 0
+    rep_before = {d["id"]: d["rep"] for d in dnf_drivers}
+    money_before = dnf_team["money"]
+    # The 10th finisher is the 12th driver overall — it scores a point
+    # only because the two DNFs ahead of it moved it up.
+    tenth_finisher = finishers[9]
+    entries = [(d, team_of[d["id"]]) for d in finishers]
+    dnf_entries = [(d, dnf_team) for d in dnf_drivers]
+    n_dnf = race_mod.apply_race_results(career, entries, POINTS_DIST, dnf_entries)
+    assert n_dnf == 2
+    for d in dnf_drivers:
+        assert d["points"] == 0
+        assert d["team_points"] == 0
+        assert d["best_pos"] == 3  # a DNF is not a finish
+        assert d["f1_races"] == 1  # still counts as having raced
+        assert d["rep"] == rep_before[d["id"]]  # rep unchanged
+        assert d["race_pos"] is None
+    assert dnf_drivers[0] in race_mod.driver_standings(career)
+    assert tenth_finisher["points"] == 1  # P10 after the move-up
+    assert tenth_finisher["team_points"] == 1
+    # The DNF team paid two $1.0M repair bills and earned no prize
+    # money (neither of its cars finished).
+    assert dnf_team["money"] == money_before - 2 * race_mod.DNF_REPAIR_COST
+    # The winner still gets 25.
+    assert finishers[0]["points"] == 25
+
+
+def test_reliability_cap_is_one_not_099():
+    """v0.6.1: a team can develop its reliability up to 1.0 (not stuck
+    at 0.99) — so "all good" (0% DNF) is reachable."""
+    career = game.build_new_career("Test", "Matthew")
+    team = next(t for t in career["teams"] if t["name"] == "Aston Martin")
+    team["rel"] = 0.99
+    team["reli_res"] = 100.0  # add_rel_gain = 1.0
+    team["money"] = 100.0
+    ok, _msg = game.do_develop(career, team["id"])
+    assert ok
+    assert team["rel"] == 1.0
+    # The bot path has the same cap.
+    team["rel"] = 0.99
+    team["reli_res"] = 50.0
+    team["perf_res"] = 0.0
+    team["money"] = 100.0
+    game.ai_act(career, team, rng=random.Random(4))
+    assert team["rel"] == 1.0
+
+
+def test_f2_race_has_no_dnfs():
+    """v0.6.1: F2 races are unaffected — even with every F1 team at
+    rel 0.0 (all F1 cars would DNF), the F2 race still returns every
+    F2 driver with a race time."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    for t in career["teams"]:
+        t["rel"] = 0.0
+    f2_before = [d for d in career["drivers"] if d["status"] == "f2"]
+    order = race_mod.simulate_f2(career, rng=random.Random(6))
+    assert len(order) == len(f2_before)
+    assert all("race_time" in d for d in order)
 
 
 def test_midseason_replacement_keeps_outgoing_points():
@@ -1919,15 +2078,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v060():
-    """The live version string is v0.6.0 everywhere it is shown."""
+def test_health_reports_v061():
+    """The live version string is v0.6.1 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.6.0"
+    assert client.get("/api/health").json()["version"] == "v0.6.1"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.6.0</title>" in html
-    assert "Online · v0.6.0 beta" in html
+    assert "<title>F1 Team Manager Online — v0.6.1</title>" in html
+    assert "Online · v0.6.1 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3797,7 +3956,7 @@ def test_dashboard_shows_only_main_drivers():
 
 
 # ---------------------------------------------------------------------------
-# v0.6.0 — team relationships: donations, customer/junior contracts,
+# v0.6.1 — team relationships: donations, customer/junior contracts,
 # WANTED drivers, research caps, bot parity, v9 save migration
 # ---------------------------------------------------------------------------
 
