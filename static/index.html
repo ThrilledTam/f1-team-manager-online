@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.4.2</title>
+<title>F1 Team Manager Online — v0.4.3</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -88,10 +88,14 @@
     .ov-panel { width:96vw; max-height:90vh; }
   }
   /* v0.3 race history grid: seasons as rows, R1..R12 as columns, top-3
-     initials stacked in each cell (Matthew's PyCharm layout). */
-  .hist-grid td, .hist-grid th { padding:4px 6px; font-size:13px; text-align:center; vertical-align:top; }
-  .hist-grid td:first-child, .hist-grid th:first-child { text-align:left; font-weight:700; }
-  .hist-cell { cursor:pointer; border:1px solid #21262d; border-radius:6px; padding:4px 6px; background:#161b22; min-width:64px; line-height:1.35; }
+     initials stacked in each cell (Matthew's PyCharm layout).
+     v0.4.3: the grid is as wide as the dashboard — fixed layout with
+     narrow cells, so all 12 round columns fit without horizontal
+     scrolling (the .table-scroll wrapper stays as a mobile fallback). */
+  .hist-grid { table-layout:fixed; width:100%; }
+  .hist-grid td, .hist-grid th { padding:3px 2px; font-size:12px; text-align:center; vertical-align:top; }
+  .hist-grid td:first-child, .hist-grid th:first-child { text-align:left; font-weight:700; width:58px; }
+  .hist-cell { cursor:pointer; border:1px solid #21262d; border-radius:6px; padding:3px 2px; background:#161b22; min-width:0; line-height:1.35; overflow:hidden; }
   .hist-cell:hover { border-color:#1f6feb; }
   .hist-cell.empty { cursor:default; background:transparent; color:#8b949e; }
   .hist-cell.empty:hover { border-color:#21262d; }
@@ -123,7 +127,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.4.2 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.4.3 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -262,6 +266,7 @@
   <div class="card">
     <div class="tabs">
       <button data-tab="research" class="sel">Research</button>
+      <button data-tab="drivers">Drivers</button>
       <button data-tab="finances">Finances</button>
       <button data-tab="market">Driver Market</button>
       <button data-tab="standings">Standings</button>
@@ -291,6 +296,7 @@
       <div id="my-pools"></div>
     </div>
     <div id="tab-finances" class="tab hidden"><div id="finances-box"></div></div>
+    <div id="tab-drivers" class="tab hidden"><div id="drivers-box"></div></div>
     <div id="tab-market" class="tab hidden"><div id="market-box"></div></div>
     <div id="tab-standings" class="tab hidden"><div id="standings-box"></div></div>
     <div id="tab-chart" class="tab hidden"><div id="chart-box"></div></div>
@@ -1084,7 +1090,9 @@ function renderMyTeam(){
   const trs = t.tr_drivers || [];
   const emptySeats = t.empty_seats || [];
   const trHtml = trs.length ? `<br><b>Test &amp; Reserve:</b><br>` + trs.map(d =>
-    `${driverNameHtml(d.name, null, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr)</span>` +
+    // v0.4.3: T&R drivers represent the team, so their surname is
+    // bold + UPPERCASE in the team colour, like the main drivers.
+    `${driverNameHtml(d.name, t.colour, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr)</span>` +
     (emptySeats.length
       ? emptySeats.map(s => ` <button data-promote-tr="${d.id}" data-seat="${s}">Promote to Seat ${s}</button>`).join("")
       : [1, 2].map(s => ` <button data-swap-tr="${d.id}" data-seat="${s}">Swap with Seat ${s}</button>`).join(""))
@@ -1093,9 +1101,10 @@ function renderMyTeam(){
   // (1/3 of salary per season), and a Release button (free). The
   // rating is shown only when the perf chart is on (driver perf is
   // hidden otherwise, like everywhere else).
+  // v0.4.3: academy juniors are team-coloured too.
   const acs = t.academy_drivers || [];
   const acHtml = acs.length ? `<br><b>🎓 Driver Academy:</b><br>` + acs.map(d =>
-    `${driverNameHtml(d.name, null, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span> <button class="secondary" data-release-academy="${d.id}">Release</button>`
+    `${driverNameHtml(d.name, t.colour, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span> <button class="secondary" data-release-academy="${d.id}">Release</button>`
   ).join("<br>") : "";
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
     · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}${trHtml}${acHtml}`;
@@ -1128,6 +1137,75 @@ function renderMyTeam(){
       ${extraLine}
       <p class="note">Per-race gains are paid after each race; salaries are paid after each race; the post-season injection is paid at the end of the season.</p>`;
   }
+}
+
+// v0.4.3: dedicated Drivers tab — the whole roster in one place
+// (main 2, T&R, academy) and the lineup decisions: Swap / Promote
+// for T&R drivers, Drop (break fee) for main and T&R drivers,
+// Release (free) for academy juniors. The main 2 drivers STILL sit
+// at the top of the dashboard (renderMyTeam) — this tab is
+// additional, not a replacement.
+function renderDriversTab(){
+  const box = $("drivers-box");
+  if(!box) return;
+  if(!myTeam){ box.innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby.</p>"; return; }
+  const t = myTeam;
+  const col = t.colour;
+  const emptySeats = t.empty_seats || [];
+  const trs = t.tr_drivers || [];
+  const acs = t.academy_drivers || [];
+  // Drop (release) — the break fee comes from the server (the same
+  // formula as a main-driver replacement: rounds remaining ×
+  // salary/12 + $2.0M); shown upfront, charged on confirm.
+  // Unaffordable drops are disabled with the amount in the title,
+  // like the market's unaffordable seats.
+  const dropBtn = d => {
+    const fee = (d.break_fee === undefined || d.break_fee === null) ? null : d.break_fee;
+    const label = fee === null ? "Drop" : `Drop — ${money(fee)}`;
+    if(fee === null || fee <= t.money)
+      return `<button class="danger" data-drop-driver="${d.id}" data-fee="${fee === null ? "" : fee}">${label}</button>`;
+    return `<button class="danger" disabled title="Need ${money(fee)} — not enough money">${label}</button>`;
+  };
+  const mainHtml = [1, 2].map(seat => {
+    const did = t["driver" + seat + "_id"];
+    const d = did ? (t.drivers || []).find(x => x.id === did) : null;
+    if(!d) return `<div class="bar-row"><b>Seat ${seat}</b> — <span class="note">empty — sign a driver from the Driver Market, or promote a T&R driver below.</span></div>`;
+    return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)</span> ${dropBtn(d)}</div>`;
+  }).join("");
+  const trHtml = trs.length ? trs.map(d =>
+    `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr)</span>` +
+    (emptySeats.length
+      ? emptySeats.map(s => ` <button data-promote-tr="${d.id}" data-seat="${s}">Promote to Seat ${s}</button>`).join("")
+      : [1, 2].map(s => ` <button data-swap-tr="${d.id}" data-seat="${s}">Swap with Seat ${s}</button>`).join("")) +
+    ` ${dropBtn(d)}</div>`
+  ).join("") : `<p class="note">No T&R drivers — sign one from the Driver Market (paid in full, +25% research each).</p>`;
+  const acHtml = acs.length ? acs.map(d =>
+    `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span> <button class="secondary" data-release-academy="${d.id}">Release</button></div>`
+  ).join("") : `<p class="note">No academy drivers yet — add a free-agent or F2 driver aged 25 or under from the Driver Market (🎓 Academy button).</p>`;
+  box.innerHTML = `<p class="note">Your full roster — main drivers, Test &amp; Reserve, and academy juniors. Make lineup decisions here: swap or promote a T&R driver, drop a driver (break fee), or release an academy junior (free).</p>` +
+    `<h3>Main drivers</h3>${mainHtml}<h3>Test &amp; Reserve</h3>${trHtml}<h3>🎓 Driver Academy</h3>${acHtml}`;
+  // Drop a main or T&R driver: confirm with the exact break fee.
+  box.querySelectorAll("[data-drop-driver]").forEach(b => b.onclick = () => {
+    const d = (t.drivers || []).concat(trs).find(x => x.id === b.dataset.dropDriver);
+    const fee = b.dataset.fee ? parseFloat(b.dataset.fee) : (d && d.break_fee);
+    openConfirm("Release this driver?",
+      `Release ${d ? d.name : "this driver"} from your team? Breaking their contract costs ${fee === null || fee === undefined || isNaN(fee) ? "the break fee" : money(fee)} (rounds remaining × salary/12 + $2.0M). They become a free agent and keep their championship points; the points they scored for the team stay with the team.`,
+      () => send({type:"release_driver", driver_id: b.dataset.dropDriver}));
+  });
+  // Swap / Promote (same actions as the My Team card — wired here
+  // too so the tab works on its own; renderMyTeam re-wires the
+  // identical handlers afterwards, which is harmless).
+  box.querySelectorAll("[data-swap-tr]").forEach(b => b.onclick = () =>
+    openConfirm("Swap drivers?", `Swap your Seat ${b.dataset.seat} driver with ${driverById(b.dataset.swapTr) ? driverById(b.dataset.swapTr).name : "this T&R driver"}? It is free — the outgoing driver's team points stay with the team, and the incoming driver starts at 0 for this team.`,
+      () => send({type:"swap_driver", seat: parseInt(b.dataset.seat), tr_driver_id: b.dataset.swapTr})));
+  box.querySelectorAll("[data-promote-tr]").forEach(b => b.onclick = () =>
+    send({type:"promote_tr", tr_driver_id: b.dataset.promoteTr, seat: parseInt(b.dataset.seat)}));
+  box.querySelectorAll("[data-release-academy]").forEach(b => b.onclick = () => {
+    const d = driverById(b.dataset.releaseAcademy);
+    openConfirm("Release from the academy?",
+      `Release ${d ? d.name : "this driver"} from your Driver Academy? It is free — they stay a free agent / F2 driver and can be signed by anyone, and your academy slot frees up.`,
+      () => send({type:"release_academy", driver_id: b.dataset.releaseAcademy}));
+  });
 }
 
 function renderTabs(){
@@ -1216,7 +1294,11 @@ function renderTabs(){
     const acTeam = d.academy_team_id ? teamById(d.academy_team_id) : null;
     const academyBadge = acTeam ? ` 🎓 Academy — ${esc(acTeam.name)}` : "";
     const status = d.status === "free" ? "Free agent" : d.status === "f2" ? "F2" : (d.status === "tr" ? `T&R — ${tm ? esc(tm.name) : ""}` : (tm ? esc(tm.name) : "F1"));
-    return `<tr><td>${driverNameHtml(d.name, (d.status === "f1" || d.status === "tr") && tm ? tm.colour : null, d.cha, false)}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
+    // v0.4.3: T&R drivers are already team-coloured (their team);
+    // academy juniors get their ACADEMY team's colour — they
+    // represent that team. Free agents / unaffiliated F2 stay neutral.
+    const nameColour = (d.status === "f1" || d.status === "tr") && tm ? tm.colour : (acTeam ? acTeam.colour : null);
+    return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
   };
   $("market-box").innerHTML =
     `<p class="note">${isWB
@@ -1338,6 +1420,7 @@ function renderTabs(){
   $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`;
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
   const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
+  renderDriversTab();
   if(myTeam) renderMyTeam();
   syncOverlays();
 }
