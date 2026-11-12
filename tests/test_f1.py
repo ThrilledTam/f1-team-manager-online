@@ -1841,15 +1841,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v050():
-    """The live version string is v0.5.0 everywhere it is shown."""
+def test_health_reports_v051():
+    """The live version string is v0.5.1 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.5.0"
+    assert client.get("/api/health").json()["version"] == "v0.5.1"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.5.0</title>" in html
-    assert "Online · v0.5.0 beta" in html
+    assert "<title>F1 Team Manager Online — v0.5.1</title>" in html
+    assert "Online · v0.5.1 beta" in html
 
 
 # ---------------------------------------------------------------------------
