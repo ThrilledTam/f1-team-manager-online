@@ -110,6 +110,20 @@ def make_team(data, team_id=None):
         "supplier_id": None,       # filled in after all teams exist
         "supplier_name": data.get("supplier"),
         "sup_stage": int(data.get("sup_stage") or 0),
+        # v0.6: team relationships — the supplier link above is now
+        # dynamic and mechanical (donations, contracts, WANTED
+        # drivers, research caps). relation_years is the contract
+        # years left (starting relations get 2); research_spent_
+        # season tracks this season's Performance + Reliability
+        # research $M (the research cap counts against it); wanted
+        # and research_cap live on a JUNIOR team's dict and are set
+        # by its parent (supplier).
+        "relation_years": 2 if int(data.get("sup_stage") or 0) > 0 else 0,
+        "research_spent_season": 0.0,
+        "wanted": [],               # [{driver_id, reward}] — max 3,
+                                    # set by the parent of a junior team
+        "research_cap": None,       # $M/season cap on Perf+Reli
+                                    # research, set by the parent
         "tuning": 0,
         "perf_res": 0.0,           # $M of performance research banked
         "reli_res": 0.0,           # $M of reliability research banked
@@ -193,6 +207,11 @@ def new_career_dict(name, host_nickname, chart_on=True):
         "wb_offers": {},
         "wb_ready": [],
         "wb_done": False,
+        # v0.6: pending relation proposals — {id, proposer_team_id,
+        # target_team_id, kind, supplier_team_id, customer_team_id,
+        # years}. Proposals are winter-break only and expire when the
+        # next season starts (see start_next_season).
+        "relation_proposals": [],
         "last_season": None,
         "transfers": [],           # ["Driver from X to Y"] this season
         "retired_this_season": [],

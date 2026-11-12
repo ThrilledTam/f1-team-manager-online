@@ -15,6 +15,7 @@ Sources (verified against ~/workspace/f1-manager/Main.py, Race.py, Rules.py):
 """
 import copy
 import random
+import uuid
 
 from . import race as race_mod
 from .data import (
@@ -420,6 +421,15 @@ def do_research(career, team_id, priority, amount):
         return False, "Not enough money."
     if priority not in ("perf", "reliability"):
         return False, "Priority must be Performance or Reliability."
+    # v0.6: a junior team's research cap — the parent's hard cap on
+    # the season's total Performance + Reliability research $M
+    # (Develop and reg research are NOT capped).
+    if team.get("sup_stage") == 2 and team.get("research_cap") is not None:
+        spent = float(team.get("research_spent_season") or 0.0)
+        if spent + amount > team["research_cap"]:
+            return False, (f"Research cap reached — your parent team set a "
+                           f"${team['research_cap']:g}M cap for this season "
+                           f"(spent ${spent:.2f}M).")
     # From Main.py: Performance adds PerfRes and -(invest/3) ReliRes;
     # Reliability adds ReliRes and -(invest/5) PerfRes.
     # v0.4: each T&R driver adds +25% to the research POOL gained
@@ -433,6 +443,9 @@ def do_research(career, team_id, priority, amount):
         team["perf_res"] -= amount / 5.0
         team["reli_res"] += amount * mult
     team["money"] -= amount
+    # v0.6: the season's research spend (the research cap counts
+    # against this — see the cap check above).
+    team["research_spent_season"] = float(team.get("research_spent_season") or 0.0) + amount
     label = "Performance" if priority == "perf" else "Reliability"
     pool = team["perf_res"] if priority == "perf" else team["reli_res"]
     bonus = f" (x{mult:.2f} with T&R drivers)" if mult > 1.0 else ""
@@ -814,6 +827,8 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     # since left (apply_race_results does the same after a race).
     _recompute_team_points(career, team)
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
+    # v0.6: a WANTED signing pays the parent's reward to the junior team.
+    _pay_wanted_reward(career, team, d)
     if cost > 0:
         return True, (f"{d['name']} signed for {team['name']} ✓ "
                       f"(Seat {seat}, {contract_years}-year contract) "
@@ -874,11 +889,589 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
     d["team_id"] = team["id"]
     career["transfers"].append(
         f"{d['name']} signed for {team['name']} as Test & Reserve")
+    # v0.6: a WANTED signing pays the parent's reward to the junior team.
+    _pay_wanted_reward(career, team, d)
     if cost > 0:
         return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
                       f"({contract_years}-year contract) — ${cost:.2f}M break fee")
     return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
                   f"({contract_years}-year contract) — Free")
+
+
+# ---------------------------------------------------------------------------
+# v0.6: team relationships (supplier / customer / junior)
+# ---------------------------------------------------------------------------
+
+def supplier_of(career, team):
+    """The team supplying this one (or None)."""
+    if not team or not team.get("supplier_id"):
+        return None
+    return get_team(career, team["supplier_id"])
+
+
+def supplied_teams(career, team):
+    """Teams this team supplies (customers and junior)."""
+    if not team:
+        return []
+    return [t for t in career["teams"] if t.get("supplier_id") == team["id"]]
+
+
+def junior_team_of(career, team):
+    """The junior team this team supplies (at most one), or None."""
+    for t in supplied_teams(career, team):
+        if t.get("sup_stage") == 2:
+            return t
+    return None
+
+
+def relation_between(career, team_a_id, team_b_id):
+    """The relation between two teams — (supplier, customer) — or None
+    when neither supplies the other."""
+    a = get_team(career, team_a_id)
+    b = get_team(career, team_b_id)
+    if not a or not b:
+        return None
+    if a.get("supplier_id") == b["id"]:
+        return (b, a)
+    if b.get("supplier_id") == a["id"]:
+        return (a, b)
+    return None
+
+
+def relation_label(team):
+    """'Customer' / 'Junior' / None, from a team's sup_stage."""
+    return {1: "Customer", 2: "Junior"}.get(team.get("sup_stage") or 0)
+
+
+def donate(career, donor_team_id, recipient_team_id, amount):
+    """v0.6: donate money to a team you supply (customer or junior).
+    Any amount up to the donor's money, any time, no fee. The donor
+    loses it and the recipient gains it."""
+    donor = get_team(career, donor_team_id)
+    recipient = get_team(career, recipient_team_id)
+    if not donor or not recipient:
+        return False, "No such team."
+    if donor["id"] == recipient["id"]:
+        return False, "A team cannot donate to itself."
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return False, "Amount must be a number."
+    if amount <= 0:
+        return False, "Donation must be more than $0M."
+    if amount > donor["money"]:
+        return False, f"Not enough money — you have ${donor['money']:.2f}M."
+    if recipient.get("supplier_id") != donor["id"]:
+        return False, (f"{recipient['name']} is not supplied by "
+                       f"{donor['name']} — donations only go to teams "
+                       f"you supply.")
+    donor["money"] = round(donor["money"] - amount, 2)
+    recipient["money"] = round(recipient["money"] + amount, 2)
+    career["transfers"].append(
+        f"{donor['name']} donated ${amount:.2f}M to {recipient['name']}")
+    return True, f"Donated ${amount:.2f}M to {recipient['name']} ✓"
+
+
+def _end_relation(career, customer):
+    """v0.6: clear a relation from the customer team's side — the
+    supplier link, the stage, the remaining years, and the junior
+    mechanics that only exist inside a junior relation (WANTED marks
+    and the research cap). The ex-junior keeps its money, drivers
+    and points; only the tie is gone."""
+    customer["supplier_id"] = None
+    customer["supplier_name"] = None
+    customer["sup_stage"] = 0
+    customer["relation_years"] = 0
+    customer["wanted"] = []
+    customer["research_cap"] = None
+
+
+def _apply_relation_change(career, proposal):
+    """v0.6: carry out an accepted proposal. Returns the log line."""
+    supplier = get_team(career, proposal["supplier_team_id"])
+    customer = get_team(career, proposal["customer_team_id"])
+    kind = proposal["kind"]
+    years = proposal.get("years") or 0
+    if kind == "customer":
+        customer["supplier_id"] = supplier["id"]
+        customer["supplier_name"] = supplier["name"]
+        customer["sup_stage"] = 1
+        customer["relation_years"] = years
+        line = (f"{customer['name']} is now a customer of "
+                f"{supplier['name']} ({years}-year deal)")
+    elif kind == "junior":
+        customer["supplier_id"] = supplier["id"]
+        customer["supplier_name"] = supplier["name"]
+        customer["sup_stage"] = 2
+        customer["relation_years"] = years
+        line = (f"{customer['name']} is now the junior team of "
+                f"{supplier['name']} ({years}-year deal)")
+    elif kind == "end":
+        label = relation_label(customer) or "partner"
+        _end_relation(career, customer)
+        line = (f"{customer['name']} ended its {label} deal with "
+                f"{supplier['name']}")
+    elif kind == "downgrade":
+        # A step down keeps the remaining contract years — it is a
+        # stage change, not a new deal.
+        customer["sup_stage"] = 1
+        customer["wanted"] = []
+        customer["research_cap"] = None
+        line = (f"{customer['name']} stepped down from junior to "
+                f"customer of {supplier['name']}")
+    elif kind == "renew":
+        customer["relation_years"] = years
+        line = (f"{customer['name']} renewed its "
+                f"{(relation_label(customer) or 'supplier').lower()} deal "
+                f"with {supplier['name']} ({years} more years)")
+    else:
+        line = ""
+    if line:
+        career["transfers"].append(line)
+    return line
+
+
+def _proposal_still_valid(career, proposal):
+    """v0.6: re-check a pending proposal against the current state
+    before it is accepted — a customer who has since taken another
+    supplier, or a supplier who has since taken another junior, can
+    no longer accept."""
+    supplier = get_team(career, proposal["supplier_team_id"])
+    customer = get_team(career, proposal["customer_team_id"])
+    if not supplier or not customer:
+        return False, "One of the teams is gone."
+    kind = proposal["kind"]
+    if kind == "customer":
+        if customer.get("sup_stage", 0) != 0:
+            return False, f"{customer['name']} already has a supplier now."
+    elif kind == "junior":
+        if not (customer.get("sup_stage") == 1
+                and customer.get("supplier_id") == supplier["id"]):
+            return False, (f"{customer['name']} is no longer a customer "
+                           f"of {supplier['name']}.")
+        other_junior = junior_team_of(career, supplier)
+        if other_junior is not None and other_junior["id"] != customer["id"]:
+            return False, f"{supplier['name']} already has a junior team."
+    elif kind in ("end", "downgrade", "renew"):
+        if relation_between(career, supplier["id"], customer["id"]) is None:
+            return False, "Those teams no longer have a relation."
+        if kind == "downgrade" and customer.get("sup_stage") != 2:
+            return False, f"{customer['name']} is no longer a junior team."
+        if kind == "renew" and (customer.get("relation_years") or 0) > 0:
+            return False, "That deal is no longer expired."
+    return True, "ok"
+
+
+def propose_relation(career, proposer_team_id, target_team_id, kind,
+                     supplier_team_id=None, years=2):
+    """v0.6: propose a relation change in the winter break. Either
+    team may propose; the other side must accept (see
+    respond_relation). Roles, as approved: for a FORMATION
+    (customer / junior) the proposer is the would-be SUPPLIER and
+    the target is the would-be customer/junior — 'I propose to
+    supply you'. (A team that wants a supplier proposes with the
+    other team as the supplier — the proposal names the supplier
+    explicitly, so either side can start one.) For end / downgrade /
+    renew the proposal concerns the existing relation between the two
+    teams, and either side may propose it. Progression is one step at
+    a time up (nothing -> customer -> junior; a direct nothing ->
+    junior is rejected) and down (junior -> customer -> nothing, or
+    junior -> nothing directly). A team has at most one supplier; a
+    supplier has several customers but at most one junior. If the
+    target is a bot team it decides on the spot by the simple rule in
+    bot_accepts_proposal; a human target's proposal stays pending for
+    them to answer in the Relationships tab (proposals expire when
+    the next season starts)."""
+    proposer = get_team(career, proposer_team_id)
+    target = get_team(career, target_team_id)
+    if not proposer or not target:
+        return False, "No such team."
+    if career.get("phase") != "winter_break":
+        return False, "Relation changes happen in the winter break."
+    if proposer["id"] == target["id"]:
+        return False, "A team cannot form a relation with itself."
+    if kind not in ("customer", "junior", "end", "downgrade", "renew"):
+        return False, "Unknown relation change."
+    # One pending proposal at a time between any two teams.
+    for p in career.get("relation_proposals") or []:
+        if {p["proposer_team_id"], p["target_team_id"]} == {proposer["id"], target["id"]}:
+            return False, "There is already a pending proposal between these teams."
+    if kind in ("customer", "junior", "renew"):
+        try:
+            years = int(years)
+        except (TypeError, ValueError):
+            return False, "Contract length must be a whole number of years (1–4)."
+        if not 1 <= years <= 4:
+            return False, "Contract length must be 1–4 years."
+    else:
+        years = 0
+    if kind in ("customer", "junior"):
+        supplier = get_team(career, supplier_team_id) if supplier_team_id else proposer
+        if not supplier or supplier["id"] not in (proposer["id"], target["id"]):
+            return False, "The supplier must be one of the two teams."
+        customer = target if supplier["id"] == proposer["id"] else proposer
+        if kind == "customer":
+            if customer.get("sup_stage", 0) != 0:
+                return False, f"{customer['name']} already has a supplier."
+        else:  # junior — one step up from customer of THIS supplier
+            if not (customer.get("sup_stage") == 1
+                    and customer.get("supplier_id") == supplier["id"]):
+                return False, (f"{customer['name']} must be a customer of "
+                               f"{supplier['name']} first — relations go "
+                               f"one step at a time.")
+            if junior_team_of(career, supplier) is not None:
+                return False, (f"{supplier['name']} already has a junior "
+                               f"team (one junior max).")
+    else:
+        rel = relation_between(career, proposer["id"], target["id"])
+        if not rel:
+            return False, "Those teams have no relation to change."
+        supplier, customer = rel
+        if kind == "downgrade" and customer.get("sup_stage") != 2:
+            return False, "Only a junior team can step down to customer."
+        if kind == "renew" and (customer.get("relation_years") or 0) > 0:
+            return False, (f"The {customer['name']}–{supplier['name']} deal "
+                           f"still has {customer['relation_years']} year(s) "
+                           f"left — renewal is for expired deals.")
+    proposal = {
+        "id": "rp-" + uuid.uuid4().hex[:10],
+        "proposer_team_id": proposer["id"],
+        "target_team_id": target["id"],
+        "kind": kind,
+        "supplier_team_id": supplier["id"],
+        "customer_team_id": customer["id"],
+        "years": years,
+    }
+    career.setdefault("relation_proposals", []).append(proposal)
+    # A bot target decides on the spot; a human target answers in the UI.
+    if target.get("is_ai"):
+        if bot_accepts_proposal(career, proposal):
+            line = _apply_relation_change(career, proposal)
+            career["relation_proposals"] = [
+                p for p in career.get("relation_proposals") or []
+                if p["id"] != proposal["id"]]
+            return True, f"{target['name']} accepted the proposal ✓ — {line}"
+        career["relation_proposals"] = [
+            p for p in career.get("relation_proposals") or []
+            if p["id"] != proposal["id"]]
+        return True, f"{target['name']} declined the proposal."
+    return True, f"Proposal sent to {target['name']} — waiting for their answer."
+
+
+def respond_relation(career, responder_team_id, proposal_id, accept):
+    """v0.6: answer a pending proposal — only the target may answer,
+    and only in the winter break. Accepting applies the change
+    (re-validated against the current state: a customer who has
+    since taken another supplier can no longer accept)."""
+    responder = get_team(career, responder_team_id)
+    if not responder:
+        return False, "No such team."
+    if career.get("phase") != "winter_break":
+        return False, "Relation changes happen in the winter break."
+    proposals = career.get("relation_proposals") or []
+    proposal = next((p for p in proposals if p["id"] == proposal_id), None)
+    if not proposal:
+        return False, "That proposal is gone (it may have expired)."
+    if proposal["target_team_id"] != responder["id"]:
+        return False, "Only the team the proposal was sent to can answer it."
+    career["relation_proposals"] = [p for p in proposals if p["id"] != proposal_id]
+    if not accept:
+        proposer = get_team(career, proposal["proposer_team_id"])
+        return True, (f"Declined the proposal from "
+                      f"{proposer['name'] if proposer else 'that team'}.")
+    ok, why = _proposal_still_valid(career, proposal)
+    if not ok:
+        return False, why
+    line = _apply_relation_change(career, proposal)
+    return True, line + " ✓"
+
+
+def break_relation(career, breaker_team_id, other_team_id):
+    """v0.6: break a relation EARLY, unilaterally, in the winter
+    break — the price of skipping agreement. Costs $1.0M per
+    remaining contract year, paid by the team that breaks it; blocked
+    when the breaker cannot afford it. Free once the contract has
+    expired (0 years left) — that is a lapse, not a break. Either
+    side of the relation may break it (a supplier with several
+    customers names which one)."""
+    breaker = get_team(career, breaker_team_id)
+    other = get_team(career, other_team_id)
+    if not breaker or not other:
+        return False, "No such team."
+    if career.get("phase") != "winter_break":
+        return False, "Relations can only be broken in the winter break."
+    rel = relation_between(career, breaker["id"], other["id"])
+    if not rel:
+        return False, "Those teams have no relation to break."
+    supplier, customer = rel
+    years = customer.get("relation_years") or 0
+    fee = round(years * RELATION_BREAK_FEE_PER_YEAR, 2)
+    if fee > breaker["money"]:
+        return False, (f"Need ${fee:.2f}M to break the deal "
+                       f"({years} year(s) left × $1.0M) — you have "
+                       f"${breaker['money']:.2f}M.")
+    if fee > 0:
+        breaker["money"] = round(breaker["money"] - fee, 2)
+    label = relation_label(customer) or "partner"
+    _end_relation(career, customer)
+    if fee > 0:
+        line = (f"{breaker['name']} broke its {label} deal with "
+                f"{other['name']} early (${fee:.2f}M break fee)")
+    else:
+        line = (f"{breaker['name']} ended its expired {label} deal "
+                f"with {other['name']} (no fee — the contract had expired)")
+    career["transfers"].append(line)
+    return True, line + " ✓"
+
+
+def set_wanted(career, parent_team_id, driver_id, reward):
+    """v0.6: mark a market driver WANTED for your junior team, with a
+    cash reward the junior gets if they sign them (main or T&R).
+    Any time; only the parent of a junior team; only free agents and
+    F2 drivers; at most 3 marks. The reward is the parent's choice,
+    > 0 and <= the parent's money at marking time — the money is NOT
+    held in escrow, it is paid on signing (see _pay_wanted_reward).
+    Marking a driver who is already marked updates their reward. The
+    reward never changes the driver's rep or rating — it is a cash
+    bounty, and the junior judges the driver on their real stats
+    (Matthew, 2026-11-12)."""
+    parent = get_team(career, parent_team_id)
+    if not parent:
+        return False, "No such team."
+    junior = junior_team_of(career, parent)
+    if junior is None:
+        return False, "You don't supply a junior team — WANTED marks are for junior teams only."
+    d = get_driver(career, driver_id)
+    if not d or d["status"] not in ("free", "f2"):
+        return False, "Only free agents and F2 drivers can be marked WANTED."
+    try:
+        reward = float(reward)
+    except (TypeError, ValueError):
+        return False, "Reward must be a number."
+    if reward <= 0:
+        return False, "Reward must be more than $0M."
+    if reward > parent["money"]:
+        return False, f"Not enough money — you have ${parent['money']:.2f}M."
+    wanted = junior.setdefault("wanted", [])
+    existing = next((w for w in wanted if w.get("driver_id") == d["id"]), None)
+    if existing is not None:
+        existing["reward"] = round(reward, 2)
+        return True, f"WANTED reward for {d['name']} updated to ${reward:.2f}M ✓"
+    if len(wanted) >= MAX_WANTED:
+        return False, f"At most {MAX_WANTED} WANTED drivers at a time."
+    wanted.append({"driver_id": d["id"], "reward": round(reward, 2)})
+    career["transfers"].append(
+        f"{parent['name']} marked {d['name']} WANTED "
+        f"(${reward:.2f}M reward for {junior['name']})")
+    return True, (f"{d['name']} is WANTED ✓ — {junior['name']} gets "
+                  f"${reward:.2f}M if they sign them")
+
+
+def remove_wanted(career, parent_team_id, driver_id):
+    """v0.6: remove a WANTED mark from your junior team. Any time."""
+    parent = get_team(career, parent_team_id)
+    if not parent:
+        return False, "No such team."
+    junior = junior_team_of(career, parent)
+    if junior is None:
+        return False, "You don't supply a junior team."
+    wanted = junior.get("wanted") or []
+    if not any(w.get("driver_id") == driver_id for w in wanted):
+        return False, "That driver is not marked WANTED."
+    junior["wanted"] = [w for w in wanted if w.get("driver_id") != driver_id]
+    d = get_driver(career, driver_id)
+    return True, f"Removed the WANTED mark on {d['name'] if d else 'that driver'} ✓"
+
+
+def set_research_cap(career, parent_team_id, cap):
+    """v0.6: set (or clear) the hard cap on your junior team's
+    research spend for the season — a $M total over Performance +
+    Reliability research, NOT Develop, NOT reg research. Winter
+    break only, for the upcoming season; fixed for that season (no
+    mid-season changes). Default None (no cap)."""
+    parent = get_team(career, parent_team_id)
+    if not parent:
+        return False, "No such team."
+    if career.get("phase") != "winter_break":
+        return False, "Research caps are set in the winter break, for the upcoming season."
+    junior = junior_team_of(career, parent)
+    if junior is None:
+        return False, "You don't supply a junior team — research caps are for junior teams only."
+    if cap is None or cap == "":
+        junior["research_cap"] = None
+        return True, f"Research cap cleared for {junior['name']} ✓"
+    try:
+        cap = float(cap)
+    except (TypeError, ValueError):
+        return False, "Cap must be a number of $M, or empty to clear it."
+    if cap <= 0:
+        return False, "Cap must be more than $0M."
+    junior["research_cap"] = round(cap, 2)
+    return True, (f"Research cap set: {junior['name']} may spend at most "
+                  f"${cap:.2f}M on research next season ✓")
+
+
+def _pay_wanted_reward(career, team, d):
+    """v0.6: if the team just signed a driver their parent marked
+    WANTED, the parent pays the reward to the team and the mark is
+    consumed. Only the junior team of the marking parent is paid —
+    any other team signing the driver leaves the mark in place (the
+    spec). The money was NOT held in escrow at marking time, so if
+    the parent's bank has since dropped below the reward, the junior
+    gets whatever the parent still has and the mark is still
+    consumed (the parent's money never goes below zero)."""
+    if team.get("sup_stage") != 2:
+        return
+    parent = supplier_of(career, team)
+    if not parent:
+        return
+    wanted = team.get("wanted") or []
+    mark = next((w for w in wanted if w.get("driver_id") == d["id"]), None)
+    if not mark:
+        return
+    reward = float(mark.get("reward") or 0.0)
+    paid = min(reward, max(0.0, parent["money"]))
+    parent["money"] = round(parent["money"] - paid, 2)
+    team["money"] = round(team["money"] + paid, 2)
+    team["wanted"] = [w for w in wanted if w.get("driver_id") != d["id"]]
+    line = (f"{parent['name']} paid ${paid:.2f}M WANTED reward to "
+            f"{team['name']} for signing {d['name']}")
+    if paid < reward:
+        line += (f" (short of the ${reward:.2f}M reward — "
+                 f"the parent's bank was low)")
+    career["transfers"].append(line)
+
+
+def _wanted_pick(career, team, candidates):
+    """v0.6: a junior team's WANTED drivers get preference when a bot
+    picks a signing — a WANTED driver within 1.0 rep of the best
+    candidate wins the pick. A preference, not a hard rule: the
+    reward is a cash bounty (it never changes the driver's rep or
+    rating), so the bot still judges the driver on their real stats
+    and only prefers a WANTED driver when they are a reasonable fit
+    (Matthew, 2026-11-12)."""
+    if team.get("sup_stage") != 2 or not candidates:
+        return None
+    wanted_ids = {w.get("driver_id") for w in (team.get("wanted") or [])}
+    wanted = [d for d in candidates if d["id"] in wanted_ids]
+    if not wanted:
+        return None
+    best_rep = max(d["rep"] for d in candidates)
+    fits = [d for d in wanted if d["rep"] >= best_rep - 1.0]
+    if not fits:
+        return None
+    fits.sort(key=lambda d: (-d["rep"], d["salary"], d["name"]))
+    return fits[0]
+
+
+def bot_accepts_proposal(career, proposal):
+    """v0.6: a bot target's decision on a pending relation proposal.
+    The spec's bot rule, with the roles made explicit (see
+    propose_relation): for a formation the proposer is the would-be
+    supplier and the target is the would-be customer/junior, and the
+    target decides as whichever side it would be:
+    - customer: as the customer-to-be, accept when the supplier is
+      faster than you, or you are poor (under $5M — you need the
+      help); as the supplier, accept taking the customer when they
+      are poor or within 60 perf of you.
+    - junior: accept when the supplier has no other junior and the
+      junior-to-be is within 60 perf of the supplier.
+    - end / downgrade: accept when the relation is expired (0 years
+      left) or the other side is much weaker (60+ perf behind you).
+    - renew: as the customer, accept when the supplier is not much
+      weaker than you (within 60 perf) or you are poor; as the
+      supplier, accept when the customer is within 60 perf of you."""
+    target = get_team(career, proposal["target_team_id"])
+    supplier = get_team(career, proposal["supplier_team_id"])
+    customer = get_team(career, proposal["customer_team_id"])
+    if not target or not supplier or not customer:
+        return False
+    kind = proposal["kind"]
+    poor = lambda t: t["money"] < BOT_POOR_MONEY
+    within = lambda a, b: abs(a["perf"] - b["perf"]) <= BOT_PERF_WINDOW
+    much_weaker = lambda other, me: other["perf"] < me["perf"] - BOT_PERF_WINDOW
+    if kind == "customer":
+        if target["id"] == customer["id"]:
+            return supplier["perf"] > target["perf"] or poor(target)
+        return poor(customer) or within(customer, supplier)
+    if kind == "junior":
+        if junior_team_of(career, supplier) is not None:
+            return False
+        return within(customer, supplier)
+    if kind in ("end", "downgrade"):
+        expired = (customer.get("relation_years") or 0) <= 0
+        other = supplier if target["id"] == customer["id"] else customer
+        return expired or much_weaker(other, target)
+    if kind == "renew":
+        if target["id"] == customer["id"]:
+            return within(supplier, target) or poor(target)
+        return within(customer, supplier)
+    return False
+
+
+def bot_winter_relations(career, team, rng=None):
+    """v0.6 bot parity for relationships, run for AI teams when a
+    winter-break round opens (start_winter_break_round). Round 1
+    only — proposals are made once per break, not every round:
+    - renew a due relation the bot wants to keep (one per break);
+    - a poor bot with no supplier asks the fastest team to supply it;
+    - a bot supplier upgrades a close customer to junior when it has
+      no junior yet;
+    - a bot parent sets its junior team's research cap ($15M) and
+      marks its best available market driver WANTED ($1.0M).
+    Proposals to a bot target are decided on the spot (see
+    propose_relation); proposals to a human stay pending for the
+    human to answer."""
+    rng = rng or random
+    if career.get("wb_round") != 1:
+        return
+    # Renewals — the first due relation this team is in, if the bot
+    # wants to keep it (partner within 60 perf, or the customer is poor).
+    rels = []
+    if team.get("sup_stage", 0) > 0:
+        supplier = supplier_of(career, team)
+        if supplier:
+            rels.append((supplier, team))
+    for supplied in supplied_teams(career, team):
+        rels.append((team, supplied))
+    for supplier, customer in rels:
+        if (customer.get("relation_years") or 0) <= 0:
+            keep = (abs(supplier["perf"] - customer["perf"]) <= BOT_PERF_WINDOW
+                    or customer["money"] < BOT_POOR_MONEY)
+            if keep:
+                other = supplier if team["id"] == customer["id"] else customer
+                propose_relation(career, team["id"], other["id"], "renew",
+                                 supplier_team_id=supplier["id"], years=2)
+                break
+    # A poor bot with no supplier asks the fastest team to supply it.
+    if team.get("sup_stage", 0) == 0 and team["money"] < BOT_POOR_MONEY:
+        others = [t for t in career["teams"] if t["id"] != team["id"]]
+        if others:
+            best = max(others, key=lambda t: (t["perf"], t["name"]))
+            propose_relation(career, team["id"], best["id"], "customer",
+                             supplier_team_id=best["id"], years=2)
+    # A bot supplier upgrades a close customer to junior (one junior max).
+    if junior_team_of(career, team) is None:
+        close = [t for t in supplied_teams(career, team)
+                 if t.get("sup_stage") == 1
+                 and abs(t["perf"] - team["perf"]) <= BOT_PERF_WINDOW]
+        if close:
+            close.sort(key=lambda t: (-t["perf"], t["name"]))
+            propose_relation(career, team["id"], close[0]["id"], "junior",
+                             supplier_team_id=team["id"], years=2)
+    # Parent duties: research cap + a WANTED mark for the junior team.
+    junior = junior_team_of(career, team)
+    if junior is not None:
+        if junior.get("research_cap") is None:
+            set_research_cap(career, team["id"], BOT_JUNIOR_RESEARCH_CAP)
+        wanted = junior.get("wanted") or []
+        if len(wanted) < MAX_WANTED and team["money"] >= 1.0:
+            marked = {w.get("driver_id") for w in wanted}
+            pool = [d for d in career["drivers"]
+                    if d["status"] in ("free", "f2") and d["id"] not in marked]
+            if pool:
+                pool.sort(key=lambda d: (-d["rep"], d["salary"], d["name"]))
+                set_wanted(career, team["id"], pool[0]["id"], 1.0)
 
 
 def add_academy_driver(career, team_id, driver_id):
@@ -1136,6 +1729,16 @@ def ai_act(career, team, rng=None):
     rng = rng or random
     if team["money"] is None:
         return
+    # v0.6 bot parity: a supplier with > $20M donates $1–2M to its
+    # poorest supplied team with < $5M, at most once per round
+    # (ai_act runs once per team per round). Done first, so the
+    # research budget below is planned on the post-donation bank.
+    poor_supplied = [t for t in supplied_teams(career, team)
+                     if t["money"] < BOT_POOR_MONEY]
+    if team["money"] > BOT_RICH_MONEY and poor_supplied:
+        poor_supplied.sort(key=lambda t: (t["money"], t["name"]))
+        donate(career, team["id"], poor_supplied[0]["id"],
+               round(rng.uniform(1.0, 2.0), 2))
     salaries = salary_per_round(career, team)
     # v0.4.2: the funds a bot plans with are what's left after
     # salaries AND the per-race extra charges (T&R fine, academy
@@ -1151,6 +1754,15 @@ def ai_act(career, team, rng=None):
         if not team[slot]:
             best = _best_available_driver(career)
             if best is not None:
+                # v0.6: a junior team prefers a WANTED driver when
+                # signing — the reward is a cash bounty, and the
+                # driver is still judged on their real stats (see
+                # _wanted_pick).
+                pool = [d for d in career["drivers"]
+                        if d["status"] in ("free", "f2")]
+                wanted = _wanted_pick(career, team, pool)
+                if wanted is not None:
+                    best = wanted
                 sign_driver(career, team["id"], best["id"], seat,
                             contract_years=ai_contract_years(best))
     # v0.4 bot parity: optional T&R signing, preferring young, cheap
@@ -1164,8 +1776,11 @@ def ai_act(career, team, rng=None):
                  if d["status"] in ("free", "f2") and d["age"] <= 25]
         if young:
             young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
-            sign_tr_driver(career, team["id"], young[0]["id"],
-                           contract_years=ai_contract_years(young[0]))
+            # v0.6: a junior team prefers a WANTED driver as a T&R
+            # signing too (same cash-bounty preference as above).
+            pick = _wanted_pick(career, team, young) or young[0]
+            sign_tr_driver(career, team["id"], pick["id"],
+                           contract_years=ai_contract_years(pick))
     # v0.4.2 bot parity: an AI team may add one young unsigned
     # driver to its Driver Academy per season (youngest cheapest,
     # rounds 1-6), when it can comfortably afford it. Bots never
@@ -1188,6 +1803,12 @@ def ai_act(career, team, rng=None):
         round_funds = (temp_funds - 1) * (rng.random() * 0.35 + 0.2)
     else:
         round_funds = (temp_funds - 1) * (rng.random() * 0.35)
+    # v0.6: a junior team's research cap also binds the bot — the
+    # parent's cap is a hard cap on the season's Perf+Reli research
+    # $M, so the bot never spends past it (Develop is not capped).
+    if team.get("sup_stage") == 2 and team.get("research_cap") is not None:
+        headroom = team["research_cap"] - float(team.get("research_spent_season") or 0.0)
+        round_funds = max(0.0, min(round_funds, headroom))
     if round_funds > 0.5:
         # v0.4: the T&R research bonus applies to bots too — each
         # T&R driver adds +25% to the research POOL gained, for the
@@ -1201,6 +1822,9 @@ def ai_act(career, team, rng=None):
         team["perf_res"] += perf_money * mult
         team["reli_res"] += reli_money * mult
         team["money"] -= round_funds
+        # v0.6: the season's research spend (the research cap counts
+        # against this — see the clamp above and do_research).
+        team["research_spent_season"] = float(team.get("research_spent_season") or 0.0) + round_funds
         # v0.5.3: bots develop whenever the banked research is worth
         # converting (combined pool > 2.0) — the old 50% coin flip
         # meant they often sat on a good pool and never developed.
@@ -1820,6 +2444,13 @@ def end_of_season(career, rng=None):
         team["tuning"] = 0
         # v0.4.2: the bot academy quota resets with the season.
         team["ai_academy_signed"] = False
+    # v0.6: relation contracts tick down one year at season end — a
+    # 2-year deal covers exactly two seasons, and is due for renewal
+    # in the winter break that follows its last season (see
+    # start_next_season, where an unrenewed due deal lapses).
+    for team in career["teams"]:
+        if team.get("sup_stage", 0) > 0 and team.get("relation_years", 0) > 0:
+            team["relation_years"] -= 1
     # Refill the F2 grid from queued / pool rookies.
     refill_f2(career, rng=rng)
     # v0.4: the regulation change into the new year is NOT applied
@@ -1943,6 +2574,8 @@ def start_winter_break_round(career, rng=None):
         if team["is_ai"]:
             bot_winter_offers(career, team, rng=rng)
             bot_winter_rd(career, team)
+            # v0.6: bot relation proposals / renewals / caps / WANTED.
+            bot_winter_relations(career, team, rng=rng)
 
 
 def bot_winter_offers(career, team, rng=None):
@@ -1979,6 +2612,11 @@ def bot_winter_offers(career, team, rng=None):
             break
         pool.sort(key=lambda d: (-d["rep"], d["salary"], d["name"]))
         pick = pool[0]
+        # v0.6: a junior team prefers a WANTED driver when offering
+        # (the reward is a cash bounty — see _wanted_pick).
+        wanted = _wanted_pick(career, team, pool)
+        if wanted is not None:
+            pick = wanted
         quote = sign_cost(career, team["id"], pick["id"], ("seat", seat))
         if quote is None or not quote["affordable"]:
             # The best candidate is unaffordable (break fee): try the
@@ -2002,7 +2640,9 @@ def bot_winter_offers(career, team, rng=None):
         young = [d for d in pool if d["age"] <= 25]
         young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
         if young:
-            pick = young[0]
+            # v0.6: a junior team prefers a WANTED driver as a T&R
+            # signing too (same cash-bounty preference as above).
+            pick = _wanted_pick(career, team, young) or young[0]
             fine_after = extra_driver_fine(len(trs) + 1, TR_FINE_FREE_COUNT)
             affordable = (len(trs) < TR_FINE_FREE_COUNT
                           or team["money"] - 12 * fine_after > 50)
@@ -2226,6 +2866,8 @@ def sign_driver_wb(career, team, d, seat, contract_years):
     team[slot] = d["id"]
     _recompute_team_points(career, team)
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
+    # v0.6: a WANTED signing pays the parent's reward to the junior team.
+    _pay_wanted_reward(career, team, d)
     return True, "ok"
 
 
@@ -2237,6 +2879,8 @@ def sign_tr_driver_wb(career, team, d, contract_years):
     d["team_id"] = team["id"]
     career["transfers"].append(
         f"{d['name']} signed for {team['name']} as Test & Reserve")
+    # v0.6: a WANTED signing pays the parent's reward to the junior team.
+    _pay_wanted_reward(career, team, d)
     return True, "ok"
 
 
@@ -2272,6 +2916,9 @@ def autofill_winter_break(career, rng=None):
             _recompute_team_points(career, team)
             career["transfers"].append(
                 f"{pick['name']} signed for {team['name']} (winter-break auto-fill)")
+            # v0.6: even an auto-fill signing of a WANTED driver pays
+            # the parent's reward to the junior team.
+            _pay_wanted_reward(career, team, pick)
 
 
 def winter_break_ready(career):
@@ -2297,6 +2944,20 @@ def start_next_season(career, rng=None):
         return False, "Finish the winter break first (3 rounds of offers)."
     if not winter_break_ready(career):
         return False, "Fill every empty seat on your team first."
+    # v0.6: relations left at 0 years after the winter break lapse —
+    # they were due for renewal and nobody renewed them. Pending
+    # relation proposals expire with the break, and the season's
+    # research spending resets (the research cap is per season).
+    for team in career["teams"]:
+        if team.get("sup_stage", 0) > 0 and (team.get("relation_years") or 0) <= 0:
+            supplier = supplier_of(career, team)
+            _end_relation(career, team)
+            career["transfers"].append(
+                f"{team['name']}'s deal with "
+                f"{supplier['name'] if supplier else 'its supplier'} "
+                f"lapsed (contract expired, not renewed)")
+        team["research_spent_season"] = 0.0
+    career["relation_proposals"] = []
     # v0.4: apply the pending reg change now — the winter break's
     # last-minute R&D is included because it ran before this point.
     pending = any(t.get("reg_pending") for t in career["teams"])

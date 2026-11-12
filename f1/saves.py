@@ -14,20 +14,24 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 8  # v0.5: career GP totals (gp_starts / gp_wins on
-# drivers) for the driver development contribution. v0.4.2: Driver
-# Academy (academy_team_id on drivers, ai_academy_signed on teams),
-# exponential T&R / academy fines instead of a hard T&R cap,
-# table-driven rating growth (grow_rating replaces DSUS). v0.4:
-# standings sort (best finish + earliest round), F2 standings,
-# constructors' wins, Test & Reserve drivers, winter break 3-round
-# offer flow, regulation adaptation/research model. v0.3: champion
-# history pre-filled 2010–2025 + appended per in-game season (age /
-# trophies / winning team); no upfront signing cost, break-cost
-# formula, contract choice. v0.2.1: per-team points (team_points) +
-# last team (last_team_id) on drivers. v0.2: prev_driver_order
-# (standings carry-over). v0.1: results stages, circuit per round,
-# full GP history.
+SAVE_VERSION = 9  # v0.6: team relationships (supplier / customer /
+# junior contracts, WANTED drivers, research caps) — new fields on
+# teams (relation_years, research_spent_season, wanted,
+# research_cap) + career-level relation_proposals; old saves backfill
+# the 2026 relations from the grid. v0.5: career GP totals
+# (gp_starts / gp_wins on drivers) for the driver development
+# contribution. v0.4.2: Driver Academy (academy_team_id on drivers,
+# ai_academy_signed on teams), exponential T&R / academy fines
+# instead of a hard T&R cap, table-driven rating growth (grow_rating
+# replaces DSUS). v0.4: standings sort (best finish + earliest
+# round), F2 standings, constructors' wins, Test & Reserve drivers,
+# winter break 3-round offer flow, regulation adaptation/research
+# model. v0.3: champion history pre-filled 2010–2025 + appended per
+# in-game season (age / trophies / winning team); no upfront signing
+# cost, break-cost formula, contract choice. v0.2.1: per-team points
+# (team_points) + last team (last_team_id) on drivers. v0.2:
+# prev_driver_order (standings carry-over). v0.1: results stages,
+# circuit per round, full GP history.
 
 
 def _reconstruct_last_season(doc):
@@ -221,6 +225,33 @@ def migrate_save(doc):
         d.setdefault("academy_team_id", None)
     for team in doc.get("teams") or []:
         team.setdefault("ai_academy_signed", False)
+    # v0.6: team relationships. Old saves (v8 and earlier) have the
+    # grid's supplier data but no contract state: backfill
+    # supplier_id / sup_stage from the 2026 grid by team name (a
+    # custom team is not in the grid and stays independent),
+    # relation_years = 2 for a supplied team (the 2026 starting
+    # deal), 0 otherwise, and the new fields default to empty. A
+    # save that already has relation state (v9) is left untouched —
+    # setdefault only fills what is missing.
+    from .data import GRID_2026
+    from .game import RELATION_START_YEARS
+    grid_by_name = {t.get("name"): t for t in GRID_2026.get("teams") or []}
+    teams_by_name = {t.get("name"): t for t in doc.get("teams") or []}
+    for team in doc.get("teams") or []:
+        grid = grid_by_name.get(team.get("name")) or {}
+        if team.get("supplier_id") is None and grid.get("supplier"):
+            sup = teams_by_name.get(grid["supplier"])
+            if sup:
+                team["supplier_id"] = sup.get("id")
+                team["supplier_name"] = grid["supplier"]
+        if "sup_stage" not in team:
+            team["sup_stage"] = int(grid.get("sup_stage") or 0)
+        team.setdefault("relation_years",
+                        RELATION_START_YEARS if team.get("sup_stage") else 0)
+        team.setdefault("research_spent_season", 0.0)
+        team.setdefault("wanted", [])
+        team.setdefault("research_cap", None)
+    doc.setdefault("relation_proposals", [])
     for team in doc.get("teams") or []:
         team.setdefault("reg_total", 0.0)
         team.setdefault("reg_adapted", 0.0)
