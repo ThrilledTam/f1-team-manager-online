@@ -212,6 +212,84 @@ def test_research_and_develop_formulas():
     assert add_perf_gain(100.0, 1.0) > add_perf_gain(200.0, 1.0)  # diminishing
 
 
+# ---------------------------------------------------------------------------
+# v0.5.2 — Develop gain: headroom x sqrt(pool), no hard cap.
+# The old formula ((400/perf)**2.5 * pool/3) exploded at low perf with
+# a big pool (verified live: $7M at perf 125 gave +88.7, Aston
+# 125 -> 213.7, top of the chart). The new formula fades to zero at
+# perf 400 and gives the pool diminishing returns via sqrt, so the
+# normal round is unchanged and dumping a hoarded pile is inefficient.
+# ---------------------------------------------------------------------------
+
+def test_dev_gain_worked_examples():
+    """v0.5.2: the approved formula's worked examples, before the
+    driver factor is applied in do_develop."""
+    # Normal round: $3M at McLaren, perf 165, pool 6.0 (x2 T&R
+    # bonus) -> ~17.27 raw, ~20.9 with the x1.21 driver factor
+    # (old formula: 22.1 with the factor — basically unchanged).
+    assert add_perf_gain(165.0, 6.0) == pytest.approx(17.27, abs=0.05)
+    # The $7M dump at perf 125 (pool 12.25) -> ~28.88 raw,
+    # ~34.2 with Aston's x1.186 driver factor (old: 88.7).
+    assert add_perf_gain(125.0, 12.25) == pytest.approx(28.88, abs=0.05)
+    # Same car, $3M instead (pool 5.25) -> ~18.90 raw, ~22.4 factored.
+    assert add_perf_gain(125.0, 5.25) == pytest.approx(18.90, abs=0.05)
+    # Top team: $3M at perf 210 (pool 6.0) -> ~13.96 raw, ~16.8 factored.
+    assert add_perf_gain(210.0, 6.0) == pytest.approx(13.96, abs=0.05)
+    # Near the ceiling: perf 350 (pool 6.0) -> ~3.67 raw, ~4.4 factored.
+    assert add_perf_gain(350.0, 6.0) == pytest.approx(3.67, abs=0.05)
+    # Banked 3 rounds then dumped (pool 18.0 at perf 165) -> ~29.91 raw.
+    assert add_perf_gain(165.0, 18.0) == pytest.approx(29.91, abs=0.05)
+
+
+def test_dev_gain_exploit_no_longer_tops_chart():
+    """v0.5.2: the exact live exploit — Aston Martin, perf 125,
+    $7M of Performance research (pool 12.25 after the x1.75 T&R
+    bonus) — now gains ~34 and lands at ~159, below Mercedes 210,
+    instead of +88.7 to 213.7."""
+    career = game.build_new_career("Test", "Matthew")
+    team = next(t for t in career["teams"] if t["name"] == "Aston Martin")
+    team["money"] = 100.0
+    team["perf"] = 125.0
+    team["perf_res"] = 12.25
+    team["reli_res"] = 0.0
+    factor = game.team_dev_factor(career, team)
+    ok, _ = game.do_develop(career, team["id"])
+    assert ok
+    assert team["perf"] == pytest.approx(125.0 + 28.875 * factor, abs=0.5)
+    assert team["perf"] < 210.0  # below Mercedes, not top of the chart
+
+
+def test_dev_gain_banked_dump_is_inefficient():
+    """v0.5.2: saving up and dumping is inefficient — developing
+    the same 18.0 of research in three 6.0 chunks (perf rising
+    after each one) gains more in total than one 18.0 dump, and
+    doubling a pool only multiplies the gain by sqrt(2) ~ 1.41x."""
+    single = add_perf_gain(165.0, 18.0)
+    p, total = 165.0, 0.0
+    for _ in range(3):
+        g = add_perf_gain(p, 6.0)
+        total += g
+        p += g
+    assert single < total
+    assert add_perf_gain(165.0, 12.0) < 2 * add_perf_gain(165.0, 6.0)
+    assert add_perf_gain(165.0, 12.0) == pytest.approx(
+        add_perf_gain(165.0, 6.0) * 2 ** 0.5)
+
+
+def test_dev_gain_edge_cases():
+    """v0.5.2: perf >= 400 gains nothing (headroom is zero); a
+    zero or negative pool gains nothing and never crashes (pools
+    go negative via the research cross-penalty). A 0-perf car —
+    possible after a reg change with no adaptation — CAN recover
+    via Develop (headroom 1.0); the old formula returned 0 for
+    perf <= 0 and left such a car stuck forever."""
+    assert add_perf_gain(400.0, 6.0) == 0.0
+    assert add_perf_gain(450.0, 6.0) == 0.0
+    assert add_perf_gain(165.0, 0.0) == 0.0
+    assert add_perf_gain(165.0, -2.0) == 0.0
+    assert add_perf_gain(0.0, 6.0) == pytest.approx(12.0 * 6.0 ** 0.5)
+
+
 def test_tuning_bounds():
     career = game.build_new_career("Test", "Matthew")
     team = career["teams"][0]
@@ -1841,15 +1919,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v051():
-    """The live version string is v0.5.1 everywhere it is shown."""
+def test_health_reports_v052():
+    """The live version string is v0.5.2 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.5.1"
+    assert client.get("/api/health").json()["version"] == "v0.5.2"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.5.1</title>" in html
-    assert "Online · v0.5.1 beta" in html
+    assert "<title>F1 Team Manager Online — v0.5.2</title>" in html
+    assert "Online · v0.5.2 beta" in html
 
 
 # ---------------------------------------------------------------------------
