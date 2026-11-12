@@ -473,7 +473,9 @@ def do_develop(career, team_id):
     rel_gain = add_rel_gain(team["reli_res"])
     team["perf"] += perf_gain
     team["rel"] += rel_gain
-    team["rel"] = max(0.5, min(0.99, team["rel"]))
+    # v0.6.1: the reliability cap is 1.0 (was 0.99), so a team that
+    # fully invests in reliability CAN reach "all good" — 0% DNF chance.
+    team["rel"] = max(0.5, min(1.0, team["rel"]))
     team["perf_res"] = 0.0
     team["reli_res"] = 0.0
     team["money"] -= 1.0
@@ -1834,7 +1836,9 @@ def ai_act(career, team, rng=None):
             team["perf"] += (add_perf_gain(team["perf"], team["perf_res"])
                              * team_dev_factor(career, team))
             team["perf_res"] = 0.0
-            team["rel"] = max(0.5, min(0.99, team["rel"] + add_rel_gain(team["reli_res"])))
+            # v0.6.1: the reliability cap is 1.0 (was 0.99), so a bot
+            # team can reach "all good" too — 0% DNF chance.
+            team["rel"] = max(0.5, min(1.0, team["rel"] + add_rel_gain(team["reli_res"])))
             team["reli_res"] = 0.0
             team["money"] -= 1
     # Tuning from results: if the lead driver scored >70% of team points.
@@ -2127,8 +2131,8 @@ def run_race_weekend(career, connected_player_ids, rng=None):
         result_row(d, t, i + 1,
                    "LEADER" if i == 0 else f"+{d['qual_time'] - leader:.3f}s")
         for i, (d, t) in enumerate(qual)]
-    race_entries = race_mod.simulate_race(career, laps=gp["laps"], rng=rng)
-    race_mod.apply_race_results(career, race_entries, points_dist)
+    race_entries, dnf_entries = race_mod.simulate_race(career, laps=gp["laps"], rng=rng)
+    race_mod.apply_race_results(career, race_entries, points_dist, dnf_entries)
     leader_time = race_entries[0][0]["race_time"] if race_entries else 0
     career["last_race"] = [
         result_row(d, t, i + 1,
@@ -2136,6 +2140,12 @@ def run_race_weekend(career, connected_player_ids, rng=None):
                    points=points_dist[i] if i < len(points_dist) else 0,
                    gl=(d.get("qual_pos") or 0) - (i + 1))
         for i, (d, t) in enumerate(race_entries)]
+    # v0.6.1: DNF drivers are listed after the finishers — "DNF"
+    # instead of a position/gap, 0 points, best-qualified first.
+    dnf_entries = sorted(dnf_entries, key=lambda e: e[0].get("qual_pos") or 99)
+    career["last_race"] += [
+        result_row(d, t, "DNF", "DNF", points=0)
+        for d, t in dnf_entries]
     # F2 race in parallel.
     f2_order = race_mod.simulate_f2(career, rng=rng)
     for pos, d in enumerate(f2_order, start=1):
