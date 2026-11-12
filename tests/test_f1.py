@@ -383,7 +383,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 8  # v0.5.0 save format
+        assert loaded["version"] == 9  # v0.6.0 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -1811,7 +1811,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 8
+        assert loaded["version"] == 9
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -1919,15 +1919,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v053():
-    """The live version string is v0.5.3 everywhere it is shown."""
+def test_health_reports_v060():
+    """The live version string is v0.6.0 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.5.3"
+    assert client.get("/api/health").json()["version"] == "v0.6.0"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.5.3</title>" in html
-    assert "Online · v0.5.3 beta" in html
+    assert "<title>F1 Team Manager Online — v0.6.0</title>" in html
+    assert "Online · v0.6.0 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2527,7 +2527,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 8
+    assert SAVE_VERSION == 9
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -3792,5 +3792,674 @@ def test_dashboard_shows_only_main_drivers():
             for surname in ("DE VRIES", "O'WARD", "FORNAROLI", "VERSCHOOR"):
                 assert surname not in upper, my_team
             browser.close()
+    finally:
+        proc.terminate()
+
+
+# ---------------------------------------------------------------------------
+# v0.6.0 — team relationships: donations, customer/junior contracts,
+# WANTED drivers, research caps, bot parity, v9 save migration
+# ---------------------------------------------------------------------------
+
+def team_by_name(career, name):
+    return next(t for t in career["teams"] if t["name"] == name)
+
+
+def driver_by_name(career, name):
+    return next(d for d in career["drivers"] if d["name"] == name)
+
+
+def test_relations_initial_2026():
+    """v0.6: a fresh 2026 career starts with the grid's relations —
+    Mercedes supplies McLaren / Williams / Alpine (customers), Red
+    Bull supplies Racing Bulls (junior), Ferrari supplies Haas /
+    Cadillac (customers); Aston Martin and Audi are independent.
+    Starting deals last 2 years; the new fields default correctly."""
+    career = game.build_new_career("Test", "Matthew")
+    assert career.get("relation_proposals") == []
+    mercedes = team_by_name(career, "Mercedes")
+    redbull = team_by_name(career, "Red Bull")
+    ferrari = team_by_name(career, "Ferrari")
+    for name in ("McLaren", "Williams", "Alpine"):
+        t = team_by_name(career, name)
+        assert t["supplier_id"] == mercedes["id"], name
+        assert t["sup_stage"] == 1, name
+        assert t["relation_years"] == 2, name
+    rbr = team_by_name(career, "Racing Bulls")
+    assert rbr["supplier_id"] == redbull["id"]
+    assert rbr["sup_stage"] == 2
+    assert rbr["relation_years"] == 2
+    for name in ("Haas", "Cadillac"):
+        t = team_by_name(career, name)
+        assert t["supplier_id"] == ferrari["id"], name
+        assert t["sup_stage"] == 1, name
+        assert t["relation_years"] == 2, name
+    for name in ("Aston Martin", "Audi", "Mercedes", "Red Bull", "Ferrari"):
+        t = team_by_name(career, name)
+        assert t["supplier_id"] is None, name
+        assert t["sup_stage"] == 0, name
+        assert t["relation_years"] == 0, name
+    for t in career["teams"]:
+        assert t["research_spent_season"] == 0.0
+        assert t["wanted"] == []
+        assert t["research_cap"] is None
+
+
+def test_donate():
+    """v0.6: a donation moves the exact amount from a supplier to a
+    team it supplies, any time, no fee — and is rejected when the
+    donor cannot afford it, the recipient is not supplied, or the
+    amount is not positive."""
+    career = game.build_new_career("Test", "Matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    mclaren = team_by_name(career, "McLaren")
+    ferrari = team_by_name(career, "Ferrari")
+    ok, why = game.donate(career, mercedes["id"], mclaren["id"], 2.0)
+    assert ok, why
+    assert mercedes["money"] == 5.0
+    assert mclaren["money"] == 12.0
+    ok, why = game.donate(career, mercedes["id"], mclaren["id"], 100.0)
+    assert not ok and "Not enough money" in why
+    assert mercedes["money"] == 5.0 and mclaren["money"] == 12.0
+    ok, why = game.donate(career, mercedes["id"], ferrari["id"], 1.0)
+    assert not ok and "not supplied" in why
+    ok, why = game.donate(career, mercedes["id"], mclaren["id"], 0)
+    assert not ok
+    ok, why = game.donate(career, mercedes["id"], mclaren["id"], -1.0)
+    assert not ok
+
+
+def test_relation_progression():
+    """v0.6: nothing -> customer -> junior works (one step at a
+    time); nothing -> junior directly is rejected; junior ->
+    customer, junior -> nothing, customer -> nothing all work; a
+    second junior for the same supplier and a second supplier for
+    the same team are rejected; changes outside the winter break are
+    rejected. Human targets keep proposals pending until they answer;
+    only the target may answer."""
+    career = game.build_new_career("Test", "Matthew")
+    # McLaren + Ferrari as the two humans (no relation between them —
+    # two_human_career picks McLaren + Mercedes, who already have one).
+    ok, _ = game.choose_team(career, team_by_name(career, "McLaren")["id"], "p-matthew")
+    assert ok
+    ok, _ = game.choose_team(career, team_by_name(career, "Ferrari")["id"], "p-cousin")
+    assert ok
+    mclaren = team_by_name(career, "McLaren")
+    ferrari = team_by_name(career, "Ferrari")
+    mercedes = team_by_name(career, "Mercedes")
+    # Outside the winter break: rejected.
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"],
+                                    "customer", mclaren["id"], 3)
+    assert not ok and "winter break" in why
+    career["phase"] = "winter_break"
+    # Direct nothing -> junior: rejected.
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"],
+                                    "junior", mclaren["id"], 2)
+    assert not ok and "must be a customer" in why
+    # Customer formation: Ferrari is human, so the proposal stays pending.
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"],
+                                    "customer", mclaren["id"], 3)
+    assert ok, why
+    assert len(career["relation_proposals"]) == 1
+    assert ferrari["sup_stage"] == 0  # not applied until accepted
+    proposal = career["relation_proposals"][0]
+    # Only the target may answer.
+    ok, why = game.respond_relation(career, mclaren["id"], proposal["id"], True)
+    assert not ok and "Only the team" in why
+    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    assert ok, why
+    assert ferrari["sup_stage"] == 1
+    assert ferrari["supplier_id"] == mclaren["id"]
+    assert ferrari["relation_years"] == 3
+    assert career["relation_proposals"] == []
+    # A second supplier for the same team is rejected.
+    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+                                    "customer", mercedes["id"], 2)
+    assert not ok and "already has a supplier" in why
+    # Upgrade to junior, then a second junior for McLaren is rejected.
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"],
+                                    "junior", mclaren["id"], 2)
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    assert ok, why
+    assert ferrari["sup_stage"] == 2
+    assert ferrari["relation_years"] == 2
+    # Audi becomes McLaren's customer first (AI target: McLaren is
+    # faster, so the bot accepts on the spot) — then a second junior
+    # for McLaren is rejected.
+    audi = team_by_name(career, "Audi")
+    ok, why = game.propose_relation(career, mclaren["id"], audi["id"],
+                                    "customer", mclaren["id"], 2)
+    assert ok, why
+    assert audi["sup_stage"] == 1 and audi["supplier_id"] == mclaren["id"]
+    ok, why = game.propose_relation(career, mclaren["id"], audi["id"],
+                                    "junior", mclaren["id"], 2)
+    assert not ok and "already has a junior" in why
+    # Downgrade: junior -> customer, years unchanged.
+    ok, why = game.propose_relation(career, ferrari["id"], mclaren["id"],
+                                    "downgrade")
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    ok, why = game.respond_relation(career, mclaren["id"], proposal["id"], True)
+    assert ok, why
+    assert ferrari["sup_stage"] == 1
+    assert ferrari["relation_years"] == 2
+    # End: customer -> nothing.
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"], "end")
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    assert ok, why
+    assert ferrari["sup_stage"] == 0
+    assert ferrari["supplier_id"] is None
+    assert ferrari["relation_years"] == 0
+    # Junior -> nothing directly (skip customer).
+    for kind in ("customer", "junior"):
+        ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"],
+                                        kind, mclaren["id"], 2)
+        assert ok, why
+        proposal = career["relation_proposals"][0]
+        ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+        assert ok, why
+    assert ferrari["sup_stage"] == 2
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"], "end")
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    assert ok, why
+    assert ferrari["sup_stage"] == 0
+    # Declining leaves everything as it was.
+    ok, why = game.propose_relation(career, mclaren["id"], ferrari["id"],
+                                    "customer", mclaren["id"], 2)
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], False)
+    assert ok, why
+    assert ferrari["sup_stage"] == 0
+    assert career["relation_proposals"] == []
+
+
+def test_contracts_rollover_renew_break_lapse():
+    """v0.6: relation years tick down one per season at season end;
+    an expired deal renews by agreement (new 1–4 year term) or lapses
+    at the next season start; breaking early costs $1M per remaining
+    year, blocked when unaffordable, and free once expired."""
+    career = game.build_new_career("Test", "Matthew")
+    # McLaren human, Mercedes AI (so the renew proposal gets a bot
+    # decision on the spot).
+    ok, _ = game.choose_team(career, team_by_name(career, "McLaren")["id"], "p-matthew")
+    assert ok
+    mclaren = team_by_name(career, "McLaren")
+    mercedes = team_by_name(career, "Mercedes")
+    assert mclaren["relation_years"] == 2
+    game.end_of_season(career, rng=seeded(5))
+    assert career["phase"] == "winter_break"
+    assert mclaren["relation_years"] == 1
+    assert mclaren["sup_stage"] == 1
+    # The season-end round opening also left Mercedes' bot proposal
+    # (upgrading McLaren to junior) pending — clear it so the renew
+    # proposal below is the only one between these teams.
+    career["relation_proposals"] = []
+    # Renewal is only for expired deals.
+    ok, why = game.propose_relation(career, mclaren["id"], mercedes["id"],
+                                    "renew", mercedes["id"], 3)
+    assert not ok and "still has 1 year(s) left" in why
+    # Due deal: renew by agreement (Mercedes is a bot — it accepts:
+    # McLaren is within 60 perf of it).
+    mclaren["relation_years"] = 0
+    ok, why = game.propose_relation(career, mclaren["id"], mercedes["id"],
+                                    "renew", mercedes["id"], 3)
+    assert ok, why
+    assert mclaren["relation_years"] == 3
+    # Early break: $1M per remaining year.
+    money_before = mclaren["money"]
+    ok, why = game.break_relation(career, mclaren["id"], mercedes["id"])
+    assert ok, why
+    assert mclaren["money"] == round(money_before - 3.0, 2)
+    assert mclaren["sup_stage"] == 0
+    assert mclaren["supplier_id"] is None
+    # Blocked when unaffordable; free once expired.
+    career2 = game.build_new_career("Test", "Matthew")
+    ok, _ = game.choose_team(career2, team_by_name(career2, "McLaren")["id"], "p-matthew")
+    assert ok
+    mclaren2 = team_by_name(career2, "McLaren")
+    mercedes2 = team_by_name(career2, "Mercedes")
+    career2["phase"] = "winter_break"
+    mclaren2["money"] = 1.0
+    ok, why = game.break_relation(career2, mclaren2["id"], mercedes2["id"])
+    assert not ok and "Need $2.00M" in why
+    assert mclaren2["money"] == 1.0
+    assert mclaren2["sup_stage"] == 1
+    mclaren2["money"] = 10.0
+    mclaren2["relation_years"] = 0
+    ok, why = game.break_relation(career2, mclaren2["id"], mercedes2["id"])
+    assert ok, why
+    assert mclaren2["money"] == 10.0
+    assert mclaren2["sup_stage"] == 0
+    # Lapse: a due deal nobody renewed ends at the next season start.
+    career3 = game.build_new_career("Test", "Matthew")
+    ok, _ = game.choose_team(career3, team_by_name(career3, "McLaren")["id"], "p-matthew")
+    assert ok
+    mclaren3 = team_by_name(career3, "McLaren")
+    career3["phase"] = "winter_break"
+    career3["wb_done"] = True
+    mclaren3["relation_years"] = 0
+    ok, why = game.start_next_season(career3, rng=seeded(7))
+    assert ok, why
+    assert career3["phase"] == "round"
+    assert mclaren3["sup_stage"] == 0
+    assert mclaren3["supplier_id"] is None
+    assert all(t["research_spent_season"] == 0.0 for t in career3["teams"])
+    assert career3["relation_proposals"] == []
+
+
+def test_wanted_reward():
+    """v0.6: a parent marks a market driver WANTED with a reward; the
+    junior team signing them (main or T&R, in-season or in the winter
+    break) gets the reward, the parent loses it, and the mark is
+    consumed. Another team signing the same driver pays nothing and
+    the mark stays. Marks are limited to 3, market drivers only, and
+    the reward must fit the parent's bank."""
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    ricciardo = driver_by_name(career, "Daniel Ricciardo")
+    assert ricciardo["status"] == "free"
+    ok, why = game.set_wanted(career, redbull["id"], ricciardo["id"], 2.0)
+    assert ok, why
+    assert rbr["wanted"] == [{"driver_id": ricciardo["id"], "reward": 2.0}]
+    # Marking the same driver again updates the reward, not the count.
+    ok, why = game.set_wanted(career, redbull["id"], ricciardo["id"], 3.0)
+    assert ok, why
+    assert rbr["wanted"] == [{"driver_id": ricciardo["id"], "reward": 3.0}]
+    # Junior signs them into a main seat: Lawson's break fee is $3.0M.
+    ok, why = game.sign_driver(career, rbr["id"], ricciardo["id"], 1, 2)
+    assert ok, why
+    assert rbr["money"] == 4.0  # 4.0 - 3.0 fee + 3.0 reward
+    assert redbull["money"] == 5.5  # 8.5 - 3.0 reward
+    assert rbr["wanted"] == []
+    assert ricciardo["status"] == "f1" and ricciardo["team_id"] == rbr["id"]
+    # T&R signing pays too.
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    magnussen = driver_by_name(career, "Kevin Magnussen")
+    ok, why = game.set_wanted(career, redbull["id"], magnussen["id"], 1.5)
+    assert ok, why
+    ok, why = game.sign_tr_driver(career, rbr["id"], magnussen["id"], 2)
+    assert ok, why
+    assert rbr["money"] == 5.5  # 4.0 + 1.5 reward, T&R signing is free
+    assert redbull["money"] == 7.0
+    assert rbr["wanted"] == []
+    # Another team signing the driver pays nothing and the mark stays.
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    haas = team_by_name(career, "Haas")
+    vettel = driver_by_name(career, "Sebastian Vettel")
+    ok, why = game.set_wanted(career, redbull["id"], vettel["id"], 2.0)
+    assert ok, why
+    ok, why = game.sign_driver(career, haas["id"], vettel["id"], 1, 2)
+    assert ok, why
+    assert redbull["money"] == 8.5
+    assert rbr["wanted"] == [{"driver_id": vettel["id"], "reward": 2.0}]
+    # Winter-break signing pays too (via the offer flow — offers fill
+    # an EMPTY seat, so Lawson leaves the seat first).
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    ricciardo = driver_by_name(career, "Daniel Ricciardo")
+    lawson = driver_by_name(career, "Liam Lawson")
+    rbr["driver1_id"] = None
+    lawson["status"] = "free"
+    lawson["team_id"] = None
+    career["phase"] = "winter_break"
+    ok, why = game.set_wanted(career, redbull["id"], ricciardo["id"], 2.0)
+    assert ok, why
+    ok, why = game.submit_winter_offers(
+        career, rbr["id"],
+        [{"driver_id": ricciardo["id"], "target": "seat", "seat": 1, "years": 2}])
+    assert ok, why
+    game.resolve_winter_break_round(career, rng=random.Random(1))
+    assert ricciardo["status"] == "f1" and ricciardo["team_id"] == rbr["id"]
+    assert rbr["money"] == 6.0  # 4.0 + 2.0 reward (empty seat: no fee)
+    assert redbull["money"] == 6.5
+    assert rbr["wanted"] == []
+    # Limits and validation.
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    aston = team_by_name(career, "Aston Martin")
+    norris = driver_by_name(career, "Lando Norris")
+    ok, why = game.set_wanted(career, redbull["id"], norris["id"], 1.0)
+    assert not ok and "Only free agents and F2" in why
+    ok, why = game.set_wanted(career, aston["id"],
+                              driver_by_name(career, "Daniel Ricciardo")["id"], 1.0)
+    assert not ok and "don't supply a junior team" in why
+    ok, why = game.set_wanted(career, redbull["id"],
+                              driver_by_name(career, "Daniel Ricciardo")["id"], 100.0)
+    assert not ok and "Not enough money" in why
+    for name in ("Daniel Ricciardo", "Kevin Magnussen", "Sebastian Vettel"):
+        ok, why = game.set_wanted(career, redbull["id"],
+                                  driver_by_name(career, name)["id"], 1.0)
+        assert ok, why
+    ok, why = game.set_wanted(career, redbull["id"],
+                              driver_by_name(career, "Mick Schumacher")["id"], 1.0)
+    assert not ok and "At most 3" in why
+    assert len(rbr["wanted"]) == 3
+    ok, why = game.remove_wanted(career, redbull["id"],
+                                 driver_by_name(career, "Kevin Magnussen")["id"])
+    assert ok, why
+    assert len(rbr["wanted"]) == 2
+
+
+def test_research_caps():
+    """v0.6: a parent sets a hard cap on the junior team's season
+    research spend (Performance + Reliability) in the winter break;
+    do_research enforces it, the spend resets at season rollover,
+    Develop and reg research are NOT capped, and a team with no cap
+    is uncapped."""
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    aston = team_by_name(career, "Aston Martin")
+    mclaren = team_by_name(career, "McLaren")
+    # Caps are winter-break only, and only for a parent of a junior team.
+    ok, why = game.set_research_cap(career, redbull["id"], 5.0)
+    assert not ok and "winter break" in why
+    career["phase"] = "winter_break"
+    ok, why = game.set_research_cap(career, aston["id"], 5.0)
+    assert not ok and "don't supply a junior team" in why
+    ok, why = game.set_research_cap(career, redbull["id"], 5.0)
+    assert ok, why
+    assert rbr["research_cap"] == 5.0
+    rbr["money"] = 20.0
+    ok, why = game.do_research(career, rbr["id"], "perf", 3.0)
+    assert ok, why
+    assert rbr["research_spent_season"] == 3.0
+    ok, why = game.do_research(career, rbr["id"], "reliability", 3.0)
+    assert not ok and "Research cap reached" in why
+    assert rbr["research_spent_season"] == 3.0
+    assert rbr["money"] == 17.0
+    ok, why = game.do_research(career, rbr["id"], "perf", 2.0)
+    assert ok, why  # exactly at the cap is allowed
+    assert rbr["research_spent_season"] == 5.0
+    # Develop is NOT capped (still at the cap, $1M in the bank).
+    ok, why = game.do_develop(career, rbr["id"])
+    assert ok, why
+    # Reg research is NOT capped either.
+    rbr["reg_pending"] = True
+    ok, why = game.do_reg_research(career, rbr["id"], 2.0)
+    assert ok, why
+    # A team with no cap is uncapped.
+    ok, why = game.do_research(career, mclaren["id"], "perf", 3.0)
+    assert ok, why
+    # The spend resets at season rollover; the cap itself stays for
+    # the season (it is fixed for that season).
+    career["wb_done"] = True
+    ok, why = game.start_next_season(career, rng=seeded(7))
+    assert ok, why
+    assert rbr["research_spent_season"] == 0.0
+    assert rbr["research_cap"] == 5.0
+    # Clearing the cap.
+    career["phase"] = "winter_break"
+    ok, why = game.set_research_cap(career, redbull["id"], None)
+    assert ok, why
+    assert rbr["research_cap"] is None
+
+
+def test_migration_v8_to_v9():
+    """v0.6: an old v8 save backfills the 2026 relations (Mercedes ->
+    McLaren/Williams/Alpine customer, Red Bull -> Racing Bulls
+    junior, Ferrari -> Haas/Cadillac customer, 2 years) and the new
+    fields default correctly; a save round-trips at version 9."""
+    from f1.saves import SAVE_VERSION, load_save, migrate_save, save_career
+    career = game.build_new_career("Test", "Matthew")
+    doc = json.loads(json.dumps(career))
+    doc["version"] = 8
+    doc.pop("relation_proposals", None)
+    for t in doc["teams"]:
+        t.pop("relation_years", None)
+        t.pop("research_spent_season", None)
+        t.pop("wanted", None)
+        t.pop("research_cap", None)
+        if t["name"] == "McLaren":
+            # Simulate a save that never resolved the supplier link.
+            t["supplier_id"] = None
+            t.pop("sup_stage", None)
+    migrated = migrate_save(doc)
+    assert migrated.get("relation_proposals") == []
+    mercedes = team_by_name(migrated, "Mercedes")
+    redbull = team_by_name(migrated, "Red Bull")
+    ferrari = team_by_name(migrated, "Ferrari")
+    for name in ("McLaren", "Williams", "Alpine"):
+        t = team_by_name(migrated, name)
+        assert t["supplier_id"] == mercedes["id"], name
+        assert t["sup_stage"] == 1, name
+        assert t["relation_years"] == 2, name
+    rbr = team_by_name(migrated, "Racing Bulls")
+    assert rbr["supplier_id"] == redbull["id"]
+    assert rbr["sup_stage"] == 2
+    assert rbr["relation_years"] == 2
+    for name in ("Haas", "Cadillac"):
+        t = team_by_name(migrated, name)
+        assert t["supplier_id"] == ferrari["id"], name
+        assert t["sup_stage"] == 1, name
+        assert t["relation_years"] == 2, name
+    for name in ("Aston Martin", "Audi"):
+        t = team_by_name(migrated, name)
+        assert t["supplier_id"] is None, name
+        assert t["sup_stage"] == 0, name
+        assert t["relation_years"] == 0, name
+    for t in migrated["teams"]:
+        assert t["research_spent_season"] == 0.0
+        assert t["wanted"] == []
+        assert t["research_cap"] is None
+    # A v9 save round-trips (migrating twice changes nothing).
+    assert SAVE_VERSION == 9
+    migrated2 = migrate_save(json.loads(json.dumps(migrated)))
+    assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
+    with tempfile.TemporaryDirectory() as tmp:
+        meta = save_career(career, "v9 test", tmp)
+        loaded = load_save(tmp, meta["save_id"])
+        assert loaded is not None
+        assert team_by_name(loaded, "Racing Bulls")["sup_stage"] == 2
+        assert team_by_name(loaded, "Racing Bulls")["relation_years"] == 2
+        assert loaded.get("relation_proposals") == []
+
+
+def test_bot_relations():
+    """v0.6 bot parity: a rich bot supplier donates to a poor supplied
+    team; a bot parent sets its junior team's research cap ($15M) and
+    marks a WANTED driver in the winter break; a bot junior prefers a
+    WANTED driver when signing; bot targets accept/decline proposals
+    by the simple rule."""
+    # Donation: Mercedes (> $20M) -> McLaren (< $5M), once per round.
+    career = game.build_new_career("Test", "Matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    mclaren = team_by_name(career, "McLaren")
+    mercedes["money"] = 25.0
+    mclaren["money"] = 3.0
+    game.ai_act(career, mercedes, rng=random.Random(3))
+    assert any("donated" in line and "Mercedes" in line and "McLaren" in line
+               for line in career["transfers"])
+    assert 4.0 < mclaren["money"] <= 5.0
+    # Winter break round 1: bot parents set the cap and a WANTED mark.
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    career["wb_round"] = 1
+    game.start_winter_break_round(career, rng=random.Random(4))
+    rbr = team_by_name(career, "Racing Bulls")
+    assert rbr["research_cap"] == 15.0
+    assert len(rbr["wanted"]) == 1
+    marked = next(d for d in career["drivers"]
+                  if d["id"] == rbr["wanted"][0]["driver_id"])
+    best_rep = max(d["rep"] for d in career["drivers"]
+                   if d["status"] in ("free", "f2"))
+    assert marked["rep"] == best_rep
+    assert rbr["wanted"][0]["reward"] == 1.0
+    # A bot junior prefers a WANTED driver when filling an empty seat.
+    career = game.build_new_career("Test", "Matthew")
+    redbull = team_by_name(career, "Red Bull")
+    rbr = team_by_name(career, "Racing Bulls")
+    lawson = driver_by_name(career, "Liam Lawson")
+    rbr["driver1_id"] = None
+    lawson["status"] = "free"
+    lawson["team_id"] = None
+    drugovich = driver_by_name(career, "Felipe Drugovich")
+    ok, why = game.set_wanted(career, redbull["id"], drugovich["id"], 1.0)
+    assert ok, why
+    game.ai_act(career, rbr, rng=random.Random(9))
+    assert rbr["driver1_id"] == drugovich["id"]
+    assert rbr["wanted"] == []
+    assert redbull["money"] == 7.5
+    # Bot proposal decisions: a poor team accepts a supplier; a
+    # comfortable team declines a slower supplier; a close customer
+    # accepts becoming a junior.
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    aston = team_by_name(career, "Aston Martin")
+    audi = team_by_name(career, "Audi")
+    ok, why = game.propose_relation(career, aston["id"], audi["id"],
+                                    "customer", aston["id"], 2)
+    assert ok and "accepted" in why, why  # Audi is poor ($3.5M)
+    assert audi["sup_stage"] == 1 and audi["supplier_id"] == aston["id"]
+    assert career["relation_proposals"] == []
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    aston = team_by_name(career, "Aston Martin")
+    cadillac = team_by_name(career, "Cadillac")
+    ok, why = game.propose_relation(career, cadillac["id"], aston["id"],
+                                    "customer", cadillac["id"], 2)
+    assert ok and "declined" in why, why  # Aston is comfortable, Cadillac slower
+    assert aston["sup_stage"] == 0
+    assert career["relation_proposals"] == []
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    mercedes = team_by_name(career, "Mercedes")
+    alpine = team_by_name(career, "Alpine")
+    ok, why = game.propose_relation(career, mercedes["id"], alpine["id"],
+                                    "junior", mercedes["id"], 2)
+    assert ok and "accepted" in why, why  # within 60 perf, no junior yet
+    assert alpine["sup_stage"] == 2
+    assert alpine["supplier_id"] == mercedes["id"]
+
+
+def test_ws_relationship_actions():
+    """v0.6 over the real WebSocket: donate to a supplied team, mark a
+    driver WANTED, and propose a relation (a bot target decides on
+    the spot) — all through the server's action wiring."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+
+    def recv_until(ws, want, limit=60, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "create_room", "nickname": "Matthew", "colour": "#e74c3c"})
+        joined = recv_until(ws, "joined")
+        code = joined["code"]
+        ws.send_json({"type": "new_career", "name": "WS Relations"})
+        state = recv_until(ws, "room_state",
+                           check=lambda m: m["room"]["career"] is not None)
+        teams = {t["name"]: t for t in state["room"]["career"]["teams"]}
+        ws.send_json({"type": "choose_team", "team_id": teams["Red Bull"]["id"]})
+        ws.send_json({"type": "start_career"})
+        recv_until(ws, "room_state", check=lambda m: m["room"]["started"] is True)
+        room = srv.ROOMS[code]
+        career = room["career"]
+        rbr = team_by_name(career, "Racing Bulls")
+        ws.send_json({"type": "donate", "recipient_team_id": rbr["id"], "amount": 1.0})
+        act = recv_until(ws, "action", check=lambda m: m.get("action") == "donate")
+        assert act["ok"], act
+        assert rbr["money"] == 5.0
+        free = game.free_agents(career)[0]
+        ws.send_json({"type": "set_wanted", "driver_id": free["id"], "reward": 1.5})
+        act = recv_until(ws, "action", check=lambda m: m.get("action") == "set_wanted")
+        assert act["ok"], act
+        assert rbr["wanted"] == [{"driver_id": free["id"], "reward": 1.5}]
+        # Winter break: propose a customer deal to Audi (a bot — it
+        # accepts on the spot, Red Bull is much faster than Audi).
+        career["phase"] = "winter_break"
+        audi = team_by_name(career, "Audi")
+        redbull = team_by_name(career, "Red Bull")
+        ws.send_json({"type": "propose_relation", "target_team_id": audi["id"],
+                      "kind": "customer", "supplier_team_id": redbull["id"],
+                      "years": 2})
+        act = recv_until(ws, "action", check=lambda m: m.get("action") == "propose_relation")
+        assert act["ok"], act
+        assert "accepted" in act["message"]
+        assert audi["sup_stage"] == 1
+        assert audi["supplier_id"] == redbull["id"]
+
+
+def test_relationships_tab_renders():
+    """v0.6 (browser): the Relationships tab renders without JS
+    errors for a supplier team (Mercedes) — current relation, teams
+    supplied, donate form, propose form — and the Driver Market tab
+    still renders with the WANTED-badge code path running."""
+    pytest.importorskip("playwright")
+    import subprocess
+    import time
+    import urllib.request
+    port = 8807
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        errors = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            page.click("#btn-new-career")
+            page.wait_for_selector("[data-team]", timeout=15000)
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.querySelector('b') && r.querySelector('b').textContent === 'Mercedes')
+                    .querySelector('[data-team]').click();
+            }""")
+            page.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            page.click("#btn-start-career")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # The dashboard's one-line relation summary.
+            my_team = page.inner_text("#my-team")
+            assert "Supplies 3 teams" in my_team, my_team
+            # The Relationships tab itself.
+            page.click('[data-tab="relations"]')
+            page.wait_for_selector("#tab-relations:not(.hidden)", timeout=15000)
+            rel = page.inner_text("#tab-relations")
+            assert "No supplier" in rel, rel
+            assert "Teams you supply" in rel, rel
+            for name in ("McLaren", "Williams", "Alpine"):
+                assert name in rel, rel
+            assert "Donate" in rel, rel
+            assert "Propose a relation" in rel, rel
+            # The Driver Market tab still renders (WANTED badge path).
+            page.click('[data-tab="market"]')
+            page.wait_for_selector("#tab-market:not(.hidden)", timeout=15000)
+            market = page.inner_text("#tab-market")
+            assert "Free agents" in market, market
+            browser.close()
+        assert not errors, errors
     finally:
         proc.terminate()
