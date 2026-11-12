@@ -29,23 +29,15 @@ RACE_LAP_BASE = 95.0
 RACE_TUNING_PER_LAP = 0.1
 RACE_GRID_PENALTY_PER_POS = 0.5
 
-# v0.2: per-driver, per-session form ("race-day variance"). The v0.1 race
-# was too predictable: the per-lap noise (sigma 0.12) averages out over
-# 57 laps (total sigma ~0.9s) while the driver+car perf spread is ~1.8s/lap,
-# i.e. tens of seconds over a race — so the best driver+car combo won
-# every time. Qualifying was the same: one lap_sim draw with sigma 0.12*2.5
-# = 0.3s against a ~2.9s perf spread. The fix is one random pace offset
-# drawn ONCE per driver per session (not per lap, or it averages out
-# again) and different between qualifying and the race:
-#   qual:  + N(0, 0.35s) on the single lap time
-#   race:  + N(0, 0.22s) per lap, the same offset every lap (total sigma
-#          ~12.5s over 57 laps) on top of the per-lap noise.
-# Measured with the 2026 grid over 120 seeded races (see README): the
-# single best combo (Antonelli/Mercedes) wins 45% of races instead of
-# ~100%, with 5 different winners and 9 different poles (Antonelli on
-# pole 38%), while gaps stay plausible (qual P22 gap median 3.0s, race
-# P22 gap median ~96s, winner ~5,010s). No crashes/DNFs or weather —
-# only lap-time randomness, as asked.
+# v0.6.1: mechanical failures — a DNF costs the team a repair bill.
+DNF_REPAIR_COST = 1.0  # $M per DNF, charged after the race
+
+
+def dnf_chance(rel):
+    """v0.6.1: a car's chance of a mechanical failure in a race is
+    1 - the team's reliability. rel >= 1.0 means the car is all good
+    (0%); rel 0.95 is 5% per car; rel 0.90 is 10% per car."""
+    return max(0.0, 1.0 - float(rel or 0.0))
 
 
 def race_lap_time(driver_perf, team_perf, tuning, is_driver1, rng=None,
@@ -131,6 +123,23 @@ def _team_perf(team, teams_by_id):
     return team["perf"]
 
 
+# v0.2: per-driver, per-session form ("race-day variance"). The v0.1 race
+# was too predictable: the per-lap noise (sigma 0.12) averages out over
+# 57 laps (total sigma ~0.9s) while the driver+car perf spread is ~1.8s/lap,
+# i.e. tens of seconds over a race — so the best driver+car combo won
+# every time. Qualifying was the same: one lap_sim draw with sigma 0.12*2.5
+# = 0.3s against a ~2.9s perf spread. The fix is one random pace offset
+# drawn ONCE per driver per session (not per lap, or it averages out
+# again) and different between qualifying and the race:
+#   qual:  + N(0, 0.35s) on the single lap time
+#   race:  + N(0, 0.22s) per lap, the same offset every lap (total sigma
+#          ~12.5s over 57 laps) on top of the per-lap noise.
+# Measured with the 2026 grid over 120 seeded races (see README): the
+# single best combo (Antonelli/Mercedes) wins 45% of races instead of
+# ~100%, with 5 different winners and 9 different poles (Antonelli on
+# pole 38%), while gaps stay plausible (qual P22 gap median 3.0s, race
+# P22 gap median ~96s, winner ~5,010s). v0.6.1 adds mechanical failures
+# (DNFs) on top of the lap-time randomness — see dnf_chance() above.
 SESSION_FORM_QUAL_SIGMA = 0.35   # seconds, one draw per driver per qual
 SESSION_FORM_RACE_SIGMA = 0.22   # seconds per lap, one draw per driver per race
 
@@ -167,21 +176,35 @@ def simulate_qual(career, rng=None):
 def simulate_race(career, laps=57, rng=None):
     """Full-distance race (v0.1): every driver runs `laps` laps, summing
     per-lap race_lap_time draws, plus a one-off grid penalty. Returns
-    ordered list of (driver, team). race_time is the summed total (~5,000s
-    for a 57-lap race) and is kept server-side only — results payloads
-    carry gaps, never times.
+    (entries, dnf_entries): the finishers ordered by race_time, and
+    the (driver, team) pairs that broke down. race_time is the summed
+    total (~5,000s for a 57-lap race) and is kept server-side only —
+    results payloads carry gaps, never times.
+
+    v0.6.1: mechanical failures — each car independently rolls its
+    own team's reliability at race start (DNF chance 1 - rel, see
+    dnf_chance()). A DNF car is excluded from the finishing order
+    (no race_time); it is returned in dnf_entries instead. F2 races
+    are not affected (simulate_f2 has no DNFs).
     """
     rng = rng or random
     teams = career["teams"]
     drivers = {d["id"]: d for d in career["drivers"]}
     by_id = {t["id"]: t for t in teams}
     entries = []
+    dnf_entries = []
     for team in teams:
         t_perf = _team_perf(team, by_id)
         for did in (team["driver1_id"], team["driver2_id"]):
             if not did:
                 continue
             d = drivers[did]
+            # v0.6.1: mechanical failure — each car rolls its own
+            # team's reliability, independently, at race start.
+            if rng.random() < dnf_chance(team.get("rel", 1.0)):
+                d.pop("race_time", None)
+                dnf_entries.append((d, team))
+                continue
             is_d1 = did == team["driver1_id"]
             # v0.2: per-session form — one draw per driver per race, the
             # same offset every lap (a fresh draw, different from qual).
@@ -193,7 +216,7 @@ def simulate_race(career, laps=57, rng=None):
             d["race_time"] = total
             entries.append((d, team))
     entries.sort(key=lambda e: e[0]["race_time"])
-    return entries
+    return entries, dnf_entries
 
 
 def simulate_f2(career, rng=None):
@@ -211,12 +234,22 @@ def simulate_f2(career, rng=None):
     return f2
 
 
-def apply_race_results(career, race_entries, points_dist):
+def apply_race_results(career, race_entries, points_dist, dnf_entries=None):
     """From Race.py displayRaceResults(): points, best pos, rep, prize money.
 
     Per driver: points for top 10, best_pos update, rep update
     new_rep = (race_rep + rep*11) / 12 where race_rep = 5 - (pos/(n*2))*3.2,
     team money += 1.95 - 0.025*pos. Team points are recomputed afterwards.
+
+    v0.6.1: dnf_entries are the (driver, team) pairs that broke down
+    (from simulate_race). A DNF driver scores 0 points, keeps their
+    best finish (a DNF is not a finish), still counts as having raced
+    (f1_races +1, so they stay in the standings per v0.4.4, and
+    gp_starts +1 — they started), rep unchanged, no prize money for
+    that car, and the team pays a DNF_REPAIR_COST repair bill per DNF.
+    The other cars move up — positions and points are computed among
+    the finishers only (a DNF holds no points-paying slot). Returns
+    the number of DNFs.
     """
     n_teams = len(career["teams"])
     teams_by_id = {t["id"]: t for t in career["teams"]}
@@ -262,6 +295,15 @@ def apply_race_results(career, race_entries, points_dist):
         team["money"] += 1.95 - (0.025 * pos)
         race_rep = 5 - (pos / (n_teams * 2)) * 3.2
         d["rep"] = (race_rep + d["rep"] * 11) / 12
+    # v0.6.1: the DNF drivers — 0 points, no best finish, still counted
+    # as having raced, rep unchanged, no prize money, and a repair bill.
+    n_dnf = 0
+    for d, team in (dnf_entries or []):
+        n_dnf += 1
+        d["race_pos"] = None
+        d["f1_races"] = d.get("f1_races", 0) + 1
+        d["gp_starts"] = d.get("gp_starts", 0) + 1
+        team["money"] -= DNF_REPAIR_COST
     for team in career["teams"]:
         # v0.2.1: a constructor total is points banked from departed
         # drivers (points they scored FOR this team) plus the points
@@ -277,6 +319,7 @@ def apply_race_results(career, race_entries, points_dist):
         team["points"] = pts
         # (v0.4: team best_pos / best_finish_round are tracked at race
         # time above, not recomputed here.)
+    return n_dnf
 
 
 def driver_standings(career):
