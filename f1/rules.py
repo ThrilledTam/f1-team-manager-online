@@ -219,14 +219,33 @@ def reg_squeeze(perfs):
     return out
 
 
-def add_perf_gain(perf, investment):
-    """From Team.py addPerf(): diminishing returns as perf grows.
+# v0.5.2: Develop gain — no hard cap (Matthew never likes hard caps).
+# Two diminishing returns instead:
+#   (1) headroom: gain scales with (400 - perf)/400, so research gets
+#       less effective the closer a car is to perf 400 and fades to
+#       zero at 400;
+#   (2) sqrt(pool): doubling the banked research only multiplies the
+#       gain by ~1.41x, so saving up money at a low perf and dumping
+#       it all at once is inefficient — developing regularly wins.
+# The old formula ((400/perf)**2.5 * pool/3) exploded at low perf
+# with a big pool (verified live: $7M at perf 125 gave +88.7,
+# Aston 125 -> 213.7, top of the chart). The driver development
+# factor is applied by the caller (do_develop), not here.
+DEV_GAIN_K = 12.0
 
-    performance += ((400 / performance) ** 2.5) * (investment / 3)
+
+def add_perf_gain(perf, investment):
+    """v0.5.2: performance += DEV_GAIN_K * ((400 - perf)/400) * sqrt(pool).
+
+    Calibrated so the normal round is unchanged: $3M at perf 165
+    (pool 6.0) gains ~20.9 before the driver factor (old: 22.1),
+    while the $7M dump at perf 125 gains ~34.2 (old: 88.7).
     """
-    if perf <= 0:
+    if perf >= 400.0:
         return 0.0
-    return ((400.0 / perf) ** 2.5) * (investment / 3.0)
+    headroom = min(1.0, max(0.0, (400.0 - perf) / 400.0))
+    pool = max(0.0, investment)
+    return DEV_GAIN_K * headroom * math.sqrt(pool)
 
 
 def add_rel_gain(investment):
