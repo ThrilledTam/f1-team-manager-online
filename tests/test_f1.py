@@ -1295,6 +1295,98 @@ def test_replaced_driver_old_team_in_standings_ui():
     finally:
         proc.terminate()
 
+def test_swapped_driver_stays_in_standings_ui():
+    """v0.4.5: the standings TABLE is built by the page itself, and
+    v0.4.4 fixed only the server's copy of the rule — so a driver
+    swapped to T&R after racing (Stroll, P19 Bahrain) still vanished
+    from the table the player sees. End to end in a real browser:
+    play Round 1, swap a McLaren main driver to T&R through the
+    Drivers tab, and the standings tab must still list him, with
+    McLaren in the team column."""
+    pytest.importorskip("playwright")
+    import re
+    import subprocess
+    import time
+    import urllib.request
+    port = 8798
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            p1 = browser.new_page(viewport={"width": 1280, "height": 800})
+            p1.goto(f"http://127.0.0.1:{port}/")
+            p1.fill("#home-nick", "Max")
+            p1.click("#btn-create")
+            p1.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            p1.click("#btn-new-career")
+            p1.wait_for_selector("[data-team]", timeout=15000)
+            p1.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            code = re.search(r"\b[A-Z0-9]{6}\b",
+                             p1.inner_text("#screen-lobby")).group(0)
+            p2 = browser.new_page(viewport={"width": 1280, "height": 800})
+            p2.goto(f"http://127.0.0.1:{port}/?code={code}")
+            p2.fill("#home-nick", "Cousin")
+            p2.click("#btn-join")
+            p2.wait_for_selector("[data-team]", timeout=15000)
+            p2.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('Ferrari'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.click("#btn-start-career")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Play one round so the McLaren drivers have an F1 start.
+            p1.click("#btn-advance")
+            p2.click("#btn-advance")
+            p1.wait_for_selector("#screen-results:not(.hidden)", timeout=15000)
+            p1.click("#btn-vote-next")
+            p2.click("#btn-vote-next")
+            p1.wait_for_selector("text=Race Results", timeout=15000)
+            p1.click("#btn-vote-next")
+            p2.click("#btn-vote-next")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Seat 1's surname, before the swap (the race sorts D1/D2
+            # by team points, so either driver can be in seat 1).
+            my_team = p1.inner_text("#my-team")
+            seats = re.findall(r"\b([A-Z][a-z]+)\s+([A-Z]+)\b", my_team)
+            assert len(seats) >= 2, my_team
+            surname = seats[0][1]
+            # Drivers tab: swap a T&R driver into Seat 1 (the confirm
+            # dialog is an overlay pop-up).
+            p1.click("button[data-tab='drivers']")
+            p1.wait_for_selector("#drivers-box [data-swap-tr][data-seat='1']",
+                                 timeout=15000)
+            p1.click("#drivers-box [data-swap-tr][data-seat='1']")
+            p1.wait_for_selector("[data-confirm-yes]", timeout=15000)
+            p1.click("[data-confirm-yes]")
+            p1.wait_for_selector("text=swapped with", timeout=15000)
+            # Standings tab: the outgoing driver is still listed, with
+            # McLaren in the team column — he raced in F1 this season.
+            p1.click("button[data-tab='standings']")
+            standings = p1.inner_text("#standings-box")
+            assert surname in standings, standings
+            row = next(r for r in standings.splitlines() if surname in r)
+            assert "McLaren" in row, row
+            browser.close()
+    finally:
+        proc.terminate()
+
+
 # ---------------------------------------------------------------------------
 # v0.3 — hidden reputation, compact market, contract choice, free
 # signing, new break-cost formula, 2025 initial order, history grid,
@@ -1749,15 +1841,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v044():
-    """The live version string is v0.4.4 everywhere it is shown."""
+def test_health_reports_v045():
+    """The live version string is v0.4.5 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.4.4"
+    assert client.get("/api/health").json()["version"] == "v0.4.5"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.4.4</title>" in html
-    assert "Online · v0.4.4 beta" in html
+    assert "<title>F1 Team Manager Online — v0.4.5</title>" in html
+    assert "Online · v0.4.5 beta" in html
 
 
 # ---------------------------------------------------------------------------
