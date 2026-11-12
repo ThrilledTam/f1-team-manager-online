@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.5.3</title>
+<title>F1 Team Manager Online — v0.6.0</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -127,7 +127,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.5.3 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.0 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -246,6 +246,7 @@
     <div id="winter-seats"></div>
     <div id="winter-offers-box"></div>
     <div id="winter-review"></div>
+    <div id="winter-relations-box"></div>
     <p>
       <button id="btn-submit-offers" class="secondary">Submit my offers</button>
       <button id="btn-winter-next">▶ NEXT — ready for this round</button>
@@ -267,6 +268,7 @@
     <div class="tabs">
       <button data-tab="research" class="sel">Research</button>
       <button data-tab="drivers">Drivers</button>
+      <button data-tab="relations">Relationships</button>
       <button data-tab="finances">Finances</button>
       <button data-tab="market">Driver Market</button>
       <button data-tab="standings">Standings</button>
@@ -297,6 +299,7 @@
     </div>
     <div id="tab-finances" class="tab hidden"><div id="finances-box"></div></div>
     <div id="tab-drivers" class="tab hidden"><div id="drivers-box"></div></div>
+    <div id="tab-relations" class="tab hidden"><div id="relations-box"></div></div>
     <div id="tab-market" class="tab hidden"><div id="market-box"></div></div>
     <div id="tab-standings" class="tab hidden"><div id="standings-box"></div></div>
     <div id="tab-chart" class="tab hidden"><div id="chart-box"></div></div>
@@ -1064,6 +1067,9 @@ function renderGame(){
     $("btn-submit-offers").classList.toggle("hidden", !wbOffers.length);
     $("btn-winter-next").classList.toggle("hidden", !!wbStatus.done);
     $("btn-next-season").classList.toggle("hidden", !wbStatus.done);
+    // v0.6: the winter-break card carries the same Relationships
+    // section as the tab — relation changes happen here.
+    renderRelationsTab($("winter-relations-box"));
   }
   $("advance-box").style.display = (c.phase === "round") ? "" : "none";
   if(c.phase === "round"){
@@ -1089,9 +1095,17 @@ function renderMyTeam(){
   // (renderDriversTab) — all actions (Swap / Promote / Drop /
   // Release) live there. trs is still needed below for the
   // T&R research-bonus line in the pools display.
+  // v0.6: one-line relation summary on the dashboard (details in
+  // the Relationships tab).
+  const relSupplier = t.supplier_id ? teamById(t.supplier_id) : null;
+  const relSuppliedCount = room.career
+    ? room.career.teams.filter(x => x.supplier_id === t.id).length : 0;
+  const relLine = (relSupplier || relSuppliedCount)
+    ? `<br><span class="note">🤝 ${relSupplier ? `Supplier: ${esc(relSupplier.name)} (${t.sup_stage === 2 ? "Junior" : "Customer"}, ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left)` : "No supplier"}${relSuppliedCount ? ` · Supplies ${relSuppliedCount} team${relSuppliedCount === 1 ? "" : "s"}` : ""} — see the Relationships tab.</span>`
+    : "";
   const trs = t.tr_drivers || [];
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
-    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>`;
+    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
   // v0.5: driver development factor (main 2 + T&R) — the same
   // helpers do_develop uses, so the number shown is the number
   // Develop Parts applies. Per-driver breakdown, compact.
@@ -1185,6 +1199,176 @@ function renderDriversTab(){
   });
 }
 
+// v0.6: Relationships tab — the supplier / customer / junior system.
+// Shows your current relation (supplier + type + years left, or "No
+// supplier"), the teams you supply, donations, proposals (incoming
+// to accept/decline, outgoing waiting), and — if you parent a junior
+// team — its WANTED marks and research cap. Relation changes happen
+// in the winter break only; donations and WANTED marks work any
+// time. The same render fills the tab AND the winter-break card's
+// Relationships section (renderGame calls it for the winter box),
+// so both stay in sync.
+function renderRelationsTab(box){
+  if(!box) return;
+  const c = room.career; if(!c) return;
+  if(!myTeam){ box.innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby.</p>"; return; }
+  const t = myTeam;
+  const isWB = c.phase === "winter_break";
+  const myTeamId = t.id;
+  const stageName = s => s === 2 ? "Junior" : s === 1 ? "Customer" : "—";
+  const supplier = t.supplier_id ? teamById(t.supplier_id) : null;
+  const supplied = c.teams.filter(x => x.supplier_id === t.id);
+  const junior = supplied.find(x => x.sup_stage === 2) || null;
+  const proposals = c.relation_proposals || [];
+  const incoming = proposals.filter(p => p.target_team_id === myTeamId);
+  const outgoing = proposals.filter(p => p.proposer_team_id === myTeamId);
+  // Per-relation actions (winter break only): step down (junior only),
+  // renew (expired deals only, with a years picker), propose ending
+  // it (free — the other side must agree), or break it now (unilateral,
+  // $1.0M per remaining year, shown upfront).
+  const relButtons = (other, stage, years) => {
+    if(!isWB) return ` <span class="note">Relation changes are winter-break only.</span>`;
+    const fee = (years || 0) * 1.0;
+    let h = "";
+    if(stage === 2) h += ` <button class="secondary" data-rel-action="downgrade" data-other="${other.id}" title="Step down to Customer — the other side must agree">Propose step-down to Customer</button>`;
+    if((years || 0) <= 0) h += ` <select class="rel-renew-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> <button class="secondary" data-rel-action="renew" data-other="${other.id}" title="Renew the deal — the other side must agree">Propose renewal</button>`;
+    h += ` <button class="secondary" data-rel-action="end" data-other="${other.id}" title="Free — the other side must agree">Propose ending it</button>`;
+    h += ` <button class="danger" data-rel-action="break" data-other="${other.id}" data-fee="${fee}" title="Breaks the deal now — you pay the fee, no agreement needed">${fee > 0 ? `Break now — ${money(fee)}` : "Break now — Free"}</button>`;
+    return h;
+  };
+  const proposalText = p => {
+    const s = teamById(p.supplier_team_id);
+    const cu = teamById(p.customer_team_id);
+    const sn = s ? s.name : "?", cn = cu ? cu.name : "?";
+    if(p.kind === "customer") return `${sn} supplies ${cn} as a Customer (${p.years} yrs)`;
+    if(p.kind === "junior") return `${sn} supplies ${cn} as its Junior team (${p.years} yrs)`;
+    if(p.kind === "end") return `End the deal between ${sn} and ${cn}`;
+    if(p.kind === "downgrade") return `${cn} steps down from Junior to Customer of ${sn}`;
+    if(p.kind === "renew") return `Renew the ${sn}–${cn} deal for ${p.years} more years`;
+    return p.kind;
+  };
+  let html = `<p class="note">Supplier deals, donations, WANTED drivers and research caps — team relationships change over time. Relation changes happen in the winter break; donations and WANTED marks work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
+  // Your relation.
+  html += `<h3>Your relation</h3>`;
+  if(supplier){
+    const due = (t.relation_years || 0) <= 0;
+    html += `<div class="bar-row"><span class="team-bar" style="color:${supplier.colour}">|</span> <b>${esc(supplier.name)}</b> — ${stageName(t.sup_stage)} · ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left${due ? ` <b>— contract expired! Renew it in the winter break or it lapses at season start.</b>` : ""}${(t.sup_stage === 2 && t.research_cap !== null && t.research_cap !== undefined) ? `<br><span class="note">Research cap: ${money(t.research_cap)}/season — spent ${money(t.research_spent_season || 0)} this season.</span>` : ""}${relButtons(supplier, t.sup_stage, t.relation_years)}</div>`;
+  } else {
+    html += `<p class="note">No supplier — you are independent.</p>`;
+  }
+  // Teams you supply.
+  html += `<h3>Teams you supply</h3>`;
+  if(supplied.length){
+    html += supplied.map(x => `<div class="bar-row"><span class="team-bar" style="color:${x.colour}">|</span> <b>${esc(x.name)}</b> — ${stageName(x.sup_stage)} · ${x.relation_years} yr${x.relation_years === 1 ? "" : "s"} left${(x.relation_years || 0) <= 0 ? ` <b>— contract expired!</b>` : ""}${relButtons(x, x.sup_stage, x.relation_years)}</div>`).join("");
+  } else {
+    html += `<p class="note">You don't supply any team yet.</p>`;
+  }
+  // Donate.
+  html += `<h3>Donate</h3>`;
+  if(supplied.length){
+    html += `<p class="note">Donate to a team you supply — any amount, any time, no fee. It comes straight out of your bank.</p><select class="rel-donate-team">${supplied.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select> <input class="rel-donate-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M <button data-rel-donate>Donate</button>`;
+  } else {
+    html += `<p class="note">Donations go to teams you supply — propose a relation in the winter break to start supplying one.</p>`;
+  }
+  // Propose a new relation (winter break only).
+  html += `<h3>Propose a relation</h3>`;
+  if(isWB){
+    const others = c.teams.filter(x => x.id !== myTeamId);
+    html += `<p class="note">Propose a deal — the other team must accept. Nothing → Customer → Junior, one step at a time; a team has one supplier, and a supplier has at most one junior team. Pick 1–4 contract years.</p><select class="rel-propose-team">${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select> <select class="rel-propose-kind"><option value="customer">Customer</option><option value="junior">Junior</option></select> <select class="rel-propose-role"><option value="me">I supply them</option><option value="them">They supply me</option></select> <select class="rel-propose-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> yrs <button data-rel-propose>Propose</button>`;
+  } else {
+    html += `<p class="note">New relations are proposed in the winter break.</p>`;
+  }
+  // Incoming / outgoing proposals.
+  if(incoming.length){
+    html += `<h3>Proposals waiting for you</h3>` + incoming.map(p => {
+      const proposer = teamById(p.proposer_team_id);
+      return `<div class="bar-row"><b>${proposer ? esc(proposer.name) : "?"}</b> proposes: ${esc(proposalText(p))} <button data-rel-respond="accept" data-proposal-id="${p.id}">Accept</button> <button class="secondary" data-rel-respond="decline" data-proposal-id="${p.id}">Decline</button></div>`;
+    }).join("");
+  }
+  if(outgoing.length){
+    html += `<h3>Your proposals — waiting</h3>` + outgoing.map(p => {
+      const target = teamById(p.target_team_id);
+      return `<div class="bar-row">Waiting for <b>${target ? esc(target.name) : "?"}</b>: ${esc(proposalText(p))}</div>`;
+    }).join("");
+  }
+  // Junior team: WANTED marks + research cap.
+  if(junior){
+    html += `<h3>Your junior team — ${esc(junior.name)}</h3>`;
+    const marks = junior.wanted || [];
+    html += `<p class="note">WANTED drivers: mark a free-agent or F2 driver and ${esc(junior.name)} gets the reward if they sign them (main or T&amp;R). The reward is a cash bounty — it never changes the driver's reputation or rating. Max 3 at a time.</p>`;
+    html += marks.length ? marks.map(w => {
+      const d = driverById(w.driver_id);
+      return `<div class="bar-row">⭐ <b>${d ? esc(d.name) : "?"}</b> — ${money(w.reward)} reward <button class="secondary" data-rel-wanted-remove data-driver-id="${w.driver_id}">Remove</button></div>`;
+    }).join("") : `<p class="note">No WANTED drivers marked yet.</p>`;
+    const market = c.drivers.filter(d => d.status === "free" || d.status === "f2");
+    html += `<select class="rel-wanted-driver">${market.map(d => `<option value="${d.id}">${esc(d.name)} (${d.age}, ${money(d.salary)}/yr)</option>`).join("")}</select> <input class="rel-wanted-reward" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M reward <button data-rel-wanted-add>Mark WANTED</button>`;
+    const cap = junior.research_cap;
+    html += `<p class="note">Research cap for ${esc(junior.name)}: ${cap !== null && cap !== undefined ? money(cap) + "/season" : "none"} — spent ${money(junior.research_spent_season || 0)} this season. ${isWB ? "Set it for the upcoming season (Performance + Reliability research only — Develop and reg research are not capped):" : "Caps are set in the winter break."}</p>`;
+    if(isWB){
+      html += `<input class="rel-cap-amount" type="number" min="0.1" step="0.1" value="${cap !== null && cap !== undefined ? cap : 15}" style="width:90px"> $M/season <button data-rel-cap-set>Set cap</button> <button class="secondary" data-rel-cap-clear>Clear cap</button>`;
+    }
+  }
+  box.innerHTML = html;
+  // Wire the actions (all scoped to this box — the tab and the
+  // winter-break card render the same content twice).
+  box.querySelectorAll("[data-rel-action]").forEach(b => b.onclick = () => {
+    const action = b.dataset.relAction, other = b.dataset.other;
+    if(action === "break"){
+      const fee = parseFloat(b.dataset.fee || "0");
+      const otherTeam = teamById(other);
+      openConfirm("Break this deal?",
+        `Break the deal with ${otherTeam ? otherTeam.name : "that team"} now? It costs ${money(fee)} ($1.0M per remaining contract year)${fee <= 0 ? " — the contract has expired, so it is free" : ""}. The tie ends immediately.`,
+        () => send({type:"break_relation", other_team_id: other}));
+    } else if(action === "renew"){
+      const sel = b.closest("div").querySelector(".rel-renew-years");
+      send({type:"propose_relation", target_team_id: other, kind:"renew", years: sel ? parseInt(sel.value) : 2});
+    } else { // downgrade / end — the other side must agree
+      send({type:"propose_relation", target_team_id: other, kind: action});
+    }
+  });
+  const donateBtn = box.querySelector("[data-rel-donate]");
+  if(donateBtn) donateBtn.onclick = () => {
+    const sel = box.querySelector(".rel-donate-team");
+    const amt = box.querySelector(".rel-donate-amount");
+    const amount = amt ? parseFloat(amt.value) : NaN;
+    if(!sel || !sel.value || !amount || amount <= 0){ showErr("game-err", "Pick a team and an amount over $0M."); return; }
+    send({type:"donate", recipient_team_id: sel.value, amount});
+  };
+  const proposeBtn = box.querySelector("[data-rel-propose]");
+  if(proposeBtn) proposeBtn.onclick = () => {
+    const teamSel = box.querySelector(".rel-propose-team");
+    const kindSel = box.querySelector(".rel-propose-kind");
+    const roleSel = box.querySelector(".rel-propose-role");
+    const yearsSel = box.querySelector(".rel-propose-years");
+    if(!teamSel || !teamSel.value){ showErr("game-err", "Pick a team to propose to."); return; }
+    send({type:"propose_relation", target_team_id: teamSel.value, kind: kindSel.value,
+          supplier_team_id: roleSel.value === "me" ? myTeamId : teamSel.value,
+          years: yearsSel ? parseInt(yearsSel.value) : 2});
+  };
+  box.querySelectorAll("[data-rel-respond]").forEach(b => b.onclick = () =>
+    send({type:"respond_relation", proposal_id: b.dataset.proposalId, accept: b.dataset.relRespond === "accept"}));
+  const wantedBtn = box.querySelector("[data-rel-wanted-add]");
+  if(wantedBtn) wantedBtn.onclick = () => {
+    const sel = box.querySelector(".rel-wanted-driver");
+    const reward = box.querySelector(".rel-wanted-reward");
+    if(!sel || !sel.value){ showErr("game-err", "Pick a driver to mark WANTED."); return; }
+    const r = reward ? parseFloat(reward.value) : NaN;
+    if(!r || r <= 0){ showErr("game-err", "Pick a reward over $0M."); return; }
+    send({type:"set_wanted", driver_id: sel.value, reward: r});
+  };
+  box.querySelectorAll("[data-rel-wanted-remove]").forEach(b => b.onclick = () =>
+    send({type:"remove_wanted", driver_id: b.dataset.driverId}));
+  const capBtn = box.querySelector("[data-rel-cap-set]");
+  if(capBtn) capBtn.onclick = () => {
+    const inp = box.querySelector(".rel-cap-amount");
+    const v = inp ? parseFloat(inp.value) : NaN;
+    if(!v || v <= 0){ showErr("game-err", "Pick a cap over $0M."); return; }
+    send({type:"set_research_cap", cap: v});
+  };
+  const capClear = box.querySelector("[data-rel-cap-clear]");
+  if(capClear) capClear.onclick = () => send({type:"set_research_cap", cap: null});
+}
+
 function renderTabs(){
   const c = room.career; if(!c) return;
   const isWB = c.phase === "winter_break";
@@ -1275,7 +1459,23 @@ function renderTabs(){
     // academy juniors get their ACADEMY team's colour — they
     // represent that team. Free agents / unaffiliated F2 stay neutral.
     const nameColour = (d.status === "f1" || d.status === "tr") && tm ? tm.colour : (acTeam ? acTeam.colour : null);
-    return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
+    // v0.6: WANTED badge — a parent marks a market driver WANTED for
+    // their junior team; the mark + reward is shown to the junior
+    // team (they get paid if they sign them) and to the parent (their
+    // own mark). Other teams see nothing — the bounty is between
+    // parent and junior.
+    let wantedBadge = "";
+    if(myTeam){
+      for(const jt of c.teams.filter(x => x.sup_stage === 2)){
+        const mark = (jt.wanted || []).find(w => w.driver_id === d.id);
+        if(!mark) continue;
+        const parent = teamById(jt.supplier_id);
+        if(jt.id === myTeamId) wantedBadge = ` <span class="pill adv">⭐ WANTED by ${parent ? esc(parent.name) : "?"} — ${money(mark.reward)} reward if you sign them</span>`;
+        else if(parent && parent.id === myTeamId) wantedBadge = ` <span class="pill adv">⭐ WANTED — ${money(mark.reward)} reward if ${esc(jt.name)} signs them</span>`;
+        if(wantedBadge) break;
+      }
+    }
+    return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}${wantedBadge}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
   };
   $("market-box").innerHTML =
     `<p class="note">${isWB
@@ -1408,6 +1608,7 @@ function renderTabs(){
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
   const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
   renderDriversTab();
+  renderRelationsTab($("relations-box"));
   if(myTeam) renderMyTeam();
   syncOverlays();
 }
