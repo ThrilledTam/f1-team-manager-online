@@ -19,16 +19,17 @@ import random
 from . import race as race_mod
 from .data import (
     GRID_2026, CHAMPION_HISTORY_2010_2025, PREV_SEASON_DRIVER_ORDER,
-    PREV_SEASON_TEAM_ORDER, circuit_for_round,
+    PREV_SEASON_TEAM_ORDER, TR_2026, ACADEMY_2026, circuit_for_round,
 )
 from .models import make_driver, make_team, new_career_dict
 from .rules import SEASON_LENGTH, MAX_SEASONS
 from .rules import (
-    MAX_TR_DRIVERS, REG_ADAPT_COST_PER_POINT, REG_OPENS_ROUND,
-    REG_MAJOR_TARGET, REG_MINOR_TARGET, TR_RESEARCH_BONUS,
-    WINTER_BREAK_ROUNDS, add_perf_gain, add_rel_gain, dsus,
-    finance_estimates, is_retiring, reg_change, reg_change_v2,
-    retirement_chance, update_points_dist,
+    ACADEMY_FINE_FREE_COUNT, ACADEMY_LOYALTY_BOOST, ACADEMY_MAX_JOIN_AGE,
+    REG_ADAPT_COST_PER_POINT, REG_OPENS_ROUND,
+    REG_MAJOR_TARGET, REG_MINOR_TARGET, TR_FINE_FREE_COUNT,
+    TR_RESEARCH_BONUS, WINTER_BREAK_ROUNDS, add_perf_gain, add_rel_gain,
+    extra_driver_fine, finance_estimates, grow_rating, is_retiring,
+    reg_change, reg_change_v2, retirement_chance, update_points_dist,
 )
 
 CUSTOM_TEAM_MONEY = 6.0
@@ -82,6 +83,40 @@ def build_new_career(name, host_nickname, chart_on=True):
         career["drivers"].append(make_driver(ddata, status="queued"))
     for ddata in GRID_2026["pool"]:
         career["drivers"].append(make_driver(ddata, status="pool"))
+    # v0.4.2: the 2026 start re-homes the CSV's Test & Reserve
+    # drivers (Attachment #1, status "Test & Reserve") to their
+    # teams — 22 drivers, McLaren and Mercedes with 4 each — and
+    # puts the CSV's F2 juniors with a team (status "F2" + a
+    # current_team) into that team's Driver Academy. CSV age /
+    # salary / rating override the GRID_2026 copies where they
+    # differ (Westcott $1.4M, Kirakawa 84, Pourchaire 25, and the
+    # academy F2 salaries). T&R drivers start on 2-year contracts
+    # (the CSV has no contract length for them; 2 is the default
+    # signing length). A driver missing from the pool is skipped —
+    # the career still builds.
+    by_name = {d["name"]: d for d in career["drivers"]}
+    for entry in TR_2026:
+        d = by_name.get(entry["name"])
+        team = teams_by_name.get(entry["team"])
+        if not d or not team:
+            continue
+        d["age"] = int(entry["age"])
+        d["salary"] = float(entry["salary"])
+        d["mv"] = float(entry["salary"])
+        d["perf"] = float(entry["perf"])
+        d["status"] = "tr"
+        d["team_id"] = team["id"]
+        d["contract_left"] = 2
+    for entry in ACADEMY_2026:
+        d = by_name.get(entry["name"])
+        team = teams_by_name.get(entry["team"])
+        if not d or not team:
+            continue
+        d["age"] = int(entry["age"])
+        d["salary"] = float(entry["salary"])
+        d["mv"] = float(entry["salary"])
+        d["perf"] = float(entry["perf"])
+        d["academy_team_id"] = team["id"]
     # v0.3: season 1 opens in the real 2025 order. The three 2026-grid
     # drivers who did not race in F1 in 2025 (Pérez, Bottas, Lindblad)
     # go after the 2025-ordered drivers, ordered by perf — the
@@ -161,9 +196,58 @@ def team_tr_drivers(career, team):
     """v0.4: a team's Test & Reserve drivers — status 'tr', affiliated
     with this team. They do not race and never appear in the F1
     standings, but they are paid their full salary and add +25% each
-    to research gained. At most MAX_TR_DRIVERS (2) per team."""
+    to research gained. v0.4.2: there is NO hard cap any more — a
+    team with more than 2 T&R drivers pays an exponential fine per
+    race instead (see tr_fine_per_race)."""
     return [d for d in career["drivers"]
             if d.get("status") == "tr" and d.get("team_id") == team["id"]]
+
+
+def team_academy_drivers(career, team):
+    """v0.4.2: a team's Driver Academy juniors — drivers whose
+    academy_team_id is this team. They keep their status ("f2" or
+    "free") and still race in F2 / sit in the free-agent pool; the
+    academy is an affiliation on top. The team pays 1/3 of each
+    academy driver's salary per season."""
+    return [d for d in career["drivers"]
+            if d.get("academy_team_id") == team["id"]]
+
+
+def tr_fine_per_race(career, team):
+    """v0.4.2: the exponential T&R fine, per race — $0.5M for the
+    3rd T&R driver, $1.5M for 3rd+4th, $3.5M for 3rd+4th+5th
+    (the first 2 are free). Charged after each race, on top of the
+    T&R drivers' full salaries."""
+    return extra_driver_fine(len(team_tr_drivers(career, team)),
+                             TR_FINE_FREE_COUNT)
+
+
+def academy_fine_per_race(career, team):
+    """v0.4.2: the same exponential fine for the academy — the
+    first 3 academy drivers are free; the 4th costs $0.5M/race,
+    the 5th $1.5M/race in total, and so on."""
+    return extra_driver_fine(len(team_academy_drivers(career, team)),
+                             ACADEMY_FINE_FREE_COUNT)
+
+
+def academy_cost_per_race(career, team):
+    """v0.4.2: what the academy costs per race — 1/3 of each
+    academy driver's salary per season, paid salary/36 after
+    each race."""
+    total = sum(d["salary"] for d in team_academy_drivers(career, team))
+    return round(total / 3.0 / SEASON_LENGTH, 4)
+
+
+def extra_charges_per_race(career, team):
+    """v0.4.2: everything a team pays after each race on top of
+    main + T&R salaries — the T&R fine, the academy stipends, and
+    the academy fine. {tr_fine, academy_cost, academy_fine, total}."""
+    tr_fine = tr_fine_per_race(career, team)
+    academy_cost = academy_cost_per_race(career, team)
+    academy_fine = academy_fine_per_race(career, team)
+    return {"tr_fine": tr_fine, "academy_cost": academy_cost,
+            "academy_fine": academy_fine,
+            "total": round(tr_fine + academy_cost + academy_fine, 4)}
 
 
 def research_multiplier(career, team):
@@ -257,6 +341,9 @@ def create_custom_team(career, player_id, name, colour, d1_id, d2_id):
         d["status"] = "f1"
         d["team_id"] = team["id"]
         d["contract_left"] = 1
+        # v0.4.2: a picked academy junior leaves the academy when
+        # they sign a main contract (same as any other signing).
+        d["academy_team_id"] = None
         team[slot] = d["id"]
     return True, f"Custom team {name} created ✓", team
 
@@ -573,6 +660,11 @@ def _sign_driver_common(career, team, d, contract_years):
     d["team_points"] = 0
     d["last_team_id"] = None
     d["contract_left"] = contract_years
+    # v0.4.2: signing a main or T&R contract ends the academy
+    # affiliation, wherever it was — a driver cannot be an academy
+    # junior and a contracted driver at the same time, and the
+    # academy slot frees up.
+    d["academy_team_id"] = None
 
 
 def sign_driver(career, team_id, driver_id, seat, contract_years=2):
@@ -666,11 +758,15 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
 def sign_tr_driver(career, team_id, driver_id, contract_years=2):
     """v0.4: sign a driver as a Test & Reserve driver for a team.
     The driver may come from free agency, F2, or another team
-    (poaching — with the break fee). At most 2 T&R drivers per team.
-    T&R drivers are paid their FULL salary (salary/12 after each
-    race) even though they do not race, and each adds +25% to
-    research gained. During the winter break, T&R signings go
-    through the offer system instead."""
+    (poaching — with the break fee). v0.4.2: there is NO hard cap
+    any more — a team may sign any number of T&R drivers, but every
+    driver beyond the first 2 costs an exponential fine per race
+    ($0.5M for the 3rd, $1.5M/race for 3rd+4th — see
+    tr_fine_per_race). The fine is shown in the market before
+    signing. T&R drivers are paid their FULL salary (salary/12
+    after each race) even though they do not race, and each adds
+    +25% to research gained. During the winter break, T&R signings
+    go through the offer system instead."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
@@ -682,8 +778,6 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
         return False, "Contract length must be a whole number of years (1–4)."
     if not 1 <= contract_years <= 4:
         return False, "Contract length must be 1–4 years."
-    if len(team_tr_drivers(career, team)) >= MAX_TR_DRIVERS:
-        return False, f"{team['name']} already has {MAX_TR_DRIVERS} T&R drivers."
     d = get_driver(career, driver_id)
     if not d or d["status"] not in ("free", "f2", "f1", "tr"):
         return False, "That driver is not available to sign."
@@ -718,6 +812,60 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
                       f"({contract_years}-year contract) — ${cost:.2f}M break fee")
     return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
                   f"({contract_years}-year contract) — Free")
+
+
+def add_academy_driver(career, team_id, driver_id):
+    """v0.4.2: add an unsigned driver (free agent or F2, aged 25 or
+    under) to a team's Driver Academy. There is NO hard cap on
+    academy size — the first 3 are free, and every driver beyond
+    that costs an exponential fine per race (see
+    academy_fine_per_race). The team pays 1/3 of the driver's
+    salary per season (salary/36 after each race). The driver keeps
+    their status (they still race in F2 / sit in the pool); the
+    academy is an affiliation on top. Allowed between races and
+    during the winter break. A driver already in an academy (any
+    team's) cannot be added to another."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    d = get_driver(career, driver_id)
+    if not d or d["status"] not in ("free", "f2"):
+        return False, "Only unsigned drivers (free agents or F2) can join an academy."
+    if d.get("academy_team_id"):
+        other = get_team(career, d["academy_team_id"])
+        return False, (f"{d['name']} is already in "
+                       f"{other['name'] if other else 'an'}'s academy.")
+    if d["age"] > ACADEMY_MAX_JOIN_AGE:
+        return False, (f"Academy drivers must be {ACADEMY_MAX_JOIN_AGE} or under "
+                       f"to join — {d['name']} is {d['age']}.")
+    d["academy_team_id"] = team["id"]
+    cost = round(d["salary"] / 3.0, 2)
+    fine = academy_fine_per_race(career, team)
+    note = ""
+    if fine > 0:
+        n = len(team_academy_drivers(career, team))
+        note = (f" — this is academy driver #{n}, so the team now pays "
+                f"a ${fine:.2f}M/race academy fine on top.")
+    career["transfers"].append(
+        f"{d['name']} joined {team['name']}'s Driver Academy")
+    return True, (f"{d['name']} joined {team['name']}'s Driver Academy ✓ "
+                  f"(costs ${cost:.2f}M/season — 1/3 of salary){note}")
+
+
+def release_academy_driver(career, team_id, driver_id):
+    """v0.4.2: release a driver from a team's Driver Academy — free,
+    no fee. The driver keeps their status (F2 / free agent) and can
+    be signed by anyone afterwards, academy-free."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    d = get_driver(career, driver_id)
+    if not d or d.get("academy_team_id") != team["id"]:
+        return False, "That driver is not in your academy."
+    d["academy_team_id"] = None
+    career["transfers"].append(
+        f"{d['name']} left {team['name']}'s Driver Academy")
+    return True, f"{d['name']} released from {team['name']}'s academy ✓"
 
 
 def swap_main_tr(career, team_id, seat, tr_driver_id):
@@ -882,7 +1030,12 @@ def ai_act(career, team, rng=None):
     if team["money"] is None:
         return
     salaries = salary_per_round(career, team)
-    temp_funds = team["money"] - salaries
+    # v0.4.2: the funds a bot plans with are what's left after
+    # salaries AND the per-race extra charges (T&R fine, academy
+    # stipends, academy fine) — otherwise a team with 4 T&R drivers
+    # would spend money the fine then takes away.
+    charges = extra_charges_per_race(career, team)["total"]
+    temp_funds = team["money"] - salaries - charges
     # v0.4 bot parity: fill an empty main seat before the race, from
     # the best available free agent / F2 driver (highest reputation).
     # An empty seat scores nothing, so this is the first priority.
@@ -899,13 +1052,31 @@ def ai_act(career, team, rng=None):
     # it (salaries + a buffer), and only once per season.
     if (not team_tr_drivers(career, team)
             and career.get("round", 1) <= 6
-            and team["money"] > salaries + 10):
+            and team["money"] > salaries + charges + 10):
         young = [d for d in career["drivers"]
                  if d["status"] in ("free", "f2") and d["age"] <= 25]
         if young:
             young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
             sign_tr_driver(career, team["id"], young[0]["id"],
                            contract_years=ai_contract_years(young[0]))
+    # v0.4.2 bot parity: an AI team may add one young unsigned
+    # driver to its Driver Academy per season (youngest cheapest,
+    # rounds 1-6), when it can comfortably afford it. Bots never
+    # exceed 3 academy drivers — they avoid the exponential academy
+    # fine entirely.
+    if (not team.get("ai_academy_signed")
+            and len(team_academy_drivers(career, team)) < ACADEMY_FINE_FREE_COUNT
+            and career.get("round", 1) <= 6
+            and team["money"] > salaries + charges + 10):
+        young = [d for d in career["drivers"]
+                 if d["status"] in ("free", "f2")
+                 and d["age"] <= ACADEMY_MAX_JOIN_AGE
+                 and not d.get("academy_team_id")]
+        if young:
+            young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
+            ok, _why = add_academy_driver(career, team["id"], young[0]["id"])
+            if ok:
+                team["ai_academy_signed"] = True
     if temp_funds >= 10:
         round_funds = (temp_funds - 1) * (rng.random() * 0.35 + 0.2)
     else:
@@ -1213,9 +1384,12 @@ def run_race_weekend(career, connected_player_ids, rng=None):
     # a main driver for really bad performance (0 pts, avg finish
     # 18th or worse, from round 6, never in the last 2 rounds).
     bot_post_race(career, rng=rng)
-    # Money: salaries out, per-race gains (EPRG) in.
+    # Money: salaries out, per-race gains (EPRG) in. v0.4.2: the
+    # per-race extra charges go out too — the T&R fine, the academy
+    # stipends (1/3 salary per season), and the academy fine.
     for team in career["teams"]:
         team["money"] -= salary_per_round(career, team)
+        team["money"] -= extra_charges_per_race(career, team)["total"]
         team["money"] += finance_estimates(pos_before[team["id"]])["eprg"]
     # Sort drivers within each team by points scored FOR this team
     # (Main.py swaps D1/D2) and re-sort the team list into
@@ -1367,9 +1541,13 @@ def end_of_season(career, rng=None):
             d["last_team_id"] = team["id"]  # v0.2.1: record last team
         d["status"] = "retired"
         d["team_id"] = None
+        # v0.4.2: a retired driver leaves their academy too.
+        d["academy_team_id"] = None
     career["retired_this_season"] = [d["name"] for d in retired]
-    # Ageing (DSUS), salary recalc, contracts tick down, points reset.
+    # Ageing (v0.4.2: table-driven grow_rating, replacing DSUS),
+    # salary recalc, contracts tick down, points reset.
     for i, d in enumerate(drivers):
+        old_age = d["age"]
         d["age"] += 1
         d["contract_left"] = max(0, d["contract_left"] - 1)
         team = get_team(career, d["team_id"]) if d.get("team_id") else None
@@ -1379,7 +1557,9 @@ def end_of_season(career, rng=None):
         val = (d["salary"] * 0.6) + (age_val * 0.2) + (pos_val * 0.2)
         d["salary"] = max(0.5, min(10.0, val))
         d["mv"] = d["salary"]
-        d["perf"] += dsus(d["age"], d["perf"], rng=rng)
+        d["perf"] = grow_rating(old_age, d["perf"],
+                                is_academy=bool(d.get("academy_team_id")),
+                                rng=rng)
         d["points"] = 0
         d["team_points"] = 0  # v0.2.1: per-team tally resets with the season
         if d["status"] == "f1":
@@ -1395,8 +1575,11 @@ def end_of_season(career, rng=None):
         d["finish_count"] = 0
     for d in free_agents(career):
         if d not in retired:
+            old_age = d["age"]
             d["age"] += 1
-            d["perf"] += dsus(d["age"], d["perf"], rng=rng)
+            d["perf"] = grow_rating(old_age, d["perf"],
+                                    is_academy=bool(d.get("academy_team_id")),
+                                    rng=rng)
             # v0.2: free agents' points reset with the season, like F1/F2
             # drivers — otherwise a replaced driver's stale points would
             # show in next season's standings.
@@ -1410,8 +1593,11 @@ def end_of_season(career, rng=None):
             d["finish_sum"] = 0
             d["finish_count"] = 0
     for d in f2_drivers(career):
+        old_age = d["age"]
         d["age"] += 1
-        d["perf"] += dsus(d["age"], d["perf"], rng=rng)
+        d["perf"] = grow_rating(old_age, d["perf"],
+                                is_academy=bool(d.get("academy_team_id")),
+                                rng=rng)
         d["points"] = 0
         d["team_points"] = 0  # v0.2.1
         d["season_wins"] = 0
@@ -1431,9 +1617,12 @@ def end_of_season(career, rng=None):
     # driver when they return to a race seat next season.
     for team in career["teams"]:
         for d in team_tr_drivers(career, team):
+            old_age = d["age"]
             d["age"] += 1
             d["contract_left"] = max(0, d["contract_left"] - 1)
-            d["perf"] += dsus(d["age"], d["perf"], rng=rng)
+            d["perf"] = grow_rating(old_age, d["perf"],
+                                    is_academy=bool(d.get("academy_team_id")),
+                                    rng=rng)
             d["points"] = 0
             d["team_points"] = 0
             d["season_wins"] = 0
@@ -1473,6 +1662,8 @@ def end_of_season(career, rng=None):
         team["best_finish_round"] = None
         team["season_wins"] = 0
         team["tuning"] = 0
+        # v0.4.2: the bot academy quota resets with the season.
+        team["ai_academy_signed"] = False
     # Refill the F2 grid from queued / pool rookies.
     refill_f2(career, rng=rng)
     # v0.4: the regulation change into the new year is NOT applied
@@ -1645,16 +1836,25 @@ def bot_winter_offers(career, team, rng=None):
         offers.append({"driver_id": pick["id"], "target": "seat", "seat": seat,
                        "years": ai_contract_years(pick, rng=rng)})
         pool.remove(pick)
-    # T&R: one offer, youngest cheapest available, when a slot is free.
-    if len(team_tr_drivers(career, team)) < MAX_TR_DRIVERS and pool:
+    # T&R: one offer, youngest cheapest available. v0.4.2: no hard
+    # cap any more — a bot may offer a 3rd (or further) T&R driver
+    # only when it has plenty of cash: its bank, after paying a full
+    # season of the fine the extra driver would add, must still be
+    # over $50M.
+    trs = team_tr_drivers(career, team)
+    if pool:
         young = [d for d in pool if d["age"] <= 25]
         young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
         if young:
             pick = young[0]
-            quote = sign_cost(career, team["id"], pick["id"], ("tr", None))
-            if quote and quote["affordable"]:
-                offers.append({"driver_id": pick["id"], "target": "tr", "seat": None,
-                               "years": ai_contract_years(pick, rng=rng)})
+            fine_after = extra_driver_fine(len(trs) + 1, TR_FINE_FREE_COUNT)
+            affordable = (len(trs) < TR_FINE_FREE_COUNT
+                          or team["money"] - 12 * fine_after > 50)
+            if affordable:
+                quote = sign_cost(career, team["id"], pick["id"], ("tr", None))
+                if quote and quote["affordable"]:
+                    offers.append({"driver_id": pick["id"], "target": "tr", "seat": None,
+                                   "years": ai_contract_years(pick, rng=rng)})
     career.setdefault("wb_offers", {})[team["id"]] = offers
 
 
@@ -1727,8 +1927,6 @@ def submit_winter_offers(career, team_id, offers):
         elif target == "tr":
             if tr_seen >= 1:
                 return False, "At most one T&R offer per round."
-            if len(team_tr_drivers(career, team)) >= MAX_TR_DRIVERS:
-                return False, f"{team['name']} already has {MAX_TR_DRIVERS} T&R drivers."
             tr_seen += 1
             cleaned.append({"driver_id": d["id"], "target": "tr",
                             "seat": None, "years": years})
@@ -1774,15 +1972,51 @@ def winter_next(career, team_id, rng=None):
     return True, True, f"Winter-break round {career['wb_round']} — make your offers."
 
 
+def _wb_offer_winners(career, offers_by_team):
+    """v0.4.2: for each driver with winter-break offers, the team
+    they sign with — the lowest EFFECTIVE constructors' position,
+    where an academy driver's own academy team counts as
+    ACADEMY_LOYALTY_BOOST (3) places higher. Ties go to the academy
+    team first, then to the better real constructors' position.
+    So a 5th-place academy team (effective 2nd, academy) beats a
+    2nd-place rival (effective 2nd, not academy) for its own junior,
+    and a 1st-place academy team always wins its junior. A driver
+    with no academy affiliation just goes to the best-placed team
+    that offered them. Returns {driver_id: team_id}."""
+    order = wb_constructors_order(career)
+    pos = {tid: i + 1 for i, tid in enumerate(order)}
+    fallback = len(order) + 1
+    winners = {}
+    for team_id, offers in (offers_by_team or {}).items():
+        for off in offers:
+            did = off.get("driver_id")
+            d = get_driver(career, did)
+            if not d:
+                continue
+            real = pos.get(team_id, fallback)
+            eff = real
+            is_academy_team = d.get("academy_team_id") == team_id
+            if is_academy_team:
+                eff = max(1, real - ACADEMY_LOYALTY_BOOST)
+            key = (eff, 0 if is_academy_team else 1, real)
+            if did not in winners or key < winners[did][0]:
+                winners[did] = (key, team_id)
+    return {did: tid for did, (_key, tid) in winners.items()}
+
+
 def resolve_winter_break_round(career, rng=None):
     """Resolve one winter-break round: process teams in last
     season's final constructors' order (champion first); a driver
     accepts the first offer they receive (from the best-placed team
     offering them). A team's main-seat offers are processed before
     its T&R offer. Signing is free (salary only); the break fee of
-    the driver being replaced is charged, as in sign_driver()."""
+    the driver being replaced is charged, as in sign_driver().
+    v0.4.2: academy loyalty — a driver with offers from their
+    academy team and from rivals signs with the academy team when
+    the boost puts it ahead (see _wb_offer_winners)."""
     rng = rng or random
     offers_by_team = career.get("wb_offers") or {}
+    winners = _wb_offer_winners(career, offers_by_team)
     taken = set()
     for team_id in wb_constructors_order(career):
         team = get_team(career, team_id)
@@ -1794,6 +2028,8 @@ def resolve_winter_break_round(career, rng=None):
         for off in mine:
             if off["driver_id"] in taken:
                 continue
+            if winners.get(off["driver_id"]) != team_id:
+                continue  # another team wins this driver (loyalty / order)
             d = get_driver(career, off["driver_id"])
             if not d or d["status"] not in ("free", "f2"):
                 continue
@@ -1803,8 +2039,6 @@ def resolve_winter_break_round(career, rng=None):
                     continue  # seat already filled by an earlier offer
                 ok, _why = sign_driver_wb(career, team, d, off["seat"], off["years"])
             else:
-                if len(team_tr_drivers(career, team)) >= MAX_TR_DRIVERS:
-                    continue
                 ok, _why = sign_tr_driver_wb(career, team, d, off["years"])
             if ok:
                 taken.add(d["id"])
@@ -1975,6 +2209,10 @@ def finances_view(career, team):
     # v0.4: T&R drivers are paid their full salary too — list them
     # separately so the manager can see the cost of the affiliation.
     tr = team_tr_drivers(career, team)
+    # v0.4.2: the academy (1/3 salary each) and the exponential
+    # fines, all per race — so the manager sees them before signing.
+    academy = team_academy_drivers(career, team)
+    charges = extra_charges_per_race(career, team)
     return {
         "money": round(team["money"], 2),
         "constructor_pos": pos,
@@ -1987,6 +2225,13 @@ def finances_view(career, team):
         "tr_costs": [{"driver": d["name"],
                       "per_race": round(d["salary"] / SEASON_LENGTH, 2)}
                      for d in tr],
+        "tr_fine_per_race": charges["tr_fine"],
+        "academy_costs": [{"driver": d["name"],
+                           "per_race": round(d["salary"] / 3.0 / SEASON_LENGTH, 2)}
+                          for d in academy],
+        "academy_cost_per_race": charges["academy_cost"],
+        "academy_fine_per_race": charges["academy_fine"],
+        "extra_charges_per_race": charges["total"],
     }
 
 
@@ -2033,9 +2278,21 @@ def public_state(career, chart_on, viewer_team_id=None):
     if viewer_team_id:
         viewer = get_team(career, viewer_team_id)
         if viewer is not None:
+            # v0.4.2: the T&R entry also carries the fine that would
+            # apply per race AFTER signing this driver (0 while the
+            # team has fewer than 2 T&R drivers) — shown in the
+            # market before signing, so the fine is never a surprise.
+            def _costs_for(d):
+                out = {str(seat): sign_cost(career, viewer["id"], d["id"], ("seat", seat))
+                       for seat in (1, 2)}
+                tr_quote = sign_cost(career, viewer["id"], d["id"], ("tr", None))
+                if tr_quote is not None:
+                    tr_quote["fine_after"] = extra_driver_fine(
+                        len(team_tr_drivers(career, viewer)) + 1, TR_FINE_FREE_COUNT)
+                out["tr"] = tr_quote
+                return out
             state["market_costs"] = {
-                d["id"]: {str(seat): sign_cost(career, viewer["id"], d["id"], ("seat", seat))
-                         for seat in (1, 2)} | {"tr": sign_cost(career, viewer["id"], d["id"], ("tr", None))}
+                d["id"]: _costs_for(d)
                 for d in career["drivers"]
                 if d["status"] in ("free", "f2", "f1", "tr")
                 and not (d.get("team_id") == viewer["id"])}

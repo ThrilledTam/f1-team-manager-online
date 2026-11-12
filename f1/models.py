@@ -64,6 +64,15 @@ def make_driver(data, status="free", team_id=None):
         # the F1 standings. See game.py team_tr_drivers().
         "status": status,          # "f1" | "free" | "f2" | "queued" | "pool" | "retired" | "tr"
         "team_id": team_id,
+        # v0.4.2: Driver Academy affiliation — the team whose junior
+        # programme the driver belongs to (None = no academy). The
+        # driver keeps their status ("f2" or "free") and still races
+        # in F2 / sits in the free-agent pool; the academy is an
+        # affiliation on top: the team pays 1/3 of the salary, the
+        # driver weighs that team's offers more heavily, and their
+        # rating growth is weighted toward the top of the range.
+        # Cleared the moment they sign a main or T&R contract.
+        "academy_team_id": None,
     }
 
 
@@ -108,6 +117,10 @@ def make_team(data, team_id=None):
         # — both feed the new standings sort (feature 1).
         "season_wins": 0,
         "best_finish_round": None,
+        # v0.4.2: bot academy bookkeeping — an AI team adds at most
+        # one academy driver per season (see game.py ai_act); reset
+        # at season end.
+        "ai_academy_signed": False,
     }
 
 

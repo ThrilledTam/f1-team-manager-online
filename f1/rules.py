@@ -73,7 +73,109 @@ REG_ADAPT_COST_PER_POINT = 0.25   # $M per point of car perf adapted
 REG_OPENS_ROUND = 7               # reg research opens at round 7
 WINTER_BREAK_ROUNDS = 3           # v0.4: winter break is 3 offer rounds
 TR_RESEARCH_BONUS = 0.25          # v0.4: +25% research per T&R driver
-MAX_TR_DRIVERS = 2                # v0.4: at most 2 T&R drivers per team
+
+# v0.4.2: no hard cap on T&R or academy size — an exponential fine
+# instead, charged per race. The first TR_FINE_FREE_COUNT T&R
+# drivers (2) and the first ACADEMY_FINE_FREE_COUNT academy drivers
+# (3) are free; the j-th extra driver beyond that costs
+# $0.5M x 2^(j-1) per race: 1 extra = $0.5M, 2 extra = $1.5M,
+# 3 extra = $3.5M. (Matthew's decision, 2026-11-11.)
+TR_FINE_FREE_COUNT = 2
+ACADEMY_FINE_FREE_COUNT = 3
+EXTRA_DRIVER_FINE_BASE = 0.5     # $M per race for the first extra driver
+
+# v0.4.2: academy loyalty — in winter-break offer resolution, an
+# academy driver's own academy team's offer counts as if that team
+# finished ACADEMY_LOYALTY_BOOST places higher in the constructors'
+# championship (so a 5th-place academy team beats a 2nd-place rival
+# for its own junior, and a 1st-place academy team always wins).
+ACADEMY_LOYALTY_BOOST = 3
+# v0.4.2: only unsigned drivers aged 25 or under may JOIN an academy
+# (F2 or free agent). There is no age-out: members already in an
+# academy stay until they sign a main/T&R contract or are released
+# (e.g. the CSV's 26-year-old academy drivers Miyata and Herta are
+# grandfathered in at the 2026 start).
+ACADEMY_MAX_JOIN_AGE = 25
+
+
+def extra_driver_fine(count, free_count):
+    """v0.4.2 exponential fine, per race, for roster extras beyond
+    the free allowance. count = how many T&R (or academy) drivers
+    the team has; free_count = how many are free (2 for T&R, 3 for
+    the academy). The j-th extra costs $0.5M x 2^(j-1) per race, so
+    1 extra = $0.5M, 2 extra = $1.5M, 3 extra = $3.5M."""
+    extras = max(0, int(count) - int(free_count))
+    if extras <= 0:
+        return 0.0
+    return round(EXTRA_DRIVER_FINE_BASE * (2 ** extras - 1), 2)
+
+
+# ---------------------------------------------------------------------------
+# v0.4.2 — table-driven driver rating development (replaces DSUS()).
+# The table is Attachment #2 ("Driver Rating Per Age"): age -> (Min,
+# Average, Max skill), ages 12-49. The RATINGS in the attachments are
+# NOT changed — this only changes how ratings DEVELOP at season end.
+#
+# At season end every driver ages +1 and their rating changes by a
+# random integer drawn from the range implied by the table's
+# year-over-year deltas for that age step:
+#   low  = avg(age+1) - avg(age)
+#   high = max(age+1) - max(age)
+# (swapped when low > high). Examples from the spec: age 20->21 gives
+# [2,3] (avg 76->78, max 88->91) — Matthew's Câmara example;
+# 25->26 gives [0,1]; 26->27 gives [0,0]; 30->31 gives [-2,-1]
+# (older drivers decline, never stay flat). The result is clamped to
+# [min(age+1), max(age+1)] — so a driver who starts above the curve
+# (Kimi Antonelli: 87 at 19, where the max is 85) is NEVER nerfed
+# down, but can only grow up to the next age's max (88 at 20).
+# Academy drivers get a 70% chance of the high end of the range (the
+# smaller decline in decline years); everyone else draws uniformly.
+# ---------------------------------------------------------------------------
+RATING_TABLE = {
+    12: (47, 51, 55), 13: (49, 54, 59), 14: (51, 57, 63),
+    15: (53, 60, 67), 16: (55, 63, 71), 17: (57, 66, 75),
+    18: (59, 70, 80), 19: (61, 73, 85), 20: (63, 76, 88),
+    21: (65, 78, 91), 22: (67, 81, 94), 23: (68, 82, 96),
+    24: (69, 84, 98), 25: (70, 85, 100), 26: (71, 86, 100),
+    27: (72, 86, 100), 28: (72, 86, 99), 29: (72, 85, 98),
+    30: (72, 84, 96), 31: (71, 83, 94), 32: (71, 82, 93),
+    33: (71, 82, 92), 34: (70, 81, 91), 35: (70, 80, 90),
+    36: (70, 80, 89), 37: (69, 79, 88), 38: (69, 79, 88),
+    39: (68, 78, 88), 40: (67, 77, 87), 41: (66, 77, 87),
+    42: (65, 76, 87), 43: (64, 75, 86), 44: (63, 75, 86),
+    45: (62, 74, 86), 46: (61, 74, 86), 47: (60, 73, 86),
+    48: (59, 73, 86), 49: (58, 72, 86),
+}
+
+
+def rating_growth_range(age):
+    """(low, high) integer rating change for the age step age -> age+1,
+    from the rating table's average- and max-skill deltas."""
+    cur = RATING_TABLE.get(age)
+    nxt = RATING_TABLE.get(age + 1)
+    if cur is None or nxt is None:
+        return (0, 0)
+    low = nxt[1] - cur[1]    # average-skill delta
+    high = nxt[2] - cur[2]   # max-skill delta
+    if low > high:
+        low, high = high, low
+    return (low, high)
+
+
+def grow_rating(age, perf, is_academy=False, rng=None):
+    """v0.4.2 rating development: the driver's NEW rating after the
+    season-end step from age to age+1. age is the age BEFORE the
+    birthday. Returns an int, clamped to [min(age+1), max(age+1)]."""
+    rng = rng or random
+    low, high = rating_growth_range(age)
+    if is_academy and rng.random() < 0.70:
+        change = high
+    else:
+        change = rng.randint(low, high)
+    row = RATING_TABLE.get(age + 1)
+    if row is None:
+        return int(perf)
+    return int(max(row[0], min(row[2], perf + change)))
 
 
 def reg_change_v2(adapted, research, target, rng=None):
@@ -128,83 +230,13 @@ def add_rel_gain(investment):
     return investment / 100.0
 
 
-def dsus(age, perf, rng=None):
-    """Driver Skill Updating System, from Rules.py DSUS().
-
-    Returns the skill change for a driver of the given age/perf. Young
-    drivers improve, older drivers decline, clamped to age-specific bands.
-    """
-    rng = rng or random
-
-    def clamp(min_rating, max_rating, change):
-        new = perf + change
-        if new < min_rating:
-            return min_rating - perf
-        if new > max_rating:
-            return max_rating - perf
-        return change
-
-    if age in (12, 13, 14, 15, 16):
-        return rng.randint(2, 4)
-    if age == 17:
-        return rng.randint(2, 5)
-    if age == 18:
-        return rng.randint(2, 5)
-    if age in (19, 20, 21):
-        return rng.randint(2, 3)
-    if age in (22, 23, 24):
-        return rng.randint(1, 2)
-    if age == 25:
-        return clamp(71, 100, rng.randint(0, 1))
-    if age == 26:
-        return clamp(72, 100, rng.randint(0, 1))
-    if age == 27:
-        return clamp(72, 99, -rng.randint(0, 1))
-    if age == 28:
-        return clamp(72, 98, -rng.randint(0, 1))
-    if age == 29:
-        return clamp(72, 96, -rng.randint(0, 2))
-    if age == 30:
-        return clamp(71, 94, -rng.randint(1, 2))
-    if age == 31:
-        return clamp(71, 93, -rng.randint(0, 1))
-    if age == 32:
-        return clamp(71, 92, -rng.randint(0, 1))
-    if age == 33:
-        return clamp(70, 91, -rng.randint(0, 1))
-    if age == 34:
-        return clamp(70, 90, -rng.randint(0, 1))
-    if age == 35:
-        return clamp(70, 89, -rng.randint(0, 1))
-    if age == 36:
-        return clamp(69, 88, -rng.randint(0, 1))
-    if age == 37:
-        return clamp(69, 88, -rng.randint(0, 1))
-    if age == 38:
-        return clamp(68, 88, -rng.randint(0, 1))
-    if age == 39:
-        return clamp(67, 87, -rng.randint(0, 1))
-    if age == 40:
-        return clamp(66, 87, -rng.randint(0, 1))
-    if age == 41:
-        return clamp(65, 87, -rng.randint(0, 1))
-    if age == 42:
-        return clamp(64, 86, -rng.randint(0, 1))
-    if age == 43:
-        return clamp(63, 86, -rng.randint(0, 1))
-    if age == 44:
-        return clamp(62, 86, -rng.randint(0, 1))
-    if age == 45:
-        return clamp(61, 86, -rng.randint(0, 1))
-    if age == 46:
-        return clamp(60, 86, -rng.randint(0, 1))
-    if age == 47:
-        return clamp(59, 86, -rng.randint(0, 1))
-    if age == 48:
-        return clamp(58, 86, -rng.randint(0, 1))
-    if age == 49:
-        return clamp(57, 86, -rng.randint(0, 1))
-    return 0
+# v0.4.2: DSUS() (the old age-banded skill updater from Rules.py)
+# is GONE, replaced by grow_rating() above — the table-driven
+# development from Attachment #2. The old bands disagreed with the
+# table (e.g. they capped a 19-year-old at 85 while Antonelli sits
+# at 87); the new function clamps to the table instead, so no
+# rating in the attachments ever changes, and growth follows the
+# table's year-over-year deltas. Retirement logic below is unchanged.
 
 
 def retirement_chance(age, championships, team_pos, driver_points, team_points,

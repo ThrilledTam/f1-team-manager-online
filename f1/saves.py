@@ -14,15 +14,18 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 6  # v0.4: standings sort (best finish + earliest round),
-# F2 standings, constructors' wins, Test & Reserve drivers, winter
-# break 3-round offer flow, regulation adaptation/research model.
-# v0.3: champion history pre-filled 2010–2025 + appended per in-game
-# season (age / trophies / winning team); no upfront signing cost,
-# break-cost formula, contract choice. v0.2.1: per-team points
-# (team_points) + last team (last_team_id) on drivers. v0.2:
-# prev_driver_order (standings carry-over). v0.1: results stages,
-# circuit per round, full GP history.
+SAVE_VERSION = 7  # v0.4.2: Driver Academy (academy_team_id on
+# drivers, ai_academy_signed on teams), exponential T&R / academy
+# fines instead of a hard T&R cap, table-driven rating growth
+# (grow_rating replaces DSUS). v0.4: standings sort (best finish +
+# earliest round), F2 standings, constructors' wins, Test & Reserve
+# drivers, winter break 3-round offer flow, regulation
+# adaptation/research model. v0.3: champion history pre-filled
+# 2010–2025 + appended per in-game season (age / trophies / winning
+# team); no upfront signing cost, break-cost formula, contract
+# choice. v0.2.1: per-team points (team_points) + last team
+# (last_team_id) on drivers. v0.2: prev_driver_order (standings
+# carry-over). v0.1: results stages, circuit per round, full GP history.
 
 
 def _reconstruct_last_season(doc):
@@ -185,6 +188,15 @@ def migrate_save(doc):
         d.setdefault("season_qual_h2h", 0)
         d.setdefault("finish_sum", 0)
         d.setdefault("finish_count", 0)
+    # v0.4.2: Driver Academy affiliation on every driver (None =
+    # no academy) and the bot academy quota on every team. Existing
+    # saves migrate with empty academies and their current T&R state
+    # untouched — the 2026-start T&R / academy assignments only
+    # apply to NEW careers (build_new_career).
+    for d in doc.get("drivers") or []:
+        d.setdefault("academy_team_id", None)
+    for team in doc.get("teams") or []:
+        team.setdefault("ai_academy_signed", False)
     for team in doc.get("teams") or []:
         team.setdefault("reg_total", 0.0)
         team.setdefault("reg_adapted", 0.0)

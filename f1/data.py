@@ -10,6 +10,60 @@ GRID_2026 = {'teams': [{'name': 'McLaren', 'colour': '#EF9B33', 'money': 10.0, '
 
 
 # ---------------------------------------------------------------------------
+# v0.4.2 — 2026 Test & Reserve drivers and Driver Academy assignments,
+# from Attachment #1 (Project-Formula-2026-Dataset.csv). The CSV's
+# "status" column is the guide: "Test & Reserve" drivers belong to the
+# team in current_team; "F2" drivers WITH a current_team are that
+# team's academy juniors. Names use the game's spelling ("Guanyu
+# Zhou" — the CSV lists him as "Zhou Guanyu"); team names are the
+# game's ("Red Bull", "Haas" — the CSV says "Red Bull Racing",
+# "Haas F1 Team"). Age / salary (con_salary, $M/yr) / rating are the
+# CSV values — a few differ from the GRID_2026 copies above (Westcott
+# $1.4M not $0.5M, Kirakawa 84 not 83, Pourchaire 25 not 22, and the
+# F2 academy salaries, which GRID_2026 lists as $0.5M for everyone);
+# build_new_career() applies these overrides when it re-homes them.
+# Reputation is NOT overridden — it stays as in GRID_2026.
+# ---------------------------------------------------------------------------
+TR_2026 = [
+    {"name": "Yuki Tsunoda", "team": "Red Bull", "age": 26, "salary": 2.7, "perf": 86},
+    {"name": "Jack Doohan", "team": "Haas", "age": 23, "salary": 1.5, "perf": 82},
+    {"name": "Guanyu Zhou", "team": "Cadillac", "age": 26, "salary": 2.6, "perf": 84},
+    {"name": "Nyck de Vries", "team": "McLaren", "age": 31, "salary": 1.5, "perf": 79},
+    {"name": "Antonio Giovinazzi", "team": "Ferrari", "age": 32, "salary": 2.5, "perf": 82},
+    {"name": "Stoffel Vandoorne", "team": "Aston Martin", "age": 34, "salary": 2.3, "perf": 83},
+    {"name": "Pato O'Ward", "team": "McLaren", "age": 26, "salary": 2.5, "perf": 84},
+    {"name": "Mathilda Paatz", "team": "Aston Martin", "age": 17, "salary": 0.5, "perf": 70},
+    {"name": "Ryō Kirakawa", "team": "Haas", "age": 31, "salary": 1.8, "perf": 84},
+    {"name": "Théo Pourchaire", "team": "Mercedes", "age": 25, "salary": 2.2, "perf": 82},
+    {"name": "Robert Shwartzman", "team": "Audi", "age": 25, "salary": 2.2, "perf": 84},
+    {"name": "Arthur Leclerc", "team": "Ferrari", "age": 25, "salary": 2.4, "perf": 84},
+    {"name": "Paul Aron", "team": "Alpine", "age": 22, "salary": 1.9, "perf": 84},
+    {"name": "Frederik Vesti", "team": "Mercedes", "age": 24, "salary": 2.2, "perf": 84},
+    {"name": "Ayumu Iwasa", "team": "Red Bull", "age": 23, "salary": 2.1, "perf": 82},
+    {"name": "Payton Westcott", "team": "Mercedes", "age": 17, "salary": 1.4, "perf": 70},
+    {"name": "Doriane Pin", "team": "Mercedes", "age": 22, "salary": 1.7, "perf": 80},
+    {"name": "Leonardo Fornaroli", "team": "McLaren", "age": 21, "salary": 2.0, "perf": 80},
+    {"name": "Victor Martins", "team": "Williams", "age": 24, "salary": 1.9, "perf": 84},
+    {"name": "Jak Crawford", "team": "Aston Martin", "age": 21, "salary": 1.9, "perf": 81},
+    {"name": "Richard Verschoor", "team": "McLaren", "age": 25, "salary": 2.2, "perf": 84},
+    {"name": "Luke Browning", "team": "Williams", "age": 24, "salary": 2.2, "perf": 85},
+]
+
+ACADEMY_2026 = [
+    {"name": "Dino Beganovic", "team": "Ferrari", "age": 22, "salary": 1.5, "perf": 81},
+    {"name": "Rafael Câmara", "team": "Ferrari", "age": 20, "salary": 1.0, "perf": 83},
+    {"name": "Alex Dunne", "team": "Alpine", "age": 20, "salary": 1.5, "perf": 80},
+    {"name": "Gabriele Minì", "team": "Alpine", "age": 21, "salary": 1.3, "perf": 79},
+    {"name": "Kush Maini", "team": "Alpine", "age": 25, "salary": 1.3, "perf": 80},
+    {"name": "Joshua Dürksen", "team": "Mercedes", "age": 22, "salary": 1.3, "perf": 79},
+    {"name": "Ritomo Miyata", "team": "Haas", "age": 26, "salary": 1.3, "perf": 79},
+    {"name": "Colton Herta", "team": "Cadillac", "age": 26, "salary": 2.4, "perf": 80},
+    {"name": "Nikola Tsolov", "team": "Red Bull", "age": 19, "salary": 1.0, "perf": 80},
+    {"name": "Mari Boya", "team": "Aston Martin", "age": 21, "salary": 1.0, "perf": 77},
+]
+
+
+# ---------------------------------------------------------------------------
 # 2026 circuit calendar (v0.1). 12 rounds = 12 Grands Prix. Real circuits
 # with their real lap counts; the same calendar repeats every season.
 # ---------------------------------------------------------------------------
