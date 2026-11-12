@@ -342,7 +342,7 @@ def salary_per_round(career, team):
 # Team selection / custom teams
 # ---------------------------------------------------------------------------
 
-def choose_team(career, team_id, player_id):
+def choose_team(career, team_id, player_id, allow_takeover=False):
     """A human takes over an AI team (new career pick, or mid-career takeover).
 
     v0.4.1: taking over also clears any auto-generated winter-break
@@ -350,11 +350,16 @@ def choose_team(career, team_id, player_id):
     the team was AI (e.g. when a career was loaded and every team
     was still flagged AI), and the human must choose their own
     offers. The team is also taken out of wb_ready, so a bot's
-    readiness never counts as the human's."""
+    readiness never counts as the human's.
+    v0.6.2: allow_takeover lets the server reassign a team whose
+    human owner disconnected and is past the takeover grace period
+    (the server validates the grace period first — game code never
+    sees the room's player state). Without it, an owned team is
+    never reassigned."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
-    if team["owner_player_id"] is not None:
+    if team["owner_player_id"] is not None and not allow_takeover:
         return False, "That team is already taken."
     team["is_ai"] = False
     team["owner_player_id"] = player_id
