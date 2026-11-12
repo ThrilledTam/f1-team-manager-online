@@ -36,6 +36,17 @@ from .rules import (
 CUSTOM_TEAM_MONEY = 6.0
 CUSTOM_TEAM_REL = 0.90  # v0 fix: Main.py passed rel=6 (a bug) for custom teams
 
+# v0.6: team relationships (supplier / customer / junior).
+RELATION_BREAK_FEE_PER_YEAR = 1.0  # $M per remaining contract year to
+# break a relation early (free once the contract has expired, 0 years).
+RELATION_START_YEARS = 2  # contract years for the 2026 starting relations
+MAX_WANTED = 3  # WANTED marks a parent may have on its junior team
+BOT_JUNIOR_RESEARCH_CAP = 15.0  # $M/season — the cap a bot parent sets
+BOT_POOR_MONEY = 5.0  # below this a bot team counts as "poor" (it wants
+# a supplier, and suppliers want to help it)
+BOT_RICH_MONEY = 20.0  # above this a bot supplier donates to a poor team
+BOT_PERF_WINDOW = 60.0  # "close" in performance for junior / renewal rules
+
 
 def driver_initials(name):
     """Top-3 initials for the race history grid, like Matthew's PyCharm
@@ -1182,13 +1193,18 @@ def ai_act(career, team, rng=None):
         # T&R driver adds +25% to the research POOL gained, for the
         # same money spent (the pool is what the investment buys).
         mult = research_multiplier(career, team)
-        perf_money = round_funds * rng.random() * 0.50
+        # v0.5.3: bots put most of their research into Performance
+        # (50-75%, was 0-50%) — the old split starved the perf pool,
+        # so the car barely developed. Reliability gets the rest.
+        perf_money = round_funds * (0.50 + rng.random() * 0.25)
         reli_money = round_funds - perf_money
         team["perf_res"] += perf_money * mult
         team["reli_res"] += reli_money * mult
         team["money"] -= round_funds
-        if (team["perf_res"] + team["reli_res"]) > (rng.random() + 2.0) \
-                and rng.random() > 0.5:
+        # v0.5.3: bots develop whenever the banked research is worth
+        # converting (combined pool > 2.0) — the old 50% coin flip
+        # meant they often sat on a good pool and never developed.
+        if (team["perf_res"] + team["reli_res"]) > 2.0:
             # v0.5: bots develop with the same driver factor as humans
             # (their main + T&R drivers contribute) — bot parity.
             team["perf"] += (add_perf_gain(team["perf"], team["perf_res"])
