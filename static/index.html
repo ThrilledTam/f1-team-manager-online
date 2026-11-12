@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.6.2</title>
+<title>F1 Team Manager Online — v0.6.3</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -127,7 +127,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.2 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.3 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -1189,7 +1189,12 @@ function renderMyTeam(){
   if(!myTeam){ $("my-team").innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby, or ask the host to restart the career setup.</p>"; return; }
   const t = myTeam;
   const drivers = (t.drivers || []).map(d => d ? `${driverNameHtml(d.name, t.colour, d.cha, false)} (${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr)` : "[empty seat]").join("<br>");
-  const perfLine = room.chart_on && ("perf" in t) ? ` · Perf ${Number(t.perf).toFixed(1)} · Reliability ${(t.rel * 100).toFixed(1)}%` : "";
+  const perfLine = room.chart_on && ("perf" in t) ? ` · Perf ${Number(t.perf).toFixed(1)}` : "";
+  // v0.6.3: your own car's reliability is ALWAYS shown (it drives
+  // your DNF chance) — perf and driver ratings stay hidden, this
+  // adds only reliability. One decimal, with the DNF chance next
+  // to it so the number is immediately meaningful.
+  const reliabilityLine = ("rel" in t) ? ` · Reliability ${(t.rel * 100).toFixed(1)}% (${((1 - t.rel) * 100).toFixed(1)}% DNF per car)` : "";
   // v0.5: the dashboard shows ONLY the main 2 drivers. Test &
   // Reserve and academy juniors are viewed in the Drivers tab
   // (renderDriversTab) — all actions (Swap / Promote / Drop /
@@ -1205,7 +1210,7 @@ function renderMyTeam(){
     : "";
   const trs = t.tr_drivers || [];
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
-    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}<br>${drivers}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
+    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}${reliabilityLine}<br>${drivers}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
   // v0.5: driver development factor (main 2 + T&R) — the same
   // helpers do_develop uses, so the number shown is the number
   // Develop Parts applies. Per-driver breakdown, compact.
