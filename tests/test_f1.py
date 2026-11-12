@@ -305,7 +305,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 7  # v0.4.2 save format
+        assert loaded["version"] == 8  # v0.5.0 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -1733,7 +1733,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 7
+        assert loaded["version"] == 8
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -1841,15 +1841,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v045():
-    """The live version string is v0.4.5 everywhere it is shown."""
+def test_health_reports_v050():
+    """The live version string is v0.5.0 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.4.5"
+    assert client.get("/api/health").json()["version"] == "v0.5.0"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.4.5</title>" in html
-    assert "Online · v0.4.5 beta" in html
+    assert "<title>F1 Team Manager Online — v0.5.0</title>" in html
+    assert "Online · v0.5.0 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2449,7 +2449,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 7
+    assert SAVE_VERSION == 8
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -3474,6 +3474,221 @@ def test_drivers_tab_and_history_grid_playwright():
             assert fits["scroll"] <= fits["client"] + 1, fits
             assert fits["gridRight"] <= fits["tabRight"] + 1, fits
             assert fits["r12Right"] <= fits["scRight"] + 1, fits
+            browser.close()
+    finally:
+        proc.terminate()
+
+# ---------------------------------------------------------------------------
+# v0.5 — dashboard shows main 2 only, driver development contribution,
+# F2 standings coloured by academy team
+# ---------------------------------------------------------------------------
+
+def test_dev_contrib_orderings():
+    """v0.5: the development contribution orders drivers the way
+    Matthew stated — Hamilton > Leclerc, Norris > Piastri,
+    Gasly > Aron — from the real start-of-2026 career totals."""
+    career = game.build_new_career("Test", "Matthew")
+    by_name = {d["name"]: d for d in career["drivers"]}
+    ham = game.driver_dev_contrib(by_name["Lewis Hamilton"])
+    lec = game.driver_dev_contrib(by_name["Charles Leclerc"])
+    nor = game.driver_dev_contrib(by_name["Lando Norris"])
+    pia = game.driver_dev_contrib(by_name["Oscar Piastri"])
+    gas = game.driver_dev_contrib(by_name["Pierre Gasly"])
+    aro = game.driver_dev_contrib(by_name["Paul Aron"])
+    assert ham > lec, (ham, lec)
+    assert nor > pia, (nor, pia)
+    assert gas > aro, (gas, aro)
+    # The range is [0.02, 0.08]: a driver with no starts, no wins
+    # and the lowest rating contributes exactly 0.02; even the most
+    # decorated driver stays under 0.08.
+    assert game.driver_dev_contrib(
+        {"gp_starts": 0, "gp_wins": 0, "perf": 70}) == pytest.approx(0.02)
+    assert game.driver_dev_contrib(
+        {"gp_starts": 500, "gp_wins": 105, "perf": 100}) < 0.08
+    assert 0.02 <= aro < 0.08
+    assert 0.02 <= ham < 0.08
+
+
+def test_do_develop_applies_driver_factor():
+    """v0.5: Develop multiplies the perf gain by the team's driver
+    factor (1 + main 2 + T&R contributions); the reliability gain
+    is unchanged; a weak lineup gains less than a strong one."""
+    from f1.rules import add_perf_gain, add_rel_gain
+    career = two_human_career()
+    team = career["teams"][0]  # McLaren (2025 champions open first)
+    team["money"] = 100.0
+    team["perf"] = 180.0
+    team["rel"] = 0.70
+    team["perf_res"] = 30.0
+    team["reli_res"] = 20.0
+    factor = game.team_dev_factor(career, team)
+    assert factor > 1.0
+    ok, msg = game.do_develop(career, team["id"])
+    assert ok, msg
+    assert team["perf"] - 180.0 == pytest.approx(
+        add_perf_gain(180.0, 30.0) * factor)
+    assert team["rel"] - 0.70 == pytest.approx(add_rel_gain(20.0))
+    assert f"×{factor:.2f}" in msg
+    # A weak lineup (rookies: no starts, no wins, rating 70) gains less.
+    for d in game.team_drivers(career, team) + game.team_tr_drivers(career, team):
+        d["gp_starts"] = 0
+        d["gp_wins"] = 0
+        d["perf"] = 70
+    weak_factor = game.team_dev_factor(career, team)
+    assert weak_factor < factor
+    team["money"] = 100.0
+    team["perf"] = 180.0
+    team["rel"] = 0.70
+    team["perf_res"] = 30.0
+    team["reli_res"] = 20.0
+    ok, _ = game.do_develop(career, team["id"])
+    assert ok
+    assert team["perf"] - 180.0 == pytest.approx(
+        add_perf_gain(180.0, 30.0) * weak_factor)
+
+
+def test_gp_starts_wins_increment_and_survive():
+    """v0.5: every F1 starter's career starts +1 per race, the
+    winner's career wins +1; the totals survive a team change and a
+    season rollover (they are career totals, never reset — while
+    points and the season tally f1_races do reset)."""
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    before = {d["id"]: (d["gp_starts"], d["gp_wins"])
+              for d in career["drivers"]}
+    play_full_round(career, connected, seeded(6))
+    # Every F1 driver started once; nobody else did.
+    for d in career["drivers"]:
+        s0, _ = before[d["id"]]
+        if d["status"] == "f1":
+            assert d["gp_starts"] == s0 + 1, d["name"]
+        else:
+            assert d["gp_starts"] == s0, d["name"]
+    winner = next(d for d in career["drivers"]
+                  if d["status"] == "f1" and d.get("race_pos") == 1)
+    assert winner["gp_wins"] == before[winner["id"]][1] + 1
+    # Team change: sign a free agent with career totals into a seat —
+    # the totals follow the driver unchanged, and the outgoing
+    # driver's totals are unchanged too.
+    ric = next(d for d in career["drivers"]
+               if d["name"] == "Daniel Ricciardo")
+    assert (ric["gp_starts"], ric["gp_wins"]) == (257, 8)
+    cadillac = next(t for t in career["teams"] if t["name"] == "Cadillac")
+    cadillac["money"] = 100.0
+    outgoing = game.team_drivers(career, cadillac)[0]
+    out_before = (outgoing["gp_starts"], outgoing["gp_wins"])
+    ok, msg = game.sign_driver(career, cadillac["id"], ric["id"], 1)
+    assert ok, msg
+    assert (ric["gp_starts"], ric["gp_wins"]) == (257, 8)
+    assert (outgoing["gp_starts"], outgoing["gp_wins"]) == out_before
+    # Season rollover: play the remaining 11 rounds. Verstappen
+    # (Red Bull, an AI team) scores points every round, so no bot
+    # swap touches him — he races all 12 rounds.
+    for _ in range(11):
+        play_full_round(career, connected, seeded(6))
+    assert career["phase"] == "winter_break"
+    ver = next(d for d in career["drivers"]
+               if d["name"] == "Max Verstappen")
+    assert ver["gp_starts"] == 210 + 12, ver["gp_starts"]
+    assert ver["gp_wins"] >= 65
+    # The rollover DID run (season tallies reset) — and the career
+    # totals survived it.
+    for d in career["drivers"]:
+        if d["status"] == "f1":
+            assert d["points"] == 0
+            assert d["f1_races"] == 0
+        assert d["gp_starts"] >= before[d["id"]][0]
+        assert d["gp_wins"] >= before[d["id"]][1]
+
+
+def test_migrate_backfills_gp_totals():
+    """v0.5: a v7 save has no gp_starts / gp_wins — migration
+    backfills them from the start-of-2026 table by name; a driver
+    not in the table (a junior, or a driver with no F1 starts)
+    gets (0, 0)."""
+    career = game.build_new_career("Test", "Matthew")
+    doc = json.loads(json.dumps(career))
+    for d in doc["drivers"]:
+        d.pop("gp_starts", None)
+        d.pop("gp_wins", None)
+    migrate_save(doc)
+    by_name = {d["name"]: d for d in doc["drivers"]}
+    assert (by_name["Lewis Hamilton"]["gp_starts"],
+            by_name["Lewis Hamilton"]["gp_wins"]) == (360, 105)
+    assert (by_name["Lando Norris"]["gp_starts"],
+            by_name["Lando Norris"]["gp_wins"]) == (130, 7)
+    assert (by_name["Paul Aron"]["gp_starts"],
+            by_name["Paul Aron"]["gp_wins"]) == (0, 0)
+    junior = next(d for d in doc["drivers"] if d["status"] == "f2")
+    assert (junior["gp_starts"], junior["gp_wins"]) == (0, 0)
+
+
+def test_dashboard_shows_only_main_drivers():
+    """v0.5: the dashboard My Team card shows ONLY the main 2
+    drivers; T&R and academy drivers are viewed in the Drivers tab.
+    End to end in a real browser: start a career and read the
+    dashboard card."""
+    pytest.importorskip("playwright")
+    import re
+    import subprocess
+    import time
+    import urllib.request
+    port = 8799
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app",
+         "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(60):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health")
+                break
+            except Exception:
+                time.sleep(0.5)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            p1 = browser.new_page()
+            p1.goto(f"http://127.0.0.1:{port}/")
+            p1.fill("#home-nick", "Max")
+            p1.click("#btn-create")
+            p1.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            p1.click("#btn-new-career")
+            p1.wait_for_selector("[data-team]", timeout=15000)
+            p1.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            code = re.search(r"\b[A-Z0-9]{6}\b",
+                             p1.inner_text("#screen-lobby")).group(0)
+            p2 = browser.new_page()
+            p2.goto(f"http://127.0.0.1:{port}/?code={code}")
+            p2.fill("#home-nick", "Cousin")
+            p2.click("#btn-join")
+            p2.wait_for_selector("[data-team]", timeout=15000)
+            p2.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('Ferrari'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.click("#btn-start-career")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            my_team = p1.inner_text("#my-team")
+            assert "NORRIS" in my_team and "PIASTRI" in my_team, my_team
+            # The one-line pointer to the Drivers tab is the only
+            # mention of T&R/academy on the dashboard now.
+            assert "Test & Reserve and academy juniors are in the Drivers tab." in my_team, my_team
+            assert "Swap" not in my_team, my_team
+            assert "Promote" not in my_team, my_team
+            assert "Release" not in my_team, my_team
+            # No T&R surname leaks in: McLaren's T&R drivers are
+            # de Vries, O'Ward, Fornaroli, Verschoor.
+            upper = my_team.upper()
+            for surname in ("DE VRIES", "O'WARD", "FORNAROLI", "VERSCHOOR"):
+                assert surname not in upper, my_team
             browser.close()
     finally:
         proc.terminate()
