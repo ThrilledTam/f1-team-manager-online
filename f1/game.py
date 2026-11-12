@@ -3069,10 +3069,12 @@ def finances_view(career, team):
 
 
 def public_state(career, chart_on, viewer_team_id=None):
-    """The state sent to a client. When the perf chart is OFF, ALL perf
-    numbers are hidden from humans — team perf, reliability, driver perf —
-    and other teams' research pools are hidden too. Your own team's research
-    pools stay visible (you need them to play), but never its perf.
+    """The state sent to a client. When the perf chart is OFF, perf
+    numbers are hidden from humans — team perf and driver perf — and
+    other teams' reliability and research pools are hidden too. Your
+    own team's reliability STAYS visible (v0.6.3: it drives your DNF
+    chance, and the dashboard shows it), and your own research pools
+    stay visible (you need them to play), but never your perf.
     When the chart is ON, everything is shown."""
     state = copy.deepcopy(career)
     # v0.1: absolute lap/race times NEVER leave the server — results carry
@@ -3150,8 +3152,11 @@ def public_state(career, chart_on, viewer_team_id=None):
         return state
     for team in state["teams"]:
         team.pop("perf", None)
-        team.pop("rel", None)
+        # v0.6.3: your own car's reliability IS visible (it drives your
+        # DNF chance, and the dashboard shows it) — other teams'
+        # reliability stays hidden, and perf stays hidden for everyone.
         if team["id"] != viewer_team_id:
+            team.pop("rel", None)
             team.pop("perf_res", None)
             team.pop("reli_res", None)
             team.pop("reg_research", None)
