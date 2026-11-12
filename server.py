@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.4.2 (beta)
+F1 Team Manager Online — v0.4.3 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -65,6 +65,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
                                                      # may poach another
                                                      # team's driver
     sign_tr      {driver_id, contract_years}  # sign a T&R driver (1-4 yrs)
+    release_driver {driver_id}            # v0.4.3: release a main or T&R
+                                          # driver — break fee = main-driver
+                                          # formula, shown upfront, round only
     add_academy  {driver_id}                  # add a free/F2 driver (25 or
                                               # under) to your Driver Academy
                                               # (1/3 salary, round + winter)
@@ -125,7 +128,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.4.2", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.4.3", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -253,6 +256,10 @@ def my_team_public(room, player_id):
             d.pop("rep", None)
             d.pop("qual_time", None)
             d.pop("race_time", None)
+            # v0.4.3: the contract-break fee for this driver, so the
+            # Drivers tab can show the Drop cost upfront (same
+            # formula as a main-driver replacement).
+            d["break_fee"] = game.break_fee_for_driver(career, d)
             out["drivers"].append(d)
     # v0.4: your Test & Reserve drivers, with the same stripping.
     out["tr_drivers"] = []
@@ -263,6 +270,9 @@ def my_team_public(room, player_id):
         d.pop("rep", None)
         d.pop("qual_time", None)
         d.pop("race_time", None)
+        # v0.4.3: same break fee — releasing a T&R driver costs
+        # exactly what breaking a main driver's contract costs.
+        d["break_fee"] = game.break_fee_for_driver(career, d)
         out["tr_drivers"].append(d)
     # v0.4.2: your Driver Academy juniors, with the same stripping.
     out["academy_drivers"] = []
@@ -362,7 +372,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.2"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.3"}
 
 
 @app.get("/api/saves")
@@ -743,7 +753,8 @@ async def ws_endpoint(ws: WebSocket):
 
             elif mtype in ("research", "develop", "tuning", "reg_research",
                            "reg_adapt", "sign_driver", "sign_tr",
-                           "swap_driver", "promote_tr", "advance",
+                           "swap_driver", "promote_tr", "release_driver",
+                           "advance",
                            "winter_offers", "winter_next"):
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
@@ -780,6 +791,11 @@ async def ws_endpoint(ws: WebSocket):
                         ok, why = game.sign_tr_driver(career, team["id"],
                                                       msg.get("driver_id"),
                                                       msg.get("contract_years", 2))
+                    elif mtype == "release_driver":
+                        # v0.4.3: release (drop) a main or T&R driver —
+                        # break fee = main-driver formula, round only.
+                        ok, why = game.release_driver(career, team["id"],
+                                                      msg.get("driver_id"))
                     elif mtype == "swap_driver":
                         # v0.4: swap a main driver with a T&R driver.
                         ok, why = game.swap_main_tr(career, team["id"],

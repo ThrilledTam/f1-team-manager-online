@@ -1,7 +1,7 @@
-# F1 Team Manager Online — v0.4.2 (beta)
+# F1 Team Manager Online — v0.4.3 (beta)
 
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator, built
-for playing together at the same time (not pass-and-play). v0.4.2 is a beta:
+for playing together at the same time (not pass-and-play). v0.4.3 is a beta:
 expect lots of tweaking before a playable official game.
 
 **Source of truth:** `Main.py` in the original `Project_Manager` repo is the
@@ -297,6 +297,19 @@ showing its title; clicking the chip restores it exactly as it was,
 and the dashboard underneath stays usable while a pop-up is minimized.
 Escape closes the topmost open pop-up, and clicking the backdrop
 outside a modal pop-up dismisses it too.
+
+## v0.4.3 — min-delta growth, T&R release, Drivers tab, history-grid width, team-coloured T&R/academy surnames
+
+Matthew's follow-up round (2026-11-11):
+
+- **Rating growth low-end is now the MIN-column delta (Matthew's choice):** the growth range is low = min(age+1) − min(age), high = max(age+1) − max(age). Age 20→21 stays [2,3] (Câmara grows 2–3), but 26→27 is now [0,1] (it was [0,0] under the v0.4.2 average delta), 18→19 is [2,5], and 40→41 is [−1,0]. The Antonelli clamp is unchanged (19, rating 87, never nerfed, at most +1 at 20). Logic only — no ratings changed.
+- **T&R drivers can be released — same cost as breaking a main driver's contract:** the new Drivers tab (and the My Team card's T&R rows) offer a Drop button with the exact break fee shown upfront: rounds_remaining × salary/12 + $2.0M. On confirm the fee is charged, the driver becomes a free agent and keeps their championship points, and the points they scored for the team stay with the team (banked) — the same real-F1 rules as a main-driver replacement. A released main driver's seat becomes empty. Bot parity: a bot team can also release a T&R driver who raced earlier in the season and meets the same bad-performance rule (0 points, average finish 18th or worse), when it can afford the break fee. Releasing only works between races (round phase) — in the winter break, lineups change through offers.
+- **Dedicated Drivers tab:** the dashboard now has a Drivers tab with the whole roster in one place — the main 2 drivers, all T&R drivers, and all academy juniors, each with age, rating, salary, and contract years left — and the lineup decisions: Swap / Promote for T&R drivers, Drop (break fee) for main and T&R drivers, Release (free) for academy juniors. The main 2 drivers still sit at the top of the dashboard (My Team card) exactly as before; the tab is additional, not a replacement.
+- **Race-history grid fits the dashboard:** the History & Rumours grid (seasons × R1..R12) is now as wide as the dashboard — fixed table layout with narrow cells — so all 12 round columns are visible without horizontal scrolling. (The scroll wrapper stays as a fallback for very narrow phones.)
+- **T&R and academy drivers get team-coloured surnames:** wherever a T&R or academy driver's name is shown — My Team, the Drivers tab, and Driver Market rows for affiliated drivers — their surname is now bold + UPPERCASE in their team's colour, exactly like main drivers. Free agents stay uncoloured (last team shown in team colours), and standings rows keep the coloured '|' bar.
+- **Not changed (Matthew's call):** the saves list still shows a stale "No saves yet" right after an import until you leave the room and come back — the import banner's "Create room with this save" button is the way in, and Matthew is not concerned about the list. Left as is.
+- **Save format stays v7** (no new fields — the release and the Drivers tab need none; the growth change is logic-only).
+- Tests: 91 (was 85).
 
 ## v0.4.2 — import-flow fix, T&R at the 2026 start, Driver Academy, exponential fines, table-driven rating growth
 
