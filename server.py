@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.5.3 (beta)
+F1 Team Manager Online — v0.6.0 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -128,7 +128,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.5.3", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.6.0", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -382,7 +382,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.5.3"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.0"}
 
 
 @app.get("/api/saves")
@@ -754,6 +754,54 @@ async def ws_endpoint(ws: WebSocket):
                     else:
                         ok, why = game.release_academy_driver(
                             career, team["id"], msg.get("driver_id"))
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": mtype,
+                                            "ok": True, "message": why})
+                    await broadcast(room)
+
+            elif mtype in ("donate", "propose_relation", "respond_relation",
+                           "break_relation", "set_wanted", "remove_wanted",
+                           "set_research_cap"):
+                # v0.6: team relationships. Donations and WANTED marks
+                # work any time (round or winter break); relation
+                # proposals / answers / breaks and research caps are
+                # winter-break only — the game functions enforce that
+                # and return a clear message otherwise.
+                if not room["started"] or not career:
+                    await send_error(ws, "The career has not started yet.")
+                elif not team:
+                    await send_error(ws, "Pick a team first (take over an AI team).")
+                elif career.get("phase") not in ("round", "winter_break"):
+                    await send_error(ws, "You cannot do that right now.")
+                else:
+                    if mtype == "donate":
+                        ok, why = game.donate(career, team["id"],
+                                              msg.get("recipient_team_id"),
+                                              msg.get("amount"))
+                    elif mtype == "propose_relation":
+                        ok, why = game.propose_relation(
+                            career, team["id"], msg.get("target_team_id"),
+                            msg.get("kind"), msg.get("supplier_team_id"),
+                            msg.get("years", 2))
+                    elif mtype == "respond_relation":
+                        ok, why = game.respond_relation(
+                            career, team["id"], msg.get("proposal_id"),
+                            msg.get("accept"))
+                    elif mtype == "break_relation":
+                        ok, why = game.break_relation(
+                            career, team["id"], msg.get("other_team_id"))
+                    elif mtype == "set_wanted":
+                        ok, why = game.set_wanted(career, team["id"],
+                                                  msg.get("driver_id"),
+                                                  msg.get("reward"))
+                    elif mtype == "remove_wanted":
+                        ok, why = game.remove_wanted(career, team["id"],
+                                                     msg.get("driver_id"))
+                    elif mtype == "set_research_cap":
+                        ok, why = game.set_research_cap(career, team["id"],
+                                                        msg.get("cap"))
                     if not ok:
                         await send_error(ws, why)
                     else:
