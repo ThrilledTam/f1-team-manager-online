@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.4.5 (beta)
+F1 Team Manager Online — v0.5.0 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -128,7 +128,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.4.5", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.5.0", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -260,6 +260,9 @@ def my_team_public(room, player_id):
             # Drivers tab can show the Drop cost upfront (same
             # formula as a main-driver replacement).
             d["break_fee"] = game.break_fee_for_driver(career, d)
+            # v0.5: development contribution (same helper do_develop
+            # uses) — the Drivers tab shows it per driver.
+            d["dev_contrib"] = game.driver_dev_contrib(d)
             out["drivers"].append(d)
     # v0.4: your Test & Reserve drivers, with the same stripping.
     out["tr_drivers"] = []
@@ -273,6 +276,9 @@ def my_team_public(room, player_id):
         # v0.4.3: same break fee — releasing a T&R driver costs
         # exactly what breaking a main driver's contract costs.
         d["break_fee"] = game.break_fee_for_driver(career, d)
+        # v0.5: development contribution (same helper do_develop
+        # uses) — the Drivers tab shows it per driver.
+        d["dev_contrib"] = game.driver_dev_contrib(d)
         out["tr_drivers"].append(d)
     # v0.4.2: your Driver Academy juniors, with the same stripping.
     out["academy_drivers"] = []
@@ -284,6 +290,10 @@ def my_team_public(room, player_id):
         d.pop("qual_time", None)
         d.pop("race_time", None)
         out["academy_drivers"].append(d)
+    # v0.5: the team's driver development factor (1 + main 2 + T&R
+    # contributions) — the Research tab shows it near Develop, and
+    # do_develop uses the same helper, so display and mechanic agree.
+    out["dev_factor"] = game.team_dev_factor(career, team)
     out["finances"] = game.finances_view(career, team)
     out["empty_seats"] = game.empty_seats(career, team)
     return out
@@ -372,7 +382,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.5"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.5.0"}
 
 
 @app.get("/api/saves")
