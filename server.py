@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.4.1 (beta)
+F1 Team Manager Online — v0.4.2 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -65,6 +65,10 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
                                                      # may poach another
                                                      # team's driver
     sign_tr      {driver_id, contract_years}  # sign a T&R driver (1-4 yrs)
+    add_academy  {driver_id}                  # add a free/F2 driver (25 or
+                                              # under) to your Driver Academy
+                                              # (1/3 salary, round + winter)
+    release_academy {driver_id}               # release an academy driver (free)
     swap_driver  {seat, tr_driver_id}  # swap a main driver with a T&R driver
     promote_tr   {tr_driver_id, seat}  # promote a T&R driver to an empty seat
     winter_offers {offers}             # winter break: [{driver_id, target,
@@ -121,7 +125,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.4.1", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.4.2", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -260,6 +264,16 @@ def my_team_public(room, player_id):
         d.pop("qual_time", None)
         d.pop("race_time", None)
         out["tr_drivers"].append(d)
+    # v0.4.2: your Driver Academy juniors, with the same stripping.
+    out["academy_drivers"] = []
+    for d in game.team_academy_drivers(career, team):
+        d = dict(d)
+        if not room["chart_on"]:
+            d.pop("perf", None)
+        d.pop("rep", None)
+        d.pop("qual_time", None)
+        d.pop("race_time", None)
+        out["academy_drivers"].append(d)
     out["finances"] = game.finances_view(career, team)
     out["empty_seats"] = game.empty_seats(career, team)
     return out
@@ -348,7 +362,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.1"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.4.2"}
 
 
 @app.get("/api/saves")
@@ -699,6 +713,31 @@ async def ws_endpoint(ws: WebSocket):
                         await send_error(ws, why)
                     else:
                         await ws.send_json({"type": "action", "action": "host_skip",
+                                            "ok": True, "message": why})
+                    await broadcast(room)
+
+            elif mtype in ("add_academy", "release_academy"):
+                # v0.4.2: academy actions work between races AND during
+                # the winter break — adding a junior to the academy is
+                # not a signing, so the winter-break signing block
+                # does not apply to it.
+                if not room["started"] or not career:
+                    await send_error(ws, "The career has not started yet.")
+                elif not team:
+                    await send_error(ws, "Pick a team first (take over an AI team).")
+                elif career.get("phase") not in ("round", "winter_break"):
+                    await send_error(ws, "You cannot do that right now.")
+                else:
+                    if mtype == "add_academy":
+                        ok, why = game.add_academy_driver(
+                            career, team["id"], msg.get("driver_id"))
+                    else:
+                        ok, why = game.release_academy_driver(
+                            career, team["id"], msg.get("driver_id"))
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": mtype,
                                             "ok": True, "message": why})
                     await broadcast(room)
 
