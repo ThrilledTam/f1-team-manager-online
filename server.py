@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.6.1 (beta)
+F1 Team Manager Online — v0.6.2 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -128,11 +128,16 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.6.1", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.6.2", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
 EMPTY_HOLD_SECONDS = 120
+# v0.6.2: a disconnected human's team becomes takeable by another
+# player once they have been away this long. A quick reload (same
+# player_id auto-rejoin) is well inside the grace period, so a
+# reconnecting player is never beaten to their own team.
+TAKEOVER_GRACE_SECONDS = 60
 HEARTBEAT_TIMEOUT = 60
 
 PALETTE = [
@@ -174,6 +179,9 @@ def add_player(room, nickname, colour, player_id=None):
         "connected": True,
         "joined_at": time.time(),
         "last_seen": time.time(),
+        # v0.6.2: when the player last disconnected (None while
+        # connected). Drives the takeover grace period for their team.
+        "disconnected_at": None,
     }
     room["players"].append(player)
     if room["host_id"] is None:
@@ -199,6 +207,34 @@ def my_team_for(room, player_id):
                  if t.get("owner_player_id") == player_id), None)
 
 
+def team_takeable(room, team, now=None):
+    """Whether a player with no team may take this team (v0.6.2).
+
+    AI teams are always takeable. A team owned by a CONNECTED human
+    never is. A team owned by a disconnected human becomes takeable
+    once TAKEOVER_GRACE_SECONDS have passed since they left, so a
+    quick reload (same player_id auto-rejoin) is never beaten to
+    the team. Returns (ok, reason)."""
+    owner_id = team.get("owner_player_id")
+    if not owner_id:
+        return True, ""
+    owner = get_player(room, owner_id)
+    if owner is not None and owner.get("connected"):
+        return False, "That team is taken by a player who is still connected."
+    disc = owner.get("disconnected_at") if owner else None
+    if disc is None:
+        # No disconnect timestamp (owner record gone, or an older
+        # room): the owner is not here, so the team is not stranded.
+        return True, ""
+    now = time.time() if now is None else now
+    elapsed = now - disc
+    if elapsed >= TAKEOVER_GRACE_SECONDS:
+        return True, ""
+    left = int(TAKEOVER_GRACE_SECONDS - elapsed) + 1
+    return False, (f"That team's manager disconnected recently — "
+                   f"it becomes available in {left}s.")
+
+
 def room_public(room, viewer_player_id=None):
     """Room state for broadcast. The career is the public state (perf
     stripped when the chart is off); each player's own team details go in a
@@ -211,9 +247,13 @@ def room_public(room, viewer_player_id=None):
         # v0.1: the host override button is only ever sent to the host
         # client — the frontend shows it when this flag is true.
         "is_host": viewer_player_id == room["host_id"],
+        # v0.6.2: the takeover grace period, so the client picker can
+        # show "available in Xs" for a disconnected owner's team.
+        "takeover_grace_seconds": TAKEOVER_GRACE_SECONDS,
         "players": [
             {"player_id": p["player_id"], "nickname": p["nickname"],
              "colour": p["colour"], "connected": p["connected"],
+             "disconnected_at": p.get("disconnected_at"),
              "is_host": p["player_id"] == room["host_id"],
              "team_id": (my_team_for(room, p["player_id"]) or {}).get("id"),
              "team_name": (my_team_for(room, p["player_id"]) or {}).get("name")}
@@ -336,6 +376,9 @@ async def broadcast(room, exclude=None):
             dead.append(player)
     for p in dead:
         p["connected"] = False
+        # v0.6.2: a send failure is a disconnect too — start the
+        # takeover grace period for this player's team.
+        p["disconnected_at"] = time.time()
         p.pop("ws", None)
 
 
@@ -382,7 +425,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.1"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.2"}
 
 
 @app.get("/api/saves")
@@ -470,6 +513,10 @@ async def ws_endpoint(ws: WebSocket):
                     continue
                 player["connected"] = True
                 player["last_seen"] = time.time()
+                # v0.6.2: same-player auto-rejoin clears the disconnect
+                # timestamp — the player keeps their team, and the
+                # takeover grace period is cancelled.
+                player["disconnected_at"] = None
                 player["ws"] = ws
                 room["empty_since"] = None
                 promote_host_if_needed(room)
@@ -651,14 +698,30 @@ async def ws_endpoint(ws: WebSocket):
                 elif team:
                     await send_error(ws, "You already have a team in this career.")
                 else:
-                    ok, why = game.choose_team(career, msg.get("team_id"),
-                                               player["player_id"])
-                    if not ok:
-                        await send_error(ws, why)
+                    target = next((t for t in career["teams"]
+                                   if t["id"] == msg.get("team_id")), None)
+                    if not target:
+                        await send_error(ws, "No such team.")
                     else:
-                        await ws.send_json({"type": "action", "action": "choose_team",
-                                            "ok": True, "message": why})
-                        await broadcast(room)
+                        # v0.6.2: a team owned by a connected human is
+                        # never takeable; a disconnected owner's team
+                        # only becomes takeable after the grace period.
+                        # The server re-validates here — the team may
+                        # have been retaken by its owner reconnecting
+                        # after the picker rendered.
+                        ok, why = team_takeable(room, target)
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            ok, why = game.choose_team(
+                                career, msg.get("team_id"), player["player_id"],
+                                allow_takeover=bool(target.get("owner_player_id")))
+                            if not ok:
+                                await send_error(ws, why)
+                            else:
+                                await ws.send_json({"type": "action", "action": "choose_team",
+                                                    "ok": True, "message": why})
+                                await broadcast(room)
 
             elif mtype == "create_custom_team":
                 if not career:
@@ -903,6 +966,9 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         if player is not None:
             player["connected"] = False
+            # v0.6.2: record when the player left — their team becomes
+            # takeable by another player once the grace period passes.
+            player["disconnected_at"] = time.time()
             player.pop("ws", None)
         if room is not None:
             promote_host_if_needed(room)
