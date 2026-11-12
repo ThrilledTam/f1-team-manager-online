@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.5.2 (beta)
+F1 Team Manager Online — v0.5.3 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -128,7 +128,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.5.2", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.5.3", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -382,7 +382,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.5.2"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.5.3"}
 
 
 @app.get("/api/saves")
