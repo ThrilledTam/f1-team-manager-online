@@ -63,6 +63,16 @@ def make_driver(data, status="free", team_id=None):
         # driver signed into F1 starts at 0 (their F2 starts do not
         # carry over).
         "f1_races": 0,
+        # v0.5: CAREER F1 totals — Grand Prix starts and wins over the
+        # driver's whole career. These NEVER reset: not at season end,
+        # not on signing, not on a team change. They drive the
+        # development contribution (game.driver_dev_contrib): the more
+        # a driver has raced and won, the more they help develop the
+        # car. Start-of-2026 values come from data.CAREER_STATS (real
+        # totals at the end of 2025); juniors default to (0, 0). Only
+        # the F1 race loop increments them.
+        "gp_starts": 0,
+        "gp_wins": 0,
         "qual_time": None,
         "qual_pos": None,
         "race_time": None,

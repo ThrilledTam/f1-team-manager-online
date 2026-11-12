@@ -152,3 +152,54 @@ CHAMPION_HISTORY_2010_2025 = [
     {"year": 2024, "driver": "Max Verstappen", "age": 26, "team": "Red Bull", "points": 437, "trophies": 4, "winning_team": "McLaren"},
     {"year": 2025, "driver": "Lando Norris", "age": 25, "team": "McLaren", "points": 423, "trophies": 1, "winning_team": "McLaren"},
 ]
+# ---------------------------------------------------------------------------
+# v0.5 — career Grand Prix totals (start of 2026), for the driver
+# development contribution: the more F1 races a driver has started
+# and won, the more they help develop the car. Keyed by driver name;
+# (starts, wins). Figures are the real totals at the end of the
+# 2025 season (rounded where the exact count is a judgement call —
+# the orderings are the requirement, not the last start). Drivers
+# not listed here (F2 juniors, pool rookies, fictional drivers)
+# default to (0, 0). Applied in build_new_career() and in the
+# saves.py migration for old saves.
+# ---------------------------------------------------------------------------
+CAREER_STATS = {
+    # 2026 grid
+    "Lando Norris": (130, 7),
+    "Oscar Piastri": (50, 7),
+    "Kimi Antonelli": (24, 0),
+    "George Russell": (152, 4),
+    "Max Verstappen": (210, 65),
+    "Isack Hadjar": (24, 0),
+    "Lewis Hamilton": (360, 105),
+    "Charles Leclerc": (150, 8),
+    "Carlos Sainz": (233, 4),
+    "Alex Albon": (130, 0),
+    "Liam Lawson": (35, 0),
+    "Arvid Lindblad": (0, 0),
+    "Fernando Alonso": (410, 32),
+    "Lance Stroll": (193, 0),
+    "Oliver Bearman": (27, 0),
+    "Esteban Ocon": (181, 1),
+    "Nico Hülkenberg": (234, 0),
+    "Gabriel Bortoleto": (24, 0),
+    "Pierre Gasly": (150, 1),
+    "Franco Colapinto": (27, 0),
+    "Sergio Pérez": (246, 6),
+    "Valtteri Bottas": (217, 10),
+    # Notable ex-F1 free agents
+    "Yuki Tsunoda": (114, 0),
+    "Jack Doohan": (7, 0),
+    "Kevin Magnussen": (187, 0),
+    "Daniel Ricciardo": (257, 8),
+    "Logan Sargeant": (37, 0),
+    "Guanyu Zhou": (68, 0),
+    "Nyck de Vries": (11, 0),
+    "Sebastian Vettel": (299, 53),
+    "Mick Schumacher": (44, 0),
+    "Nicholas Latifi": (61, 0),
+    "Antonio Giovinazzi": (62, 0),
+    "Romain Grosjean": (181, 0),
+    "Stoffel Vandoorne": (42, 0),
+}
+

@@ -236,6 +236,10 @@ def apply_race_results(career, race_entries, points_dist):
         # who raced in F1 stays registered even with 0 points). The F2
         # loop has its own finish_count and must NOT touch this.
         d["f1_races"] = d.get("f1_races", 0) + 1
+        # v0.5: CAREER F1 totals — every starter's career starts +1;
+        # the winner's career wins +1 (below, with season_wins).
+        # These never reset. F2 races never touch them.
+        d["gp_starts"] = d.get("gp_starts", 0) + 1
         if pos <= len(points_dist):
             # Championship points follow the driver; team_points are
             # the points scored FOR this team (v0.2.1) — only these
@@ -244,6 +248,7 @@ def apply_race_results(career, race_entries, points_dist):
             d["team_points"] = d.get("team_points", 0) + points_dist[pos - 1]
         if pos == 1:
             d["season_wins"] += 1
+            d["gp_wins"] = d.get("gp_wins", 0) + 1  # v0.5: career win
             # v0.4: a constructor win is a race win by either driver.
             team["season_wins"] = team.get("season_wins", 0) + 1
         # v0.4: the team's best finish is the best race finish by a

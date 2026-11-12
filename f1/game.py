@@ -19,7 +19,8 @@ import random
 from . import race as race_mod
 from .data import (
     GRID_2026, CHAMPION_HISTORY_2010_2025, PREV_SEASON_DRIVER_ORDER,
-    PREV_SEASON_TEAM_ORDER, TR_2026, ACADEMY_2026, circuit_for_round,
+    PREV_SEASON_TEAM_ORDER, TR_2026, ACADEMY_2026, CAREER_STATS,
+    circuit_for_round,
 )
 from .models import make_driver, make_team, new_career_dict
 from .rules import SEASON_LENGTH, MAX_SEASONS
@@ -117,6 +118,15 @@ def build_new_career(name, host_nickname, chart_on=True):
         d["mv"] = float(entry["salary"])
         d["perf"] = float(entry["perf"])
         d["academy_team_id"] = team["id"]
+    # v0.5: career Grand Prix totals — real totals at the end of the
+    # 2025 season (data.CAREER_STATS). These persist across seasons
+    # and team changes, and drive the development contribution.
+    # Drivers not in the table (F2 juniors, pool rookies, fictional
+    # drivers) keep the template default of (0, 0).
+    for d in career["drivers"]:
+        starts, wins = CAREER_STATS.get(d["name"], (0, 0))
+        d["gp_starts"] = starts
+        d["gp_wins"] = wins
     # v0.3: season 1 opens in the real 2025 order. The three 2026-grid
     # drivers who did not race in F1 in 2025 (Pérez, Bottas, Lindblad)
     # go after the 2025-ordered drivers, ordered by perf — the
@@ -258,6 +268,39 @@ def research_multiplier(career, team):
     return 1.0 + TR_RESEARCH_BONUS * len(team_tr_drivers(career, team))
 
 
+def driver_dev_contrib(driver):
+    """v0.5: how much ONE driver contributes to developing the car.
+    The more F1 Grands Prix they have started, the more they have
+    won, and the higher their rating, the bigger the contribution:
+        0.02 + 0.02*(starts/(starts+100)) + 0.02*(wins/(wins+10))
+             + 0.02*clamp((perf-70)/30, 0, 1)
+    Range [0.02, 0.08]. Hamilton (~0.065) > Leclerc (~0.052);
+    Norris (~0.052) > Piastri (~0.046); Gasly (~0.044) > Aron
+    (~0.029). This is THE single helper for the contribution — the
+    develop path (do_develop, bot R&D) and the display path
+    (server.my_team_public) both call it, so they can never drift
+    apart. Academy drivers never contribute (they are F2 juniors),
+    so callers only pass main + T&R drivers."""
+    starts = driver.get("gp_starts", 0) or 0
+    wins = driver.get("gp_wins", 0) or 0
+    perf = driver.get("perf") or 0
+    perf_term = max(0.0, min(1.0, (perf - 70.0) / 30.0))
+    return (0.02
+            + 0.02 * (starts / (starts + 100.0))
+            + 0.02 * (wins / (wins + 10.0))
+            + 0.02 * perf_term)
+
+
+def team_dev_factor(career, team):
+    """v0.5: the team's development factor — 1 + the summed
+    contributions of the main 2 + T&R drivers (academy juniors do
+    not contribute). Applied to the Develop PERF gain only
+    (reliability is unchanged). The T&R research-pool bonus
+    (research_multiplier) is a separate mechanic and is untouched."""
+    drivers = team_drivers(career, team) + team_tr_drivers(career, team)
+    return 1.0 + sum(driver_dev_contrib(d) for d in drivers)
+
+
 def free_agents(career):
     return [d for d in career["drivers"] if d["status"] == "free"]
 
@@ -387,13 +430,22 @@ def do_research(career, team_id, priority, amount):
 
 def do_develop(career, team_id):
     """From Main.py: Develop Parts costs $1M, converts banked research into
-    car performance / reliability (Team.py addPerf / addRel)."""
+    car performance / reliability (Team.py addPerf / addRel).
+
+    v0.5: the PERF gain is multiplied by the team's driver
+    development factor (1 + the main 2 + T&R drivers' contributions
+    — experience, wins, rating). The RELIABILITY gain is unchanged:
+    drivers contribute to performance development, not reliability.
+    The T&R research-pool bonus is a separate mechanic and is
+    untouched (it boosts the pool an investment buys, not the
+    develop step)."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
     if team["money"] < 1.0:
         return False, "Need at least $1M to develop parts."
-    perf_gain = add_perf_gain(team["perf"], team["perf_res"])
+    dev_factor = team_dev_factor(career, team)
+    perf_gain = add_perf_gain(team["perf"], team["perf_res"]) * dev_factor
     rel_gain = add_rel_gain(team["reli_res"])
     team["perf"] += perf_gain
     team["rel"] += rel_gain
@@ -402,7 +454,8 @@ def do_develop(career, team_id):
     team["reli_res"] = 0.0
     team["money"] -= 1.0
     return True, (f"Parts developed ✓ — Perf {team['perf']:.1f} (+{perf_gain:.1f}), "
-                  f"Reliability {team['rel']:.2f} (+{rel_gain:.2f}), $1M spent")
+                  f"Reliability {team['rel']:.2f} (+{rel_gain:.2f}), $1M spent"
+                  f" (driver development ×{dev_factor:.2f})")
 
 
 def do_tuning(career, team_id, value):
@@ -1136,7 +1189,10 @@ def ai_act(career, team, rng=None):
         team["money"] -= round_funds
         if (team["perf_res"] + team["reli_res"]) > (rng.random() + 2.0) \
                 and rng.random() > 0.5:
-            team["perf"] += add_perf_gain(team["perf"], team["perf_res"])
+            # v0.5: bots develop with the same driver factor as humans
+            # (their main + T&R drivers contribute) — bot parity.
+            team["perf"] += (add_perf_gain(team["perf"], team["perf_res"])
+                             * team_dev_factor(career, team))
             team["perf_res"] = 0.0
             team["rel"] = max(0.5, min(0.99, team["rel"] + add_rel_gain(team["reli_res"])))
             team["reli_res"] = 0.0
