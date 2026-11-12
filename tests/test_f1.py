@@ -1749,15 +1749,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v043():
-    """The live version string is v0.4.3 everywhere it is shown."""
+def test_health_reports_v044():
+    """The live version string is v0.4.4 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.4.3"
+    assert client.get("/api/health").json()["version"] == "v0.4.4"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.4.3</title>" in html
-    assert "Online · v0.4.3 beta" in html
+    assert "<title>F1 Team Manager Online — v0.4.4</title>" in html
+    assert "Online · v0.4.4 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1998,6 +1998,101 @@ def test_standings_sort_tiebreaks_points_wins_best_finish_earliest():
     c["season_wins"] = 1
     top = [d["id"] for d in race_mod.driver_standings(career)[:3]]
     assert top == [b["id"], c["id"], a["id"]]
+
+
+def test_zero_point_driver_who_raced_stays_in_standings_after_tr_swap():
+    """v0.4.4 (Matthew's rule): a driver who competed in an F1 race is
+    registered in the standings even with 0 points — so Stroll, P19 in
+    Bahrain then swapped to T&R for Vandoorne, stays listed, like real
+    F1. An F2 driver with F2 finishes must NOT leak into the F1 table."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    f1 = [d for d in career["drivers"] if d["status"] == "f1"]
+    racer = f1[0]
+    racer["points"] = 0
+    racer["f1_races"] = 1
+    racer["finish_count"] = 1
+    racer["best_pos"] = 19
+    racer["best_finish_round"] = 1
+    # Swapped to T&R after racing: still registered.
+    racer["status"] = "tr"
+    assert any(d["id"] == racer["id"]
+               for d in race_mod.driver_standings(career))
+    # Dropped to free agency after racing: still registered.
+    racer["status"] = "free"
+    racer["team_id"] = None
+    assert any(d["id"] == racer["id"]
+               for d in race_mod.driver_standings(career))
+    # But an F2 driver with finishes (from F2 races) and no F1 starts
+    # stays out of the F1 table.
+    f2 = [d for d in career["drivers"] if d["status"] == "f2"][0]
+    f2["finish_count"] = 3
+    f2["f1_races"] = 0
+    assert not any(d["id"] == f2["id"]
+                   for d in race_mod.driver_standings(career))
+    # And a T&R driver who never raced in F1 stays out.
+    tr = [d for d in career["drivers"] if d["status"] == "tr"][0]
+    tr["finish_count"] = 0
+    tr["f1_races"] = 0
+    assert not any(d["id"] == tr["id"]
+                   for d in race_mod.driver_standings(career))
+
+
+def test_swapped_zero_point_driver_stays_in_standings_after_a_real_round():
+    """v0.4.4 end to end: play Round 1, swap a 0-point main driver to
+    T&R, and he is still in the Drivers' Championship."""
+    from f1 import race as race_mod
+    career = two_human_career()
+    connected = {"p-matthew", "p-cousin"}
+    play_full_round(career, connected, seeded(6))
+    assert career["round"] == 2
+    target = None
+    for t in career["teams"]:
+        trs = game.team_tr_drivers(career, t)
+        if not trs:
+            continue
+        for seat, slot in ((1, "driver1_id"), (2, "driver2_id")):
+            d = game.get_driver(career, t[slot])
+            if d and d["points"] == 0:
+                target = (t, seat, d, trs[0])
+                break
+        if target:
+            break
+    assert target, "no 0-point main driver with a T&R teammate after Round 1"
+    team, seat, main, tr = target
+    # One F1 start from Round 1, recorded by the race loop.
+    assert main.get("f1_races", 0) == 1
+    ok, msg = game.swap_main_tr(career, team["id"], seat, tr["id"])
+    assert ok, msg
+    assert main["status"] == "tr"
+    assert any(d["id"] == main["id"]
+               for d in race_mod.driver_standings(career))
+
+
+def test_migrate_backfills_f1_races_from_f1_finishes():
+    """v0.4.4: a v7 save has no f1_races — migration backfills it from
+    finish_count for non-F2 drivers (their finishes came from F1 races)
+    and 0 for F2 drivers, so Stroll's Round 1 start survives the load."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    doc = json.loads(json.dumps(career))  # a plain v7-style dict
+    for d in doc["drivers"]:
+        d.pop("f1_races", None)
+    # The Stroll shape: T&R now, raced once in F1, 0 points.
+    stroll = next(d for d in doc["drivers"] if d["status"] == "f1")
+    stroll["status"] = "tr"
+    stroll["points"] = 0
+    stroll["finish_count"] = 1
+    stroll["best_pos"] = 19
+    f2 = next(d for d in doc["drivers"] if d["status"] == "f2")
+    f2["finish_count"] = 3
+    migrate_save(doc)
+    assert stroll["f1_races"] == 1
+    assert f2["f1_races"] == 0
+    assert any(d["id"] == stroll["id"]
+               for d in race_mod.driver_standings(doc))
+    assert not any(d["id"] == f2["id"]
+                   for d in race_mod.driver_standings(doc))
 
 
 def test_constructors_sort_tiebreaks_and_wins():
