@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.6.0</title>
+<title>F1 Team Manager Online — v0.6.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -127,7 +127,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.0 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -327,6 +327,7 @@
   <p class="gp-sub" id="results-gp-sub"></p>
   <div id="results-err"></div>
   <div class="card"><div id="results-table"></div></div>
+  <p class="gp-sub" id="results-repairs"></p>
   <div class="vote-box" id="vote-box">
     <h3 style="margin-top:0">Next</h3>
     <p id="vote-status" class="note"></p>
@@ -701,8 +702,12 @@ function classificationTable(rows, opts){
     const medal = r.pos === 1 ? "🥇" : r.pos === 2 ? "🥈" : r.pos === 3 ? "🥉" : "";
     let gl = "";
     if(showGL){
-      const g = r.gl || 0;
-      gl = g > 0 ? `<span class="gl-up">▲${g}</span>` : g < 0 ? `<span class="gl-down">▼${-g}</span>` : "0";
+      // v0.6.1: a DNF has no gain/loss — show a dash, not 0.
+      if(r.pos === "DNF"){ gl = "—"; }
+      else {
+        const g = r.gl || 0;
+        gl = g > 0 ? `<span class="gl-up">▲${g}</span>` : g < 0 ? `<span class="gl-down">▼${-g}</span>` : "0";
+      }
     }
     return `<tr><td>${medal} ${r.pos}</td><td>${driverNameHtml(r.driver, colour, r.cha, true)}</td><td>${team ? teamNameHtml(team) : esc(r.team)}</td><td>${esc(r.gap)}</td>${showGL ? `<td>${gl}</td>` : ""}${showPts ? `<td>${r.points}</td>` : ""}</tr>`;
   }).join("");
@@ -856,6 +861,11 @@ function renderResults(){
   $("results-table").innerHTML = rows.length
     ? classificationTable(rows, { showGL: !isQual })
     : "<p class='note'>No results yet.</p>";
+  // v0.6.1: the repair bill for this race's DNFs, if any.
+  const nDnf = isQual ? 0 : rows.filter(r => r.pos === "DNF").length;
+  $("results-repairs").textContent = nDnf
+    ? `🔧 Repairs: −$${nDnf.toFixed(1)}M (${nDnf} DNF${nDnf > 1 ? "s" : ""} at $1.0M each)`
+    : "";
   // Vote status: who has voted NEXT, who we are still waiting for.
   const voted = new Set(c.results_vote || []);
   const voters = c.teams.filter(t => t.owner_player_id && room.players.some(p => p.player_id === t.owner_player_id && p.connected));
