@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.4.4</title>
+<title>F1 Team Manager Online — v0.4.5</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -127,7 +127,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.4.4 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.4.5 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -1339,6 +1339,13 @@ function renderTabs(){
   // raced for and their name stays uncoloured (v0.1 rule). The free
   // agent's row still gets the '|' bar in the LAST team's colour
   // (v0.3.1). Constructors get a wins column like the drivers' table.
+  // v0.4.5: anyone who raced in F1 this season (f1_races > 0) stays
+  // listed even with 0 points — a driver swapped to T&R or dropped
+  // to free agency after racing (e.g. Stroll, P19 Bahrain) is still
+  // registered, like real F1. THIS FILTER MUST MATCH
+  // race.driver_standings() on the server: v0.4.4 fixed only the
+  // server copy, and the table still hid Stroll. f1_races counts F1
+  // starts only, so F2 drivers never leak in.
   const prevOrder = c.prev_driver_order || [];
   const prevRank = d => { const i = prevOrder.indexOf(d.id); return i === -1 ? prevOrder.length : i; };
   const prevTeamOrder = c.prev_team_order || [];
@@ -1348,7 +1355,7 @@ function renderTabs(){
     || (a.best_finish_round || 99) - (b.best_finish_round || 99)
     || prevRank(a) - prevRank(b)
     || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name);
-  const drv = [...c.drivers.filter(d => d.status === "f1" || (d.status === "free" && d.points > 0))].sort(drvSort);
+  const drv = [...c.drivers.filter(d => d.status === "f1" || (d.status === "free" && d.points > 0) || (d.f1_races || 0) > 0)].sort(drvSort);
   const teams = [...c.teams].sort((a, b) => b.points - a.points || (b.season_wins || 0) - (a.season_wins || 0)
     || (a.best_pos || 99) - (b.best_pos || 99)
     || (a.best_finish_round || 99) - (b.best_finish_round || 99)
