@@ -384,7 +384,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 9  # v0.6.1 save format
+        assert loaded["version"] == 9  # v0.6.2 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -510,6 +510,249 @@ def test_ws_lobby_kick_host_promotion_and_takeover():
         assert rejoined["room"]["started"] is True
 
 
+def test_team_takeable_grace_period():
+    """v0.6.2: the takeover rule — AI teams are always takeable, a
+    connected human's team never is, and a disconnected human's
+    team becomes takeable once the 60s grace period has passed."""
+    import time as _time
+    import server as srv
+
+    room = srv.new_room("Matthew", "#e74c3c")
+    host = srv.add_player(room, "Matthew", "#e74c3c")
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = career["teams"][0]
+    ferrari = career["teams"][1]
+    ok, _ = game.choose_team(career, mclaren["id"], host["player_id"])
+    assert ok
+    now = _time.time()
+    # Connected owner's team: never takeable.
+    ok, why = srv.team_takeable(room, mclaren, now=now)
+    assert not ok and "still connected" in why
+    # AI team: takeable.
+    ok, _ = srv.team_takeable(room, ferrari, now=now)
+    assert ok
+    # Owner disconnects: still not takeable inside the grace period.
+    host["connected"] = False
+    host["disconnected_at"] = now
+    ok, why = srv.team_takeable(room, mclaren, now=now + 10)
+    assert not ok and "available in" in why
+    ok, why = srv.team_takeable(room, mclaren, now=now + 59)
+    assert not ok
+    # Past the grace period: takeable.
+    ok, _ = srv.team_takeable(room, mclaren, now=now + 60)
+    assert ok
+    ok, _ = srv.team_takeable(room, mclaren, now=now + 61)
+    assert ok
+    # Grace period length is the named constant.
+    assert srv.TAKEOVER_GRACE_SECONDS == 60
+
+
+def _ws_started_room(client, host_nick="Matthew"):
+    """Helper: a room with a started career; the host owns the first
+    team. Returns (code, host_id, host_ws, recv_until)."""
+    from fastapi.testclient import TestClient
+
+    def recv_until(ws, want, limit=40, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    host_ws = client.websocket_connect("/ws")
+    host_ws.__enter__()
+    host_ws.send_json({"type": "create_room", "nickname": host_nick, "colour": "#e74c3c"})
+    joined = recv_until(host_ws, "joined")
+    code, host_id = joined["code"], joined["player_id"]
+    host_ws.send_json({"type": "new_career", "name": "WS Career"})
+    state = recv_until(host_ws, "room_state",
+                       check=lambda m: m["room"]["career"] is not None)
+    team_id = state["room"]["career"]["teams"][0]["id"]
+    host_ws.send_json({"type": "choose_team", "team_id": team_id})
+    recv_until(host_ws, "action", check=lambda m: m.get("action") == "choose_team")
+    host_ws.send_json({"type": "start_career"})
+    recv_until(host_ws, "room_state",
+               check=lambda m: m["room"]["started"] is True)
+    return code, host_id, team_id, host_ws, recv_until
+
+
+def test_ws_takeover_after_grace_period():
+    """v0.6.2: a disconnected owner's team becomes takeable by a new
+    player once the 60s grace period has passed."""
+    import time as _time
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+    code, host_id, team_id, host_ws, recv_until = _ws_started_room(client)
+    host_ws.__exit__(None, None, None)
+    # Simulate 61s of absence (the disconnect handler stamps
+    # disconnected_at with the real clock when the socket closes).
+    for _ in range(50):
+        hp = next((p for p in srv.ROOMS[code]["players"]
+                   if p["player_id"] == host_id), None)
+        if hp is not None and not hp["connected"]:
+            break
+        _time.sleep(0.05)
+    assert hp is not None and hp["disconnected_at"] is not None
+    hp["disconnected_at"] = _time.time() - 61
+    with client.websocket_connect("/ws") as guest_ws:
+        guest_ws.send_json({"type": "join_room", "code": code,
+                            "nickname": "Cousin", "colour": "#3498db"})
+        g_joined = recv_until(guest_ws, "joined")
+        guest_id = g_joined["player_id"]
+        guest_ws.send_json({"type": "choose_team", "team_id": team_id})
+        state = recv_until(
+            guest_ws, "room_state",
+            check=lambda m: any(t["id"] == team_id and t.get("owner_player_id") == guest_id
+                                for t in m["room"]["career"]["teams"]))
+        taken = next(t for t in state["room"]["career"]["teams"]
+                     if t["id"] == team_id)
+        assert taken["owner_player_id"] == guest_id
+
+
+def test_ws_takeover_blocked_within_grace_period():
+    """v0.6.2: a disconnected owner's team is NOT takeable inside
+    the 60s grace period."""
+    import time as _time
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+    code, host_id, team_id, host_ws, recv_until = _ws_started_room(client)
+    host_ws.__exit__(None, None, None)
+    _time.sleep(0.2)
+    with client.websocket_connect("/ws") as guest_ws:
+        guest_ws.send_json({"type": "join_room", "code": code,
+                            "nickname": "Cousin", "colour": "#3498db"})
+        recv_until(guest_ws, "joined")
+        guest_ws.send_json({"type": "choose_team", "team_id": team_id})
+        err = recv_until(guest_ws, "error")
+        assert "available in" in err["message"]
+    # Ownership did not change.
+    taken = next(t for t in srv.ROOMS[code]["career"]["teams"]
+                 if t["id"] == team_id)
+    assert taken["owner_player_id"] == host_id
+
+
+def test_ws_takeover_blocked_when_owner_connected():
+    """v0.6.2: a connected human's team is NEVER takeable."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+    code, host_id, team_id, host_ws, recv_until = _ws_started_room(client)
+    with client.websocket_connect("/ws") as guest_ws:
+        guest_ws.send_json({"type": "join_room", "code": code,
+                            "nickname": "Cousin", "colour": "#3498db"})
+        recv_until(guest_ws, "joined")
+        guest_ws.send_json({"type": "choose_team", "team_id": team_id})
+        err = recv_until(guest_ws, "error")
+        assert "still connected" in err["message"]
+    taken = next(t for t in srv.ROOMS[code]["career"]["teams"]
+                 if t["id"] == team_id)
+    assert taken["owner_player_id"] == host_id
+    host_ws.__exit__(None, None, None)
+
+
+def test_ws_same_player_rejoin_keeps_team():
+    """v0.6.2: auto-rejoin with the SAME player_id keeps the team
+    (the grace period is for other players, not the owner)."""
+    import time as _time
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+    code, host_id, team_id, host_ws, recv_until = _ws_started_room(client)
+    host_ws.__exit__(None, None, None)
+    _time.sleep(0.2)
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "rejoin", "code": code, "player_id": host_id})
+        rejoined = recv_until(ws, "joined")
+        assert rejoined["room"]["started"] is True
+        taken = next(t for t in rejoined["room"]["career"]["teams"]
+                     if t["id"] == team_id)
+        assert taken["owner_player_id"] == host_id
+        # The disconnect timestamp is cleared on rejoin.
+        me = next(p for p in rejoined["room"]["players"]
+                  if p["player_id"] == host_id)
+        assert me["connected"] is True
+        assert me["disconnected_at"] is None
+
+
+def test_playwright_midcareer_picker():
+    """v0.6.2: in a real browser, a player joining a started career
+    with no team sees the mid-career team picker (not a team-less
+    game screen), and can take over an AI team from it."""
+    import socket
+    import threading
+    import time as _time
+    import urllib.request
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+    from server import app
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = _time.time() + 20
+    while True:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=2) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            if _time.time() > deadline:
+                raise
+            _time.sleep(0.2)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            # Host: create a room, start a career, take a team, start it.
+            host_ctx = browser.new_context()
+            host = host_ctx.new_page()
+            host.goto(f"http://127.0.0.1:{port}/")
+            host.fill("#home-nick", "Max")
+            host.click("#btn-create")
+            host.locator("#screen-lobby").wait_for(state="visible", timeout=10000)
+            host.click("#btn-new-career")
+            host.locator("#team-list button[data-team]").first.wait_for(
+                state="visible", timeout=10000)
+            host.locator("#team-list button[data-team]").first.click()
+            host.click("#btn-start-career")
+            host.locator("#screen-game").wait_for(state="visible", timeout=10000)
+            code = host.evaluate("() => room.code")
+            assert len(code) == 6
+            # Guest: join mid-career with no team.
+            guest_ctx = browser.new_context()
+            guest = guest_ctx.new_page()
+            guest.goto(f"http://127.0.0.1:{port}/")
+            guest.fill("#home-nick", "Matthew")
+            guest.fill("#home-code", code)
+            guest.click("#btn-join")
+            guest.locator("#screen-picker").wait_for(state="visible", timeout=10000)
+            assert not guest.locator("#screen-game").is_visible()
+            assert not guest.locator("#screen-lobby").is_visible()
+            picker = guest.locator("#picker-team-list")
+            # The host's team shows as taken; AI teams have a take button.
+            assert "taken by Max" in picker.inner_text()
+            assert picker.locator("button[data-team]").count() >= 1
+            # Take the first available team and land on the dashboard.
+            picker.locator("button[data-team]").first.click()
+            guest.locator("#screen-game").wait_for(state="visible", timeout=10000)
+            assert not guest.locator("#screen-picker").is_visible()
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
 def test_http_health_and_export_import(tmp_path):
     from fastapi.testclient import TestClient
     from server import app
@@ -555,7 +798,7 @@ def test_results_payloads_never_contain_absolute_times():
         assert len(rows) == 22
         for r in rows:
             assert "time" not in r, f"absolute time leaked in {key}: {r}"
-            # v0.6.1: a DNF row's gap is "DNF" — not an absolute time.
+            # v0.6.2: a DNF row's gap is "DNF" — not an absolute time.
             assert r["gap"] in ("LEADER", "DNF") or r["gap"].startswith("+")
         assert rows[0]["gap"] == "LEADER"
     # public_state must not leak qual_time / race_time either, chart on or off.
@@ -585,14 +828,14 @@ def test_race_is_full_distance_with_plausible_gaps():
         rtimes = [d["race_time"] for d, _ in race_entries]
         winner = rtimes[0]
         assert 4000 <= winner <= 7000, f"winner total {winner:.0f}s is not a GP distance"
-        # v0.6.1: the last row of race_entries is the last FINISHER
+        # v0.6.2: the last row of race_entries is the last FINISHER
         # (DNFs are returned separately) — its gap is still plausible.
         assert 10 <= rtimes[-1] - winner <= 150  # last finisher's gap
         assert 5 <= rtimes[9] - winner <= 120    # P10 gap plausible
     # The played round agrees (server-side times are what the gaps came from).
     play_full_round(career, connected, seeded(5))
     assert career["last_race"][0]["gap"] == "LEADER"
-    # v0.6.1: DNF rows (gap "DNF") sit after the finishers — the gap
+    # v0.6.2: DNF rows (gap "DNF") sit after the finishers — the gap
     # check is on the last FINISHER, not the last row.
     finishers = [r for r in career["last_race"] if r["pos"] != "DNF"]
     assert finishers[-1]["gap"].startswith("+")
@@ -799,7 +1042,7 @@ def test_driver_surname_markup_bold_uppercase_team_coloured():
             assert "Time" not in table and "GAP" in table and "G/L" in table
             assert "🥇" in table and "▲" not in table  # P1 gl=0 shows 0
             assert "▼1" in table
-            # v0.6.1: a DNF row shows "DNF" for position and gap, 0
+            # v0.6.2: a DNF row shows "DNF" for position and gap, 0
             # points, and a dash (not 0) for gain/loss.
             dnf_table = page.evaluate(
                 "window.F1UI.classificationTable("
@@ -1035,11 +1278,11 @@ def test_session_form_pole_diversity():
 
 
 # ---------------------------------------------------------------------------
-# v0.6.1 — mechanical failures (DNFs) driven by reliability
+# v0.6.2 — mechanical failures (DNFs) driven by reliability
 # ---------------------------------------------------------------------------
 
 def test_dnf_chance_and_deterministic_dnfs():
-    """v0.6.1: DNF chance is 1 - rel per car, each car rolling its own
+    """v0.6.2: DNF chance is 1 - rel per car, each car rolling its own
     team's reliability. rel 0.0 is a 100% DNF chance (both cars DNF);
     rel 1.0 is 0% (never DNFs)."""
     from f1 import race as race_mod
@@ -1071,7 +1314,7 @@ def test_dnf_chance_and_deterministic_dnfs():
 
 
 def test_dnf_rate_near_five_percent_at_rel_095():
-    """v0.6.1: with rel 0.95 the per-car DNF rate is near 5% — over
+    """v0.6.2: with rel 0.95 the per-car DNF rate is near 5% — over
     200 one-lap races (4,400 car-races) it lands in 2-8%, a wide band
     around the 5% expectation, so the test is not flaky."""
     from f1 import race as race_mod
@@ -1090,7 +1333,7 @@ def test_dnf_rate_near_five_percent_at_rel_095():
 
 
 def test_dnf_driver_consequences_and_move_up():
-    """v0.6.1: a DNF driver scores 0 points, keeps their best finish,
+    """v0.6.2: a DNF driver scores 0 points, keeps their best finish,
     still counts as having raced (f1_races +1, so they stay in the
     standings), rep unchanged, and the team pays a $1.0M repair bill
     per DNF with no prize money for that car. The other cars move up —
@@ -1142,7 +1385,7 @@ def test_dnf_driver_consequences_and_move_up():
 
 
 def test_reliability_cap_is_one_not_099():
-    """v0.6.1: a team can develop its reliability up to 1.0 (not stuck
+    """v0.6.2: a team can develop its reliability up to 1.0 (not stuck
     at 0.99) — so "all good" (0% DNF) is reachable."""
     career = game.build_new_career("Test", "Matthew")
     team = next(t for t in career["teams"] if t["name"] == "Aston Martin")
@@ -1162,7 +1405,7 @@ def test_reliability_cap_is_one_not_099():
 
 
 def test_f2_race_has_no_dnfs():
-    """v0.6.1: F2 races are unaffected — even with every F1 team at
+    """v0.6.2: F2 races are unaffected — even with every F1 team at
     rel 0.0 (all F1 cars would DNF), the F2 race still returns every
     F2 driver with a race time."""
     from f1 import race as race_mod
@@ -2078,15 +2321,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v061():
-    """The live version string is v0.6.1 everywhere it is shown."""
+def test_health_reports_v062():
+    """The live version string is v0.6.2 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.6.1"
+    assert client.get("/api/health").json()["version"] == "v0.6.2"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.6.1</title>" in html
-    assert "Online · v0.6.1 beta" in html
+    assert "<title>F1 Team Manager Online — v0.6.2</title>" in html
+    assert "Online · v0.6.2 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3956,7 +4199,7 @@ def test_dashboard_shows_only_main_drivers():
 
 
 # ---------------------------------------------------------------------------
-# v0.6.1 — team relationships: donations, customer/junior contracts,
+# v0.6.2 — team relationships: donations, customer/junior contracts,
 # WANTED drivers, research caps, bot parity, v9 save migration
 # ---------------------------------------------------------------------------
 
