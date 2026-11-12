@@ -401,7 +401,10 @@ def test_chart_off_hides_all_perf_numbers():
     state = game.public_state(career, chart_on=False, viewer_team_id=career["teams"][0]["id"])
     blob = json.dumps(state)
     assert '"perf"' not in blob
-    assert '"rel"' not in blob
+    # v0.6.3: your own car's reliability IS visible (it drives your DNF
+    # chance, and the dashboard shows it) — other teams' is hidden.
+    assert state["teams"][0]["rel"] == career["teams"][0]["rel"]
+    assert "rel" not in state["teams"][1]
     # Your own research pools stay visible; other teams' do not.
     assert state["teams"][0]["perf_res"] == 0.0
     assert "perf_res" not in state["teams"][1]
@@ -414,6 +417,35 @@ def test_chart_off_hides_all_perf_numbers():
     # Chart ON shows everything.
     on = game.public_state(career, chart_on=True)
     assert '"perf"' in json.dumps(on)
+
+
+def test_chart_off_shows_own_reliability_v063():
+    """v0.6.3: with the chart OFF, the dashboard payload shows your own
+    car's reliability — but never perf, never driver perf, and never
+    another team's reliability."""
+    career = two_human_career()
+    viewer = career["teams"][0]["id"]
+    state = game.public_state(career, chart_on=False, viewer_team_id=viewer)
+    # Your own reliability is there, with the exact value.
+    assert state["teams"][0]["rel"] == career["teams"][0]["rel"]
+    # No other team's reliability, no perf anywhere, no driver perf.
+    assert "rel" not in state["teams"][1]
+    assert all("perf" not in t for t in state["teams"])
+    assert all("perf" not in d for d in state["drivers"])
+    # With no viewer, nobody's reliability is shown.
+    assert '"rel"' not in json.dumps(game.public_state(career, chart_on=False))
+    # The private my_team payload (what the dashboard actually renders)
+    # carries rel and never perf, chart on or off.
+    import server as srv
+    room = srv.new_room("Matthew", "#e74c3c")
+    host = srv.add_player(room, "Matthew", "#e74c3c")
+    room["career"] = game.build_new_career("T", "Matthew")
+    game.choose_team(room["career"], room["career"]["teams"][0]["id"], host["player_id"])
+    room["chart_on"] = False
+    mt = srv.my_team_public(room, host["player_id"])
+    assert mt["rel"] == room["career"]["teams"][0]["rel"]
+    assert "perf" not in mt
+    assert all("perf" not in d for d in mt["drivers"])
 
 
 def test_ai_decisions_identical_when_perf_swapped_chart_off():
@@ -747,6 +779,68 @@ def test_playwright_midcareer_picker():
             picker.locator("button[data-team]").first.click()
             guest.locator("#screen-game").wait_for(state="visible", timeout=10000)
             assert not guest.locator("#screen-picker").is_visible()
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_playwright_dashboard_shows_own_reliability_chart_off():
+    """v0.6.3: with the perf chart OFF, the dashboard still shows your
+    own car's reliability (with the DNF chance) — but never a perf
+    number and never driver ratings."""
+    import socket
+    import threading
+    import time as _time
+    import urllib.request
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+    from server import app
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = _time.time() + 20
+    while True:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=2) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            if _time.time() > deadline:
+                raise
+            _time.sleep(0.2)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.locator("#screen-lobby").wait_for(state="visible", timeout=10000)
+            # Turn the perf chart OFF in the lobby (host-only setting).
+            page.uncheck("#lobby-chart")
+            page.click("#btn-new-career")
+            page.locator("#team-list button[data-team]").first.wait_for(
+                state="visible", timeout=10000)
+            page.locator("#team-list button[data-team]").first.click()
+            page.click("#btn-start-career")
+            page.locator("#screen-game").wait_for(state="visible", timeout=10000)
+            # The dashboard header shows your own reliability + DNF
+            # chance even with the chart off — and no perf number.
+            page.wait_for_function(
+                "() => document.querySelector('#my-team').innerText.includes('Reliability')",
+                timeout=10000)
+            header = page.locator("#my-team").inner_text()
+            assert "Reliability" in header
+            assert "DNF per car" in header
+            assert "Perf" not in header
             browser.close()
     finally:
         server.should_exit = True
@@ -2321,15 +2415,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v062():
-    """The live version string is v0.6.2 everywhere it is shown."""
+def test_health_reports_v063():
+    """The live version string is v0.6.3 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.6.2"
+    assert client.get("/api/health").json()["version"] == "v0.6.3"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.6.2</title>" in html
-    assert "Online · v0.6.2 beta" in html
+    assert "<title>F1 Team Manager Online — v0.6.3</title>" in html
+    assert "Online · v0.6.3 beta" in html
 
 
 # ---------------------------------------------------------------------------
