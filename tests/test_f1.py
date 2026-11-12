@@ -1749,15 +1749,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v042():
-    """The live version string is v0.4.2 everywhere it is shown."""
+def test_health_reports_v043():
+    """The live version string is v0.4.3 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.4.2"
+    assert client.get("/api/health").json()["version"] == "v0.4.3"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.4.2</title>" in html
-    assert "Online · v0.4.2 beta" in html
+    assert "<title>F1 Team Manager Online — v0.4.3</title>" in html
+    assert "Online · v0.4.3 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2905,15 +2905,18 @@ def test_academy_leaving_on_signing():
 
 
 def test_rating_growth_ranges():
-    """The table-driven growth ranges: low = average delta, high =
-    max delta for the age step (see f1/rules.py RATING_TABLE)."""
+    """The table-driven growth ranges: low = MIN delta, high =
+    max delta for the age step (see f1/rules.py RATING_TABLE).
+    v0.4.3: the low end is the min-column delta (Matthew's choice)
+    — 26->27 is [0,1] now (it was [0,0] under the v0.4.2 average
+    delta); 20->21 stays [2,3]."""
     from f1.rules import rating_growth_range
     assert rating_growth_range(20) == (2, 3)   # Camara at 20 grows 2-3
     assert rating_growth_range(25) == (0, 1)
-    assert rating_growth_range(26) == (0, 0)
+    assert rating_growth_range(26) == (0, 1)
     assert rating_growth_range(30) == (-2, -1)  # decline, never flat
-    assert rating_growth_range(18) == (3, 5)
-    assert rating_growth_range(40) == (0, 0)
+    assert rating_growth_range(18) == (2, 5)
+    assert rating_growth_range(40) == (-1, 0)
 
 
 def test_antonelli_clamp():
@@ -3058,3 +3061,232 @@ def test_import_flow_save_appears_immediately():
             assert "Create room with this save" in html
         finally:
             srv.SAVES_DIR = old_dir
+
+
+# ---------------------------------------------------------------------------
+# v0.4.3
+# ---------------------------------------------------------------------------
+
+def test_release_tr_driver_costs_main_driver_break_fee():
+    """v0.4.3: releasing a T&R driver costs EXACTLY what breaking a
+    main driver's contract costs — rounds_remaining x salary/12 +
+    $2.0M — shown upfront and charged on confirm. The driver becomes
+    a free agent, keeps championship points, and the points they
+    scored for the team stay with the team."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = next(t for t in career["teams"] if t["name"] == "McLaren")
+    trs = game.team_tr_drivers(career, mclaren)
+    assert len(trs) == 4
+    d = next(x for x in trs if x["name"] == "Nyck de Vries")
+    d["points"] = 10  # a T&R driver can hold points from an earlier stint
+    fee = game.break_fee_for_driver(career, d)
+    # Round 1, 2-year contract: (12 + 12) x 1.5/12 + 2.0 = $5.0M.
+    assert fee == pytest.approx(5.0)
+    money_before = mclaren["money"]
+    ok, msg = game.release_driver(career, mclaren["id"], d["id"])
+    assert ok, msg
+    assert mclaren["money"] == pytest.approx(money_before - fee)
+    assert d["status"] == "free" and d["team_id"] is None
+    assert d["points"] == 10  # championship points follow the driver
+    assert d not in game.team_tr_drivers(career, mclaren)
+    assert any("released by McLaren" in t and "Nyck de Vries" in t
+               for t in career["transfers"])
+
+
+def test_release_main_driver_empties_seat_and_keeps_points():
+    """v0.4.3: releasing a main driver empties the seat, banks the
+    points they scored FOR the team, and keeps their championship
+    points with them — the same real-F1 rules as a replacement."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = next(t for t in career["teams"] if t["name"] == "McLaren")
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    assert norris["name"] == "Lando Norris"
+    norris["points"] = 25
+    norris["team_points"] = 25
+    mclaren["points"] = 25
+    mclaren["money"] = 100.0  # Norris's fee ($12.4M) needs a full bank
+    fee = game.break_fee_for_driver(career, norris)
+    assert fee == pytest.approx(12.4)
+    ok, msg = game.release_driver(career, mclaren["id"], norris["id"])
+    assert ok, msg
+    assert mclaren["driver1_id"] is None
+    assert norris["status"] == "free" and norris["team_id"] is None
+    assert norris["points"] == 25
+    assert mclaren["points_kept"] == 25  # banked with the team
+    assert mclaren["points"] == 25
+    assert mclaren["money"] == pytest.approx(100.0 - fee)
+
+
+def test_release_driver_blocked_when_unaffordable_and_in_winter_break():
+    """v0.4.3: a release the team cannot afford does nothing, and
+    releases are blocked in the winter break (lineups change through
+    offers there, like direct signings)."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = next(t for t in career["teams"] if t["name"] == "McLaren")
+    d = game.team_tr_drivers(career, mclaren)[0]
+    mclaren["money"] = 0.5
+    ok, msg = game.release_driver(career, mclaren["id"], d["id"])
+    assert not ok and "Need $" in msg
+    assert d["status"] == "tr" and mclaren["money"] == 0.5
+    # Winter break: blocked even when affordable.
+    mclaren["money"] = 100.0
+    career["phase"] = "winter_break"
+    ok, msg = game.release_driver(career, mclaren["id"], d["id"])
+    assert not ok and "between races" in msg
+    assert d["status"] == "tr"
+
+
+def test_my_team_payload_has_break_fees():
+    """v0.4.3: the private my_team payload carries each main and T&R
+    driver's break fee (same formula as a replacement), so the
+    Drivers tab can show the Drop cost upfront. Rep is still never
+    sent to players."""
+    import server as srv
+    room = srv.new_room("Matthew", "#e74c3c")
+    host = srv.add_player(room, "Matthew", "#e74c3c")
+    room["career"] = game.build_new_career("T", "Matthew")
+    mclaren = next(t for t in room["career"]["teams"] if t["name"] == "McLaren")
+    game.choose_team(room["career"], mclaren["id"], host["player_id"])
+    mt = srv.my_team_public(room, host["player_id"])
+    assert mt is not None
+    for d in mt["drivers"] + mt["tr_drivers"]:
+        assert "break_fee" in d
+        live = game.get_driver(room["career"], d["id"])
+        assert d["break_fee"] == game.break_fee_for_driver(room["career"], live)
+        assert "rep" not in d
+    # McLaren's four T&R drivers are all in the payload.
+    assert len(mt["tr_drivers"]) == 4
+
+
+def test_bot_releases_bad_tr_driver():
+    """v0.4.3 bot parity: a T&R driver who raced earlier in the
+    season (swapped out of a main seat) and meets the same
+    bad-performance rule — 0 points, average finish 18th or worse —
+    is released outright, paying the same break fee. Only when no
+    main driver needs acting on (one action per team per race)."""
+    career = game.build_new_career("Test", "Matthew")
+    team = next(t for t in career["teams"] if t["name"] == "Racing Bulls")
+    team["money"] = 100.0
+    career["round"] = 8
+    # Give the team a T&R driver with bad race stats from an
+    # earlier main-seat stint (points 0, avg finish 19th).
+    tr = next(d for d in game.free_agents(career) if d["age"] <= 25)
+    ok, msg = game.sign_tr_driver(career, team["id"], tr["id"], contract_years=1)
+    assert ok, msg
+    tr["points"] = 0
+    tr["finish_sum"] = 19 * 6
+    tr["finish_count"] = 6
+    fee = game.break_fee_for_driver(career, tr)
+    money_before = team["money"]
+    game.bot_post_race(career, rng=random.Random(1))
+    assert tr["status"] == "free" and tr["team_id"] is None
+    assert team["money"] == pytest.approx(money_before - fee)
+    assert any("released by Racing Bulls" in t and tr["name"] in t
+               for t in career["transfers"])
+    # Main drivers untouched (they had no race stats).
+    assert team["driver1_id"] and team["driver2_id"]
+
+
+def test_drivers_tab_and_history_grid_playwright():
+    """v0.4.3 in a real browser: the Drivers tab shows the whole
+    roster (main 2, T&R, academy) with team-coloured T&R surnames,
+    a T&R Drop goes through the confirm dialog at the exact break
+    fee, and the race-history grid fits its container (no horizontal
+    scroll) after a round is played."""
+    pytest.importorskip("playwright")
+    import subprocess
+    import time
+    import urllib.request
+    port = 8805
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            page.click("#btn-new-career")
+            page.wait_for_selector("[data-team]", timeout=15000)
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            page.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            page.click("#btn-start-career")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Drivers tab: all three roster groups, team-coloured
+            # T&R surnames, and a Drop button with the break fee.
+            page.click("button[data-tab='drivers']")
+            page.wait_for_selector("#drivers-box .bar-row", timeout=15000)
+            drivers_text = page.inner_text("#drivers-box")
+            assert "Main drivers" in drivers_text
+            assert "Test & Reserve" in drivers_text
+            assert "Driver Academy" in drivers_text
+            assert "NORRIS" in drivers_text and "PIASTRI" in drivers_text
+            assert "VRIES" in drivers_text and "VERSCHOOR" in drivers_text
+            # McLaren starts with no academy drivers: the empty state
+            # shows (the section is not hidden, unlike the old My Team
+            # card, which only rendered the academy line when non-empty).
+            assert "No academy drivers yet" in drivers_text
+            # A T&R surname carries the McLaren team colour (#EF9B33).
+            tr_colour = page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#drivers-box .bar-row')];
+                const row = rows.find(r => r.textContent.includes('VRIES'));
+                const span = row && row.querySelector('.surname');
+                return span ? span.style.color : null;
+            }""")
+            assert tr_colour in ("rgb(239, 155, 51)", "#EF9B33", "#ef9b33"), tr_colour
+            # Drop a T&R driver (de Vries, $5.00M break fee at round 1
+            # on a 2-year contract) through the confirm dialog.
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#drivers-box .bar-row')];
+                const row = rows.find(r => r.textContent.includes('VRIES'));
+                row.querySelector('[data-drop-driver]').click();
+            }""")
+            page.wait_for_selector("[data-confirm-yes]", timeout=15000)
+            confirm_text = page.inner_text(".ov-panel[data-overlay='confirm']")
+            assert "Breaking their contract costs $5.00M" in confirm_text
+            page.click("[data-confirm-yes]")
+            page.wait_for_function(
+                "() => !document.querySelector('#drivers-box').innerText.includes('VRIES')",
+                timeout=15000)
+            drivers_text = page.inner_text("#drivers-box")
+            assert "VRIES" not in drivers_text
+            assert "VERSCHOOR" in drivers_text  # the other T&R drivers stay
+            # History grid: play one round, then the grid (with a
+            # filled R1 cell) must fit its container — no horizontal
+            # scroll, and the last column (R12) is inside it.
+            _play_one_round(page)
+            page.click("button[data-tab='history']")
+            page.wait_for_selector("#history-box .hist-grid", timeout=15000)
+            fits = page.evaluate("""() => {
+                const sc = document.querySelector('#tab-history .table-scroll');
+                const grid = document.querySelector('.hist-grid');
+                const r12 = document.querySelector('.hist-grid th:last-child');
+                return {
+                    scroll: sc.scrollWidth, client: sc.clientWidth,
+                    gridRight: grid.getBoundingClientRect().right,
+                    tabRight: document.querySelector('#tab-history').getBoundingClientRect().right,
+                    r12Right: r12.getBoundingClientRect().right,
+                    scRight: sc.getBoundingClientRect().right,
+                };
+            }""")
+            assert fits["scroll"] <= fits["client"] + 1, fits
+            assert fits["gridRight"] <= fits["tabRight"] + 1, fits
+            assert fits["r12Right"] <= fits["scRight"] + 1, fits
+            browser.close()
+    finally:
+        proc.terminate()
