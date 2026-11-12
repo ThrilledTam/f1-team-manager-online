@@ -868,6 +868,46 @@ def release_academy_driver(career, team_id, driver_id):
     return True, f"{d['name']} released from {team['name']}'s academy ✓"
 
 
+def release_driver(career, team_id, driver_id):
+    """v0.4.3: release (drop) a main or T&R driver — breaking their
+    contract costs EXACTLY what breaking a main driver's contract
+    costs (break_fee_for_driver: rounds_remaining x salary/12 +
+    $2.0M, where rounds_remaining = rounds left this season +
+    (years left after this season x 12)). The fee is shown upfront
+    in the Drivers tab and charged on confirm. The driver becomes a
+    free agent and KEEPS their championship points/wins/best finish;
+    the points they scored FOR this team stay with the team (banked
+    into points_kept — the same real-F1 rule as a replacement, see
+    _release_driver). A main driver's seat becomes empty; a T&R
+    driver just leaves the roster. Logged in Transfers. Round phase
+    only — in the winter break, lineups change through offers."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    if career.get("phase") != "round":
+        return False, "You can only release drivers between races."
+    d = get_driver(career, driver_id)
+    if not d or d.get("team_id") != team["id"] \
+            or d.get("status") not in ("f1", "tr"):
+        return False, "That driver is not one of your main or T&R drivers."
+    fee = break_fee_for_driver(career, d)
+    if fee > team["money"]:
+        return False, f"Need ${fee:.2f}M to release {d['name']}."
+    was_main = d["status"] == "f1"
+    team["money"] -= fee
+    if was_main:
+        if team["driver1_id"] == d["id"]:
+            team["driver1_id"] = None
+        if team["driver2_id"] == d["id"]:
+            team["driver2_id"] = None
+    _release_driver(career, d, team)
+    d["status"] = "free"
+    _recompute_team_points(career, team)
+    career["transfers"].append(
+        f"{d['name']} released by {team['name']} (${fee:.2f}M break fee)")
+    return True, f"{d['name']} released ✓ — ${fee:.2f}M break fee"
+
+
 def swap_main_tr(career, team_id, seat, tr_driver_id):
     """v0.4: swap a main driver with a T&R driver — free, instant,
     between races (not during a race weekend). The two simply swap
@@ -1149,6 +1189,10 @@ def bot_post_race(career, rng=None):
         break_cost(); if it cannot afford the break fee, it does not
         drop) and the seat becomes empty to fill via the market /
         winter break.
+    v0.4.3: the same rule can also RELEASE a T&R driver — a T&R
+    driver never races, so only one with race stats from an earlier
+    main-seat stint this season (swapped out) can trigger it. The
+    team pays the same break fee as for a main driver.
     Never in the last 2 rounds of a season (round >= 11). At most one
     action per team per race (the worst underperformer). Applies to
     AI teams only, not to disconnected humans' teams. Every action is
@@ -1174,6 +1218,38 @@ def bot_post_race(career, rng=None):
                 if worst is None or avg > worst_avg:
                     worst, worst_avg = (seat, d), avg
         if worst is None:
+            # v0.4.3 bot parity: a T&R driver who raced earlier this
+            # season (swapped out of a main seat) and meets the SAME
+            # bad-performance rule — 0 points, average finish 18th
+            # or worse — can be released outright. A T&R driver
+            # never races, so only one with race stats from an
+            # earlier main-seat stint can trigger it. The team pays
+            # the same break fee as for a main driver; if it cannot
+            # afford it, it does not release. (One action per team
+            # per race, as above — this only runs when no main
+            # driver was acted on.)
+            bad_tr = None
+            bad_tr_avg = 0.0
+            for tr in team_tr_drivers(career, team):
+                count = tr.get("finish_count", 0)
+                if count == 0:
+                    continue
+                avg = tr.get("finish_sum", 0) / count
+                if tr.get("points", 0) == 0 and avg >= 18.0:
+                    if bad_tr is None or avg > bad_tr_avg:
+                        bad_tr, bad_tr_avg = tr, avg
+            if bad_tr is None:
+                continue
+            fee = break_fee_for_driver(career, bad_tr)
+            if fee > team["money"]:
+                continue  # cannot afford the break fee: do not release
+            team["money"] -= fee
+            _release_driver(career, bad_tr, team)
+            bad_tr["status"] = "free"
+            _recompute_team_points(career, team)
+            career["transfers"].append(
+                f"{bad_tr['name']} released by {team['name']} "
+                f"(poor results, ${fee:.2f}M break fee)")
             continue
         seat, d = worst
         trs = team_tr_drivers(career, team)

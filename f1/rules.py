@@ -119,17 +119,20 @@ def extra_driver_fine(count, free_count):
 # At season end every driver ages +1 and their rating changes by a
 # random integer drawn from the range implied by the table's
 # year-over-year deltas for that age step:
-#   low  = avg(age+1) - avg(age)
+#   low  = min(age+1) - min(age)
 #   high = max(age+1) - max(age)
-# (swapped when low > high). Examples from the spec: age 20->21 gives
-# [2,3] (avg 76->78, max 88->91) — Matthew's Câmara example;
-# 25->26 gives [0,1]; 26->27 gives [0,0]; 30->31 gives [-2,-1]
-# (older drivers decline, never stay flat). The result is clamped to
-# [min(age+1), max(age+1)] — so a driver who starts above the curve
-# (Kimi Antonelli: 87 at 19, where the max is 85) is NEVER nerfed
-# down, but can only grow up to the next age's max (88 at 20).
-# Academy drivers get a 70% chance of the high end of the range (the
-# smaller decline in decline years); everyone else draws uniformly.
+# (swapped when low > high). v0.4.3: the low end is the MIN-column
+# delta (Matthew's choice — 2026-11-11); 20->21 still gives [2,3],
+# but 26->27 is [0,1] (it was [0,0] under the v0.4.2 average delta).
+# Examples from the spec: age 20->21 gives [2,3] (min 63->65, max
+# 88->91) — Matthew's Câmara example; 25->26 gives [0,1]; 26->27
+# gives [0,1]; 30->31 gives [-2,-1] (older drivers decline, never
+# stay flat). The result is clamped to [min(age+1), max(age+1)] — so
+# a driver who starts above the curve (Kimi Antonelli: 87 at 19,
+# where the max is 85) is NEVER nerfed down, but can only grow up
+# to the next age's max (88 at 20). Academy drivers get a 70%
+# chance of the high end of the range (the smaller decline in
+# decline years); everyone else draws uniformly.
 # ---------------------------------------------------------------------------
 RATING_TABLE = {
     12: (47, 51, 55), 13: (49, 54, 59), 14: (51, 57, 63),
@@ -150,12 +153,13 @@ RATING_TABLE = {
 
 def rating_growth_range(age):
     """(low, high) integer rating change for the age step age -> age+1,
-    from the rating table's average- and max-skill deltas."""
+    from the rating table's min- and max-skill deltas (v0.4.3: the
+    low end is the MIN-column delta, Matthew's choice)."""
     cur = RATING_TABLE.get(age)
     nxt = RATING_TABLE.get(age + 1)
     if cur is None or nxt is None:
         return (0, 0)
-    low = nxt[1] - cur[1]    # average-skill delta
+    low = nxt[0] - cur[0]    # min-skill delta
     high = nxt[2] - cur[2]   # max-skill delta
     if low > high:
         low, high = high, low
