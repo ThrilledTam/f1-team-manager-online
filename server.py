@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.6.5 (beta)
+F1 Team Manager Online — v0.6.6 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -50,6 +50,10 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     delete_save  {save_id}                # host
     new_career   {name?}                  # host, lobby only
     choose_team  {team_id}                # lobby / takeover
+    leave_team   {}                       # v0.6.6: lobby only — leave the
+                                          # team you picked before the
+                                          # career starts, so you can
+                                          # pick a different one
     create_custom_team {name, colour, driver1_id, driver2_id}
     start_career {}                       # host, lobby only
     research     {priority, amount}       # "perf" | "reliability"
@@ -74,6 +78,27 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     release_academy {driver_id}               # release an academy driver (free)
     swap_driver  {seat, tr_driver_id}  # swap a main driver with a T&R driver
     promote_tr   {tr_driver_id, seat}  # promote a T&R driver to an empty seat
+    donate       {recipient_team_id, amount}  # any time, to a team you supply
+                                              # (v0.6.5: either way along a tie)
+    request_donation {target_team_id, amount}  # v0.6.6: ask a team on your
+                                              # supply tie for a donation
+    respond_donation {request_id, accept}      # v0.6.6: answer a donation
+                                              # request sent to your team
+    propose_relation {target_team_id, kind, supplier_team_id, years}
+                                          # winter break: customer / junior /
+                                          # upgrade / downgrade / end / renew
+    respond_relation {proposal_id, accept}     # winter break: answer a proposal
+    break_relation {other_team_id}            # v0.6.6: unilateral break, any
+                                          # time — $2.0M/yr, 3-round notice
+    set_wanted   {driver_id, reward, target_team_id?}  # mark a market driver
+                                          # WANTED for a team you supply
+                                          # (v0.6.6: customer or junior)
+    remove_wanted {driver_id, target_team_id?}  # remove a WANTED mark
+    promote_junior_driver {junior_driver_id, target, swap_driver_id?}
+                                          # v0.6.6: parent takes a junior
+                                          # driver (main / T&R / academy)
+                                          # into a main seat or T&R, any time;
+                                          # target {kind: "seat"|"tr", seat?}
     winter_offers {offers}             # winter break: [{driver_id, target,
                                        # seat, years}] — max 3, max 2 main,
                                        # max 1 T&R
@@ -128,7 +153,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.6.5", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.6.6", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -443,7 +468,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.5"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.6"}
 
 
 @app.get("/api/saves")
@@ -746,6 +771,27 @@ async def ws_endpoint(ws: WebSocket):
                                                     "ok": True, "message": why})
                                 await broadcast(room)
 
+            elif mtype == "leave_team":
+                # v0.6.6: leave the team you picked on the setup screen
+                # (before the career starts) so you can pick a different
+                # one — nobody has to remake the room. Lobby only: once
+                # the career has started, the mid-career picker covers
+                # takeovers and a team is never abandoned this way.
+                if not career:
+                    await send_error(ws, "Set up a career first (new or loaded).")
+                elif room["started"]:
+                    await send_error(ws, "The career has already started — you cannot leave your team now.")
+                elif not team:
+                    await send_error(ws, "You don't have a team to leave.")
+                else:
+                    ok, why = game.leave_team(career, player["player_id"])
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": "leave_team",
+                                            "ok": True, "message": why})
+                        await broadcast(room)
+
             elif mtype == "create_custom_team":
                 if not career:
                     await send_error(ws, "Set up a career first (new or loaded).")
@@ -867,12 +913,16 @@ async def ws_endpoint(ws: WebSocket):
 
             elif mtype in ("donate", "propose_relation", "respond_relation",
                            "break_relation", "set_wanted", "remove_wanted",
-                           "set_research_cap"):
-                # v0.6: team relationships. Donations and WANTED marks
-                # work any time (round or winter break); relation
-                # proposals / answers / breaks and research caps are
-                # winter-break only — the game functions enforce that
-                # and return a clear message otherwise.
+                           "promote_junior_driver", "request_donation",
+                           "respond_donation"):
+                # v0.6: team relationships. Donations, WANTED marks,
+                # junior promotions and donation requests work any
+                # time (round or winter break); relation proposals /
+                # answers are winter-break only, and unilateral
+                # breaks are any time with a 3-round notice (v0.6.6)
+                # — the game functions enforce that and return a
+                # clear message otherwise. (v0.6.6: the research cap
+                # is gone entirely — no set_research_cap any more.)
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
                 elif not team:
@@ -899,13 +949,27 @@ async def ws_endpoint(ws: WebSocket):
                     elif mtype == "set_wanted":
                         ok, why = game.set_wanted(career, team["id"],
                                                   msg.get("driver_id"),
-                                                  msg.get("reward"))
+                                                  msg.get("reward"),
+                                                  msg.get("target_team_id"))
                     elif mtype == "remove_wanted":
                         ok, why = game.remove_wanted(career, team["id"],
-                                                     msg.get("driver_id"))
-                    elif mtype == "set_research_cap":
-                        ok, why = game.set_research_cap(career, team["id"],
-                                                        msg.get("cap"))
+                                                     msg.get("driver_id"),
+                                                     msg.get("target_team_id"))
+                    elif mtype == "promote_junior_driver":
+                        target = msg.get("target") or {}
+                        ok, why = game.promote_junior_driver(
+                            career, team["id"],
+                            msg.get("junior_driver_id"),
+                            (target.get("kind"), target.get("seat")),
+                            msg.get("swap_driver_id"))
+                    elif mtype == "request_donation":
+                        ok, why = game.request_donation(
+                            career, team["id"], msg.get("target_team_id"),
+                            msg.get("amount"))
+                    elif mtype == "respond_donation":
+                        ok, why = game.respond_donation(
+                            career, team["id"], msg.get("request_id"),
+                            msg.get("accept"))
                     if not ok:
                         await send_error(ws, why)
                     else:
