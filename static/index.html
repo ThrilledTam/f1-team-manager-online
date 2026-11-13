@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.6.5</title>
+<title>F1 Team Manager Online — v0.6.6</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -131,7 +131,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.5 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.6 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -1004,7 +1004,12 @@ function teamRowHtml(t, myT){
     return `<div class="bar-row">${dot}${name}<span class="note">${drivers}${mine}</span>${btn}</div>`;
   }
   if(t.owner_player_id === myId){
-    return `<div class="bar-row">${dot}${name}<span class="note">${drivers}${mine}</span></div>`;
+    // v0.6.6: leave the team you picked (lobby only — before the
+    // career starts) so you can pick a different one, instead of
+    // remaking the room. Once the career has started the button is
+    // gone — the mid-career picker covers takeovers.
+    const leave = !room.started ? ` <button class="secondary" data-leave-team>Leave team</button>` : "";
+    return `<div class="bar-row">${dot}${name}<span class="note">${drivers}${mine}</span>${leave}</div>`;
   }
   const owner = room.players.find(p => p.player_id === t.owner_player_id);
   if(owner && owner.connected){
@@ -1022,6 +1027,7 @@ function teamRowHtml(t, myT){
 
 function wireTeamButtons(){
   document.querySelectorAll("[data-team]").forEach(b => b.onclick = () => send({type:"choose_team", team_id: b.dataset.team}));
+  document.querySelectorAll("[data-leave-team]").forEach(b => b.onclick = () => send({type:"leave_team"}));
 }
 
 /* v0.6.2: the mid-career picker — same rows as the lobby, on its
@@ -1256,8 +1262,23 @@ function renderMyTeam(){
     const netLine = (f.net_per_race !== undefined && f.net_per_race !== null)
       ? `<p><b>Net per race: ${f.net_per_race >= 0 ? "+" : "−"}${money(Math.abs(f.net_per_race))}</b> <span class="note">(per-race gains ${money(f.eprg)} − salaries ${money(f.salary_per_race)} − extra charges ${money(f.extra_charges_per_race || 0)})</span></p>`
       : "";
+    // v0.6.6: the junior income share — a junior team pays 15% of
+    // its race prize to its parent after each race; a parent
+    // receives it from its junior. Shown as its own lines (the
+    // share is not part of the net — the net is an EPRG-based
+    // estimate and the race prize the share comes from is not in
+    // the net either). The lines only appear once a share has
+    // actually been paid this season.
+    const shareOutLine = (t.sup_stage === 2 && ((f.junior_share_last_race || 0) > 0 || (f.junior_share_season || 0) > 0))
+      ? `<p>Junior share — 15% of your race prize to ${relSupplier ? esc(relSupplier.name) : "your parent"}: <b>−${money(f.junior_share_last_race || 0)}</b> last race · ${money(f.junior_share_season || 0)} this season</p>`
+      : "";
+    const shareInLine = ((f.junior_share_received_last_race || 0) > 0 || (f.junior_share_received_season || 0) > 0)
+      ? `<p>Junior share received from ${esc(f.junior_team_name || "your junior team")} — 15% of their race prize: <b>+${money(f.junior_share_received_last_race || 0)}</b> last race · ${money(f.junior_share_received_season || 0)} this season</p>`
+      : "";
     $("finances-box").innerHTML = `<p>Funds: <b>${money(f.money)}</b> · Constructor position: ${f.constructor_pos}</p>
       ${netLine}
+      ${shareOutLine}
+      ${shareInLine}
       <p>Estimated post-season injection: +${money(f.epsci)} · Estimated per-race gains: +${money(f.eprg)}</p>
       <p>Per-race salary cost: ${money(f.salary_per_race)} (${f.driver_costs.map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")}${(f.tr_costs || []).length ? ` · T&R: ${(f.tr_costs || []).map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")}` : ""})</p>
       ${extraLine}
@@ -1337,12 +1358,15 @@ function renderDriversTab(){
 // v0.6: Relationships tab — the supplier / customer / junior system.
 // Shows your current relation (supplier + type + years left, or "No
 // supplier"), the teams you supply, donations, proposals (incoming
-// to accept/decline, outgoing waiting), and — if you parent a junior
-// team — its WANTED marks and research cap. Relation changes happen
-// in the winter break only; donations and WANTED marks work any
-// time. The same render fills the tab AND the winter-break card's
-// Relationships section (renderGame calls it for the winter box),
-// so both stay in sync.
+// to accept/decline, outgoing waiting), WANTED marks for every team
+// you supply, and — if you parent a junior team — its 15% race-prize
+// share and promotions. Relation changes happen in the winter break
+// only (breaking a deal works any time, with a 3-round notice —
+// v0.6.6); donations, WANTED marks, promotions and donation requests
+// work any time. v0.6.6: the research cap is gone entirely. The same
+// render fills the tab AND the winter-break card's Relationships
+// section (renderGame calls it for the winter box), so both stay in
+// sync.
 function renderRelationsTab(box){
   if(!box) return;
   const c = room.career; if(!c) return;
@@ -1357,18 +1381,31 @@ function renderRelationsTab(box){
   const proposals = c.relation_proposals || [];
   const incoming = proposals.filter(p => p.target_team_id === myTeamId);
   const outgoing = proposals.filter(p => p.proposer_team_id === myTeamId);
-  // Per-relation actions (winter break only): step down (junior only),
-  // renew (expired deals only, with a years picker), propose ending
-  // it (free — the other side must agree), or break it now (unilateral,
-  // $1.0M per remaining year, shown upfront).
+  // Per-relation actions: step down (junior only), renew (expired
+  // deals only, with a years picker), propose ending it (free — the
+  // other side must agree) — all winter-break only — and break it
+  // now (unilateral, any time, $2.0M per remaining year, paid when
+  // the break starts; the deal ends after a 3-round notice and stays
+  // fully active meanwhile — v0.6.6). A deal with a pending break
+  // notice shows the notice instead of the buttons.
+  const noticeText = (t2) => {
+    const n = t2.break_notice;
+    if(!n) return "";
+    const breaker = teamById(n.breaker_id);
+    return ` <b>⚠️ Break notice: this deal ends in ${n.rounds_left} round${n.rounds_left === 1 ? "" : "s"}${breaker ? ` (started by ${esc(breaker.name)})` : ""} — it stays fully active until then.</b>`;
+  };
   const relButtons = (other, stage, years) => {
-    if(!isWB) return ` <span class="note">Relation changes are winter-break only.</span>`;
-    const fee = (years || 0) * 1.0;
+    if(other.break_notice) return "";
+    const fee = (years || 0) * 2.0;
     let h = "";
-    if(stage === 2) h += ` <button class="secondary" data-rel-action="downgrade" data-other="${other.id}" title="Step down to Customer — the other side must agree">Propose step-down to Customer</button>`;
-    if((years || 0) <= 0) h += ` <select class="rel-renew-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> <button class="secondary" data-rel-action="renew" data-other="${other.id}" title="Renew the deal — the other side must agree">Propose renewal</button>`;
-    h += ` <button class="secondary" data-rel-action="end" data-other="${other.id}" title="Free — the other side must agree">Propose ending it</button>`;
-    h += ` <button class="danger" data-rel-action="break" data-other="${other.id}" data-fee="${fee}" title="Breaks the deal now — you pay the fee, no agreement needed">${fee > 0 ? `Break now — ${money(fee)}` : "Break now — Free"}</button>`;
+    if(isWB){
+      if(stage === 2) h += ` <button class="secondary" data-rel-action="downgrade" data-other="${other.id}" title="Step down to Customer — the other side must agree">Propose step-down to Customer</button>`;
+      if((years || 0) <= 0) h += ` <select class="rel-renew-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> <button class="secondary" data-rel-action="renew" data-other="${other.id}" title="Renew the deal — the other side must agree">Propose renewal</button>`;
+      h += ` <button class="secondary" data-rel-action="end" data-other="${other.id}" title="Free — the other side must agree">Propose ending it</button>`;
+    } else {
+      h += ` <span class="note">Relation changes are winter-break only — except breaking a deal, which works any time.</span>`;
+    }
+    h += ` <button class="danger" data-rel-action="break" data-other="${other.id}" data-fee="${fee}" title="Breaks the deal after a 3-round notice — you pay the fee now, no agreement needed">${fee > 0 ? `Break now — ${money(fee)}` : "Break now — Free"}</button>`;
     return h;
   };
   const proposalText = p => {
@@ -1382,19 +1419,19 @@ function renderRelationsTab(box){
     if(p.kind === "renew") return `Renew the ${sn}–${cn} deal for ${p.years} more years`;
     return p.kind;
   };
-  let html = `<p class="note">Supplier deals, donations, WANTED drivers and research caps — team relationships change over time. Relation changes happen in the winter break; donations and WANTED marks work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
+  let html = `<p class="note">Supplier deals, donations, WANTED drivers, junior promotions and donation requests — team relationships change over time. Relation changes happen in the winter break (breaking a deal works any time, with a 3-round notice); donations, WANTED marks, promotions and donation requests work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
   // Your relation.
   html += `<h3>Your relation</h3>`;
   if(supplier){
     const due = (t.relation_years || 0) <= 0;
-    html += `<div class="bar-row"><span class="team-bar" style="color:${supplier.colour}">|</span> ${teamNameHtml(supplier)} — ${stageName(t.sup_stage)} · ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left${due ? ` <b>— contract expired! Renew it in the winter break or it lapses at season start.</b>` : ""}${(t.sup_stage === 2 && t.research_cap !== null && t.research_cap !== undefined) ? `<br><span class="note">Research cap: ${money(t.research_cap)}/season — spent ${money(t.research_spent_season || 0)} this season.</span>` : ""}${relButtons(supplier, t.sup_stage, t.relation_years)}</div>`;
+    html += `<div class="bar-row"><span class="team-bar" style="color:${supplier.colour}">|</span> ${teamNameHtml(supplier)} — ${stageName(t.sup_stage)} · ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left${due ? ` <b>— contract expired! Renew it in the winter break or it lapses at season start.</b>` : ""}${noticeText(t)}${relButtons(supplier, t.sup_stage, t.relation_years)}</div>`;
   } else {
     html += `<p class="note">No supplier — you are independent.</p>`;
   }
   // Teams you supply.
   html += `<h3>Teams you supply</h3>`;
   if(supplied.length){
-    html += supplied.map(x => `<div class="bar-row"><span class="team-bar" style="color:${x.colour}">|</span> ${teamNameHtml(x)} — ${stageName(x.sup_stage)} · ${x.relation_years} yr${x.relation_years === 1 ? "" : "s"} left${(x.relation_years || 0) <= 0 ? ` <b>— contract expired!</b>` : ""}${relButtons(x, x.sup_stage, x.relation_years)}</div>`).join("");
+    html += supplied.map(x => `<div class="bar-row"><span class="team-bar" style="color:${x.colour}">|</span> ${teamNameHtml(x)} — ${stageName(x.sup_stage)} · ${x.relation_years} yr${x.relation_years === 1 ? "" : "s"} left${(x.relation_years || 0) <= 0 ? ` <b>— contract expired!</b>` : ""}${noticeText(x)}${relButtons(x, x.sup_stage, x.relation_years)}</div>`).join("");
   } else {
     html += `<p class="note">You don't supply any team yet.</p>`;
   }
@@ -1408,6 +1445,32 @@ function renderRelationsTab(box){
     html += `<p class="note">Donate to a team you supply — or to your supplier — any amount, any time, no fee. It comes straight out of your bank.</p><select class="rel-donate-team">${donateTargets.map(x => `<option value="${x.id}">${x.label}</option>`).join("")}</select> <input class="rel-donate-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M <button data-rel-donate>Donate</button>`;
   } else {
     html += `<p class="note">Donations go to teams you supply (or to your supplier) — propose a relation in the winter break to start one.</p>`;
+  }
+  // v0.6.6: donation requests — ask a team on your supply tie for a
+  // donation of a set amount, any time; the other side accepts or
+  // declines. A bot team answers on the spot (it accepts when it can
+  // pay and still keep $5M in the bank).
+  html += `<h3>Donation requests</h3>`;
+  const dreqs = c.donation_requests || [];
+  const dIncoming = dreqs.filter(r => r.target_team_id === myTeamId);
+  const dOutgoing = dreqs.filter(r => r.requester_team_id === myTeamId);
+  if(donateTargets.length){
+    html += `<p class="note">Ask a team on your supply tie for a donation — they can accept or decline it.</p><select class="rel-dreq-team">${donateTargets.map(x => `<option value="${x.id}">${x.label}</option>`).join("")}</select> <input class="rel-dreq-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M <button data-rel-dreq>Request donation</button>`;
+  }
+  if(dIncoming.length){
+    html += dIncoming.map(r => {
+      const req = teamById(r.requester_team_id);
+      return `<div class="bar-row"><b>${req ? esc(req.name) : "?"}</b> asks you for a <b>${money(r.amount)}</b> donation <button data-rel-dreq-respond="accept" data-request-id="${r.id}">Accept</button> <button class="secondary" data-rel-dreq-respond="decline" data-request-id="${r.id}">Decline</button></div>`;
+    }).join("");
+  }
+  if(dOutgoing.length){
+    html += dOutgoing.map(r => {
+      const tgt = teamById(r.target_team_id);
+      return `<div class="bar-row">Waiting for <b>${tgt ? esc(tgt.name) : "?"}</b>: your request for a <b>${money(r.amount)}</b> donation</div>`;
+    }).join("");
+  }
+  if(!donateTargets.length && !dIncoming.length && !dOutgoing.length){
+    html += `<p class="note">Donation requests go along a supply tie — propose a relation in the winter break to start one.</p>`;
   }
   // Propose a new relation (winter break only). v0.6.5: a team that
   // already HAS a supplier (customer or junior) cannot offer supply
@@ -1437,21 +1500,39 @@ function renderRelationsTab(box){
       return `<div class="bar-row">Waiting for <b>${target ? esc(target.name) : "?"}</b>: ${esc(proposalText(p))}</div>`;
     }).join("");
   }
-  // Junior team: WANTED marks + research cap.
-  if(junior){
-    html += `<h3>Your junior team — ${esc(junior.name)}</h3>`;
-    const marks = junior.wanted || [];
-    html += `<p class="note">WANTED drivers: mark a free-agent or F2 driver and ${esc(junior.name)} gets the reward if they sign them (main or T&amp;R). The reward is a cash bounty — it never changes the driver's reputation or rating. Max 3 at a time.</p>`;
+  // v0.6.6: WANTED marks — for EVERY team you supply (customers
+  // too, same rules as juniors). Each supplied team gets its own
+  // block, with its own mark form (the target team rides along as a
+  // data attribute so the buttons send the right team).
+  supplied.forEach(sup => {
+    html += `<h3>WANTED drivers — ${esc(sup.name)} (${stageName(sup.sup_stage)})</h3>`;
+    const marks = sup.wanted || [];
+    html += `<p class="note">Mark a free-agent or F2 driver and ${esc(sup.name)} gets the reward if they sign them (main or T&amp;R). The reward is a cash bounty — it never changes the driver's reputation or rating. Max 3 at a time.</p>`;
     html += marks.length ? marks.map(w => {
       const d = driverById(w.driver_id);
-      return `<div class="bar-row">⭐ <b>${d ? esc(d.name) : "?"}</b> — ${money(w.reward)} reward <button class="secondary" data-rel-wanted-remove data-driver-id="${w.driver_id}">Remove</button></div>`;
+      return `<div class="bar-row">⭐ <b>${d ? esc(d.name) : "?"}</b> — ${money(w.reward)} reward <button class="secondary" data-rel-wanted-remove data-driver-id="${w.driver_id}" data-target-team="${sup.id}">Remove</button></div>`;
     }).join("") : `<p class="note">No WANTED drivers marked yet.</p>`;
     const market = c.drivers.filter(d => d.status === "free" || d.status === "f2");
-    html += `<select class="rel-wanted-driver">${market.map(d => `<option value="${d.id}">${esc(d.name)} (${d.age}, ${money(d.salary)}/yr)</option>`).join("")}</select> <input class="rel-wanted-reward" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M reward <button data-rel-wanted-add>Mark WANTED</button>`;
-    const cap = junior.research_cap;
-    html += `<p class="note">Research cap for ${esc(junior.name)}: ${cap !== null && cap !== undefined ? money(cap) + "/season" : "none"} — spent ${money(junior.research_spent_season || 0)} this season. ${isWB ? "Set it for the upcoming season (Performance + Reliability research only — Develop and reg research are not capped):" : "Caps are set in the winter break."}</p>`;
-    if(isWB){
-      html += `<input class="rel-cap-amount" type="number" min="0.1" step="0.1" value="${cap !== null && cap !== undefined ? cap : 15}" style="width:90px"> $M/season <button data-rel-cap-set>Set cap</button> <button class="secondary" data-rel-cap-clear>Clear cap</button>`;
+    html += `<select class="rel-wanted-driver" data-target-team="${sup.id}">${market.map(d => `<option value="${d.id}">${esc(d.name)} (${d.age}, ${money(d.salary)}/yr)</option>`).join("")}</select> <input class="rel-wanted-reward" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M reward <button data-rel-wanted-add data-target-team="${sup.id}">Mark WANTED</button>`;
+  });
+  // v0.6.6: your junior team — the 15% race-prize share and
+  // promotions. The junior pays 15% of its race prize to you after
+  // each race; you can take any of its drivers (main, T&R or
+  // academy) into your main seats or T&R, any time, with no break
+  // fee — swap one of your drivers for them, or move them straight
+  // into an empty main seat.
+  if(junior){
+    html += `<h3>Your junior team — ${esc(junior.name)}</h3>`;
+    html += `<p class="note">Junior share: ${esc(junior.name)} pays you 15% of its race prize after each race — you received <b>+${money(t.junior_share_received_last_race || 0)}</b> last race · ${money(t.junior_share_received_season || 0)} this season.</p>`;
+    const jDrivers = c.drivers.filter(d =>
+      (d.team_id === junior.id && (d.status === "f1" || d.status === "tr")) ||
+      d.academy_team_id === junior.id);
+    const myDrivers = c.drivers.filter(d => d.team_id === myTeamId && (d.status === "f1" || d.status === "tr"));
+    if(jDrivers.length){
+      html += `<p class="note">Promote a junior driver into your team — any time, no break fee. Pick the driver and the seat: an occupied seat swaps with one of your drivers (pick which one, or leave it blank to swap with the seat's current driver); an empty seat takes them straight in.</p>`;
+      html += `<select class="rel-promote-driver">${jDrivers.map(d => `<option value="${d.id}">${esc(d.name)} (${d.status === "f1" ? "main" : d.status === "tr" ? "T&R" : "academy"}, ${money(d.salary)}/yr)</option>`).join("")}</select> <select class="rel-promote-target"><option value="seat1">Your Seat 1</option><option value="seat2">Your Seat 2</option><option value="tr">Your T&amp;R</option></select> <select class="rel-promote-swap"><option value="">Swap with the seat's driver</option>${myDrivers.map(d => `<option value="${d.id}">${esc(d.name)} (${d.status === "f1" ? "main" : "T&R"})</option>`).join("")}</select> <button data-rel-promote>Promote / Swap</button>`;
+    } else {
+      html += `<p class="note">${esc(junior.name)} has no drivers to promote right now.</p>`;
     }
   }
   box.innerHTML = html;
@@ -1463,7 +1544,7 @@ function renderRelationsTab(box){
       const fee = parseFloat(b.dataset.fee || "0");
       const otherTeam = teamById(other);
       openConfirm("Break this deal?",
-        `Break the deal with ${otherTeam ? otherTeam.name : "that team"} now? It costs ${money(fee)} ($1.0M per remaining contract year)${fee <= 0 ? " — the contract has expired, so it is free" : ""}. The tie ends immediately.`,
+        `Break the deal with ${otherTeam ? otherTeam.name : "that team"}? It costs ${money(fee)} ($2.0M per remaining contract year)${fee <= 0 ? " — the contract has expired, so it is free" : ""}. The deal ends after a 3-round notice (winter-break rounds count) and stays fully active until then.`,
         () => send({type:"break_relation", other_team_id: other}));
     } else if(action === "renew"){
       const sel = b.closest("div").querySelector(".rel-renew-years");
@@ -1493,26 +1574,41 @@ function renderRelationsTab(box){
   };
   box.querySelectorAll("[data-rel-respond]").forEach(b => b.onclick = () =>
     send({type:"respond_relation", proposal_id: b.dataset.proposalId, accept: b.dataset.relRespond === "accept"}));
-  const wantedBtn = box.querySelector("[data-rel-wanted-add]");
-  if(wantedBtn) wantedBtn.onclick = () => {
-    const sel = box.querySelector(".rel-wanted-driver");
-    const reward = box.querySelector(".rel-wanted-reward");
+  box.querySelectorAll("[data-rel-wanted-add]").forEach(b => b.onclick = () => {
+    const target = b.dataset.targetTeam;
+    const sel = box.querySelector(`.rel-wanted-driver[data-target-team="${target}"]`);
+    // The reward input sits right after that team's driver select.
+    const reward = sel ? sel.nextElementSibling : null;
     if(!sel || !sel.value){ showErr("game-err", "Pick a driver to mark WANTED."); return; }
     const r = reward ? parseFloat(reward.value) : NaN;
     if(!r || r <= 0){ showErr("game-err", "Pick a reward over $0M."); return; }
-    send({type:"set_wanted", driver_id: sel.value, reward: r});
-  };
+    send({type:"set_wanted", driver_id: sel.value, reward: r, target_team_id: target});
+  });
   box.querySelectorAll("[data-rel-wanted-remove]").forEach(b => b.onclick = () =>
-    send({type:"remove_wanted", driver_id: b.dataset.driverId}));
-  const capBtn = box.querySelector("[data-rel-cap-set]");
-  if(capBtn) capBtn.onclick = () => {
-    const inp = box.querySelector(".rel-cap-amount");
-    const v = inp ? parseFloat(inp.value) : NaN;
-    if(!v || v <= 0){ showErr("game-err", "Pick a cap over $0M."); return; }
-    send({type:"set_research_cap", cap: v});
+    send({type:"remove_wanted", driver_id: b.dataset.driverId, target_team_id: b.dataset.targetTeam}));
+  // v0.6.6: donation requests.
+  const dreqBtn = box.querySelector("[data-rel-dreq]");
+  if(dreqBtn) dreqBtn.onclick = () => {
+    const sel = box.querySelector(".rel-dreq-team");
+    const amt = box.querySelector(".rel-dreq-amount");
+    const amount = amt ? parseFloat(amt.value) : NaN;
+    if(!sel || !sel.value || !amount || amount <= 0){ showErr("game-err", "Pick a team and an amount over $0M."); return; }
+    send({type:"request_donation", target_team_id: sel.value, amount});
   };
-  const capClear = box.querySelector("[data-rel-cap-clear]");
-  if(capClear) capClear.onclick = () => send({type:"set_research_cap", cap: null});
+  box.querySelectorAll("[data-rel-dreq-respond]").forEach(b => b.onclick = () =>
+    send({type:"respond_donation", request_id: b.dataset.requestId, accept: b.dataset.relDreqRespond === "accept"}));
+  // v0.6.6: promote a junior driver into the parent team.
+  const promoteBtn = box.querySelector("[data-rel-promote]");
+  if(promoteBtn) promoteBtn.onclick = () => {
+    const drv = box.querySelector(".rel-promote-driver");
+    const tgt = box.querySelector(".rel-promote-target");
+    const swp = box.querySelector(".rel-promote-swap");
+    if(!drv || !drv.value || !tgt || !tgt.value){ showErr("game-err", "Pick a driver and a seat."); return; }
+    const target = tgt.value === "tr" ? {kind: "tr"}
+      : {kind: "seat", seat: tgt.value === "seat1" ? 1 : 2};
+    send({type:"promote_junior_driver", junior_driver_id: drv.value, target,
+          swap_driver_id: swp && swp.value ? swp.value : null});
+  };
 }
 
 function renderTabs(){
@@ -1606,13 +1702,14 @@ function renderTabs(){
     // represent that team. Free agents / unaffiliated F2 stay neutral.
     const nameColour = (d.status === "f1" || d.status === "tr") && tm ? tm.colour : (acTeam ? acTeam.colour : null);
     // v0.6: WANTED badge — a parent marks a market driver WANTED for
-    // their junior team; the mark + reward is shown to the junior
-    // team (they get paid if they sign them) and to the parent (their
-    // own mark). Other teams see nothing — the bounty is between
-    // parent and junior.
+    // a team they supply; the mark + reward is shown to that team
+    // (they get paid if they sign them) and to the parent (their own
+    // mark). v0.6.6: WANTED works for CUSTOMER teams too, same rules
+    // as juniors. Other teams see nothing — the bounty is between
+    // parent and supplied team.
     let wantedBadge = "";
     if(myTeam){
-      for(const jt of c.teams.filter(x => x.sup_stage === 2)){
+      for(const jt of c.teams.filter(x => x.sup_stage === 1 || x.sup_stage === 2)){
         const mark = (jt.wanted || []).find(w => w.driver_id === d.id);
         if(!mark) continue;
         const parent = teamById(jt.supplier_id);
