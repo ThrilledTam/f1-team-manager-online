@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.6.3 (beta)
+F1 Team Manager Online — v0.6.4 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -128,7 +128,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.6.3", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.6.4", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -158,6 +158,10 @@ def new_room(host_nickname, host_colour):
     room = {
         "code": code,
         "host_id": None,
+        # v0.6.4: the room creator. The host crown belongs to the
+        # creator and returns to them on rejoin — a transient
+        # disconnect must not lose it (see promote_host_if_needed).
+        "creator_id": None,
         "players": [],          # {player_id, nickname, colour, connected, joined_at}
         "career": None,        # career dict or None
         "career_mode": None,   # None | "new" | "loaded"
@@ -186,16 +190,13 @@ def add_player(room, nickname, colour, player_id=None):
     room["players"].append(player)
     if room["host_id"] is None:
         room["host_id"] = pid
+        room["creator_id"] = pid
     room["empty_since"] = None
     return player
 
 
 def get_player(room, player_id):
     return next((p for p in room["players"] if p["player_id"] == player_id), None)
-
-
-def connected_ids(room):
-    return {p["player_id"] for p in room["players"] if p["connected"]}
 
 
 def my_team_for(room, player_id):
@@ -389,15 +390,32 @@ async def send_error(ws, message):
         pass
 
 
-def promote_host_if_needed(room):
-    if any(p["player_id"] == room["host_id"] and p["connected"]
-           for p in room["players"]):
+def promote_host_if_needed(room, now=None):
+    """v0.6.4: a brief disconnect must NOT move the host crown. The
+    old code promoted a new host the moment the host's WebSocket
+    dropped, so a backgrounded tab lost the crown (and with it the
+    ability to save) to another player. Now the crown only moves
+    after a long absence: the host must have been disconnected for
+    at least TAKEOVER_GRACE_SECONDS (60s). A quick reload or idle
+    gap never loses the host. When the room creator reconnects,
+    the crown returns to them (see the rejoin handler)."""
+    now = time.time() if now is None else now
+    host = get_player(room, room["host_id"]) if room.get("host_id") else None
+    if host is not None and host.get("connected"):
         return
+    if host is not None:
+        disc = host.get("disconnected_at")
+        if disc is None or (now - disc) < TAKEOVER_GRACE_SECONDS:
+            return  # transient disconnect — crown stays put
+    # Host is gone (record removed) or gone >= 60s: promote the
+    # earliest-joined connected player. If nobody is connected,
+    # leave the crown where it is (the room expires on its own).
     for p in room["players"]:
         if p["connected"]:
             room["host_id"] = p["player_id"]
             return
-    room["host_id"] = room["players"][0]["player_id"] if room["players"] else None
+    if host is None and room["players"]:
+        room["host_id"] = room["players"][0]["player_id"]
 
 
 async def cleanup_loop():
@@ -425,7 +443,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.3"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.4"}
 
 
 @app.get("/api/saves")
@@ -519,6 +537,11 @@ async def ws_endpoint(ws: WebSocket):
                 player["disconnected_at"] = None
                 player["ws"] = ws
                 room["empty_since"] = None
+                # v0.6.4: the crown returns to the room creator when
+                # they reconnect — a transient disconnect must not
+                # lose the host (see promote_host_if_needed).
+                if room.get("creator_id") == player["player_id"]:
+                    room["host_id"] = player["player_id"]
                 promote_host_if_needed(room)
                 await ws.send_json({"type": "joined", "code": room["code"],
                                     "player_id": player["player_id"],
@@ -776,7 +799,7 @@ async def ws_endpoint(ws: WebSocket):
                     await send_error(ws, "The career has not started yet.")
                 else:
                     ok, _advanced, why = game.vote_next(
-                        career, player["player_id"], connected_ids(room), rng=rng)
+                        career, player["player_id"], rng=rng)
                     if not ok:
                         await send_error(ws, why)
                     else:
@@ -790,12 +813,30 @@ async def ws_endpoint(ws: WebSocket):
                     await send_error(ws, "The career has not started yet.")
                 else:
                     ok, _advanced, why = game.host_skip_results(
-                        career, player["player_id"], connected_ids(room),
+                        career, player["player_id"],
                         is_host, rng=rng)
                     if not ok:
                         await send_error(ws, why)
                     else:
                         await ws.send_json({"type": "action", "action": "host_skip",
+                                            "ok": True, "message": why})
+                    await broadcast(room)
+
+            elif mtype == "host_advance":
+                # v0.6.4: host-only override for the Advance — starts
+                # the race weekend now even though not every human
+                # has advanced. The escape hatch when a human has
+                # disconnected and is not coming back (the advance
+                # itself waits for ALL humans, connected or not).
+                if not room["started"] or not career:
+                    await send_error(ws, "The career has not started yet.")
+                else:
+                    ok, _raced, why = game.host_skip_advance(
+                        career, player["player_id"], is_host, rng=rng)
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action", "action": "host_advance",
                                             "ok": True, "message": why})
                     await broadcast(room)
 
@@ -936,7 +977,7 @@ async def ws_endpoint(ws: WebSocket):
                         ok, _advanced, why = game.winter_next(career, team["id"], rng=rng)
                     elif mtype == "advance":
                         ok, _raced, why = game.advance_team(
-                            career, team["id"], connected_ids(room), rng=rng)
+                            career, team["id"], rng=rng)
                     if not ok:
                         await send_error(ws, why)
                     else:
@@ -972,11 +1013,12 @@ async def ws_endpoint(ws: WebSocket):
             player.pop("ws", None)
         if room is not None:
             promote_host_if_needed(room)
-            # v0.1: a disconnect shrinks the NEXT-vote voter set, so a
-            # stalled vote can now complete (the disconnected team is AI).
+            # v0.6.4: a disconnect must NOT complete the vote — the
+            # disconnected voter is still pending, so this is a no-op
+            # unless every human has already voted.
             career = room.get("career")
             if career and career.get("phase") in ("qual_results", "race_results"):
-                game.check_results_vote(career, connected_ids(room))
+                game.check_results_vote(career)
             if not any(p["connected"] for p in room["players"]):
                 room["empty_since"] = time.time()
             await broadcast(room)
