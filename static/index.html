@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.6.4</title>
+<title>F1 Team Manager Online — v0.6.5</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -34,6 +34,10 @@
   .pill { display:inline-block; background:#30363d; border-radius:20px; padding:6px 12px; font-size:14px; margin:3px; min-height:32px; }
   .pill.adv { background:#238636; }
   .pill.wait { background:#9e6a03; }
+  /* v0.6.5: JUNIOR badge — marks a junior team wherever its name
+     appears (standings, Relationships tab, team lists). Customer
+     teams get no badge. */
+  .jr-badge { display:inline-block; background:#8250df; color:#fff; border-radius:4px; padding:1px 5px; font-size:11px; font-weight:700; vertical-align:middle; margin-left:4px; }
   .note { color:#8b949e; font-size:14px; }
   .err { background:#3d1113; border:1px solid #da3633; color:#ffb3b0; border-radius:8px; padding:10px; margin:10px 0; }
   .ok { background:#0e2a18; border:1px solid #238636; color:#a9e8bd; border-radius:8px; padding:10px; margin:10px 0; }
@@ -127,7 +131,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.4 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.5 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -693,16 +697,23 @@ function driverNameHtml(name, teamColour, cha, withBar, barColour){
 }
 /* Team name in team colour, supplier suffix in the supplier's colour
    (e.g. McLaren-Mercedes). The supplier is a constructor team, resolved
-   through supplier_id; a custom team has no supplier. */
+   through supplier_id; a custom team has no supplier. v0.6.5: a junior
+   team (sup_stage 2) carries a JUNIOR badge so players can tell it
+   apart from a normal customer team at a glance. */
 function teamNameHtml(team){
   if(!team) return "";
   const main = `<span style="color:${team.colour}; font-weight:700">${esc(team.name)}</span>`;
+  let out = main;
   if(team.supplier_name){
     const sup = team.supplier_id ? teamById(team.supplier_id) : null;
     const sc = sup ? sup.colour : "#8b949e";
-    return main + `-<span style="color:${sc}">${esc(team.supplier_name)}</span>`;
+    out += `-<span style="color:${sc}">${esc(team.supplier_name)}</span>`;
   }
-  return main;
+  if(team.sup_stage === 2){
+    const supName = team.supplier_name ? esc(team.supplier_name) : "its parent team";
+    out += ` <span class="jr-badge" title="Junior team of ${supName}">JUNIOR</span>`;
+  }
+  return out;
 }
 /* Classification table (qualifying or race), gaps only — never absolute
    times. Race rows also get a G/L column (positions gained/lost vs
@@ -1376,29 +1387,40 @@ function renderRelationsTab(box){
   html += `<h3>Your relation</h3>`;
   if(supplier){
     const due = (t.relation_years || 0) <= 0;
-    html += `<div class="bar-row"><span class="team-bar" style="color:${supplier.colour}">|</span> <b>${esc(supplier.name)}</b> — ${stageName(t.sup_stage)} · ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left${due ? ` <b>— contract expired! Renew it in the winter break or it lapses at season start.</b>` : ""}${(t.sup_stage === 2 && t.research_cap !== null && t.research_cap !== undefined) ? `<br><span class="note">Research cap: ${money(t.research_cap)}/season — spent ${money(t.research_spent_season || 0)} this season.</span>` : ""}${relButtons(supplier, t.sup_stage, t.relation_years)}</div>`;
+    html += `<div class="bar-row"><span class="team-bar" style="color:${supplier.colour}">|</span> ${teamNameHtml(supplier)} — ${stageName(t.sup_stage)} · ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left${due ? ` <b>— contract expired! Renew it in the winter break or it lapses at season start.</b>` : ""}${(t.sup_stage === 2 && t.research_cap !== null && t.research_cap !== undefined) ? `<br><span class="note">Research cap: ${money(t.research_cap)}/season — spent ${money(t.research_spent_season || 0)} this season.</span>` : ""}${relButtons(supplier, t.sup_stage, t.relation_years)}</div>`;
   } else {
     html += `<p class="note">No supplier — you are independent.</p>`;
   }
   // Teams you supply.
   html += `<h3>Teams you supply</h3>`;
   if(supplied.length){
-    html += supplied.map(x => `<div class="bar-row"><span class="team-bar" style="color:${x.colour}">|</span> <b>${esc(x.name)}</b> — ${stageName(x.sup_stage)} · ${x.relation_years} yr${x.relation_years === 1 ? "" : "s"} left${(x.relation_years || 0) <= 0 ? ` <b>— contract expired!</b>` : ""}${relButtons(x, x.sup_stage, x.relation_years)}</div>`).join("");
+    html += supplied.map(x => `<div class="bar-row"><span class="team-bar" style="color:${x.colour}">|</span> ${teamNameHtml(x)} — ${stageName(x.sup_stage)} · ${x.relation_years} yr${x.relation_years === 1 ? "" : "s"} left${(x.relation_years || 0) <= 0 ? ` <b>— contract expired!</b>` : ""}${relButtons(x, x.sup_stage, x.relation_years)}</div>`).join("");
   } else {
     html += `<p class="note">You don't supply any team yet.</p>`;
   }
-  // Donate.
+  // Donate. v0.6.5: a customer/junior team can also donate UP to its
+  // supplier (parent) — the parent appears as a target alongside the
+  // teams this team supplies, with the same any-amount / no-fee rules.
   html += `<h3>Donate</h3>`;
-  if(supplied.length){
-    html += `<p class="note">Donate to a team you supply — any amount, any time, no fee. It comes straight out of your bank.</p><select class="rel-donate-team">${supplied.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select> <input class="rel-donate-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M <button data-rel-donate>Donate</button>`;
+  const donateTargets = supplied.map(x => ({id: x.id, label: esc(x.name)}));
+  if(supplier) donateTargets.push({id: supplier.id, label: `${esc(supplier.name)} (your supplier)`});
+  if(donateTargets.length){
+    html += `<p class="note">Donate to a team you supply — or to your supplier — any amount, any time, no fee. It comes straight out of your bank.</p><select class="rel-donate-team">${donateTargets.map(x => `<option value="${x.id}">${x.label}</option>`).join("")}</select> <input class="rel-donate-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M <button data-rel-donate>Donate</button>`;
   } else {
-    html += `<p class="note">Donations go to teams you supply — propose a relation in the winter break to start supplying one.</p>`;
+    html += `<p class="note">Donations go to teams you supply (or to your supplier) — propose a relation in the winter break to start one.</p>`;
   }
-  // Propose a new relation (winter break only).
+  // Propose a new relation (winter break only). v0.6.5: a team that
+  // already HAS a supplier (customer or junior) cannot offer supply
+  // contracts to other teams — the propose controls are hidden and
+  // the reason shown instead (the server rejects it too).
   html += `<h3>Propose a relation</h3>`;
   if(isWB){
-    const others = c.teams.filter(x => x.id !== myTeamId);
-    html += `<p class="note">Propose a deal — the other team must accept. Nothing → Customer → Junior, one step at a time; a team has one supplier, and a supplier has at most one junior team. Pick 1–4 contract years.</p><select class="rel-propose-team">${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select> <select class="rel-propose-kind"><option value="customer">Customer</option><option value="junior">Junior</option></select> <select class="rel-propose-role"><option value="me">I supply them</option><option value="them">They supply me</option></select> <select class="rel-propose-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> yrs <button data-rel-propose>Propose</button>`;
+    if(t.supplier_id){
+      html += `<p class="note">Your team already has a supplier, so it can't offer supply contracts to other teams. (A customer or junior team can't be a supplier itself.)</p>`;
+    } else {
+      const others = c.teams.filter(x => x.id !== myTeamId);
+      html += `<p class="note">Propose a deal — the other team must accept. Nothing → Customer → Junior, one step at a time; a team has one supplier, and a supplier has at most one junior team. Pick 1–4 contract years.</p><select class="rel-propose-team">${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select> <select class="rel-propose-kind"><option value="customer">Customer</option><option value="junior">Junior</option></select> <select class="rel-propose-role"><option value="me">I supply them</option><option value="them">They supply me</option></select> <select class="rel-propose-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> yrs <button data-rel-propose>Propose</button>`;
+    }
   } else {
     html += `<p class="note">New relations are proposed in the winter break.</p>`;
   }
