@@ -112,18 +112,25 @@ def make_team(data, team_id=None):
         "sup_stage": int(data.get("sup_stage") or 0),
         # v0.6: team relationships — the supplier link above is now
         # dynamic and mechanical (donations, contracts, WANTED
-        # drivers, research caps). relation_years is the contract
-        # years left (starting relations get 2); research_spent_
-        # season tracks this season's Performance + Reliability
-        # research $M (the research cap counts against it); wanted
-        # and research_cap live on a JUNIOR team's dict and are set
-        # by its parent (supplier).
+        # drivers). relation_years is the contract years left
+        # (starting relations get 2). wanted lives on a supplied
+        # team's dict (customer or junior, v0.6.6) and is set by its
+        # parent (supplier).
+        # v0.6.6: break_notice is a pending unilateral break —
+        # {rounds_left, breaker_id} — the deal ends when the counter
+        # hits 0 (see game.break_relation). junior_share_* are the
+        # 15% race-prize share: a junior team pays 15% of its race
+        # prize to its parent after each race (junior_share_last_race
+        # / _season), and a parent receives it from its junior
+        # (junior_share_received_last_race / _season).
         "relation_years": 2 if int(data.get("sup_stage") or 0) > 0 else 0,
-        "research_spent_season": 0.0,
         "wanted": [],               # [{driver_id, reward}] — max 3,
-                                    # set by the parent of a junior team
-        "research_cap": None,       # $M/season cap on Perf+Reli
-                                    # research, set by the parent
+                                    # set by the parent of a supplied team
+        "break_notice": None,
+        "junior_share_last_race": 0.0,
+        "junior_share_season": 0.0,
+        "junior_share_received_last_race": 0.0,
+        "junior_share_received_season": 0.0,
         "tuning": 0,
         "perf_res": 0.0,           # $M of performance research banked
         "reli_res": 0.0,           # $M of reliability research banked
@@ -212,6 +219,12 @@ def new_career_dict(name, host_nickname, chart_on=True):
         # years}. Proposals are winter-break only and expire when the
         # next season starts (see start_next_season).
         "relation_proposals": [],
+        # v0.6.6: pending donation requests — {id, requester_team_id,
+        # target_team_id, amount}. Either side of a supply tie may
+        # ask the other for a donation of a set amount, any time; the
+        # other side accepts or declines (see game.respond_donation).
+        # Requests expire when the next season starts.
+        "donation_requests": [],
         "last_season": None,
         "transfers": [],           # ["Driver from X to Y"] this season
         "retired_this_season": [],

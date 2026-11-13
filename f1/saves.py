@@ -14,13 +14,20 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 9  # v0.6: team relationships (supplier / customer /
-# junior contracts, WANTED drivers, research caps) — new fields on
-# teams (relation_years, research_spent_season, wanted,
-# research_cap) + career-level relation_proposals; old saves backfill
-# the 2026 relations from the grid. v0.5: career GP totals
-# (gp_starts / gp_wins on drivers) for the driver development
-# contribution. v0.4.2: Driver Academy (academy_team_id on drivers,
+SAVE_VERSION = 10  # v0.6.6: team relationships, second pass — the
+# research cap is REMOVED entirely (setting, enforcement, bot cap);
+# WANTED works for customer teams too; the junior income share
+# (15% of race prize to the parent) + parent promotion/swap of
+# junior drivers + two-way donation requests + the 3-round
+# contract-break notice (break_notice on teams, donation_requests
+# on the career). v9 saves load fine: the removed cap fields are
+# dropped on load and the new fields backfill to their defaults.
+# v0.6: team relationships (supplier / customer / junior contracts,
+# WANTED drivers) — new fields on teams (relation_years, wanted)
+# + career-level relation_proposals; old saves backfill the 2026
+# relations from the grid. v0.5: career GP totals (gp_starts /
+# gp_wins on drivers) for the driver development contribution.
+# v0.4.2: Driver Academy (academy_team_id on drivers,
 # ai_academy_signed on teams), exponential T&R / academy fines
 # instead of a hard T&R cap, table-driven rating growth (grow_rating
 # replaces DSUS). v0.4: standings sort (best finish + earliest
@@ -248,10 +255,22 @@ def migrate_save(doc):
             team["sup_stage"] = int(grid.get("sup_stage") or 0)
         team.setdefault("relation_years",
                         RELATION_START_YEARS if team.get("sup_stage") else 0)
-        team.setdefault("research_spent_season", 0.0)
+        # v0.6.6: the research cap is removed entirely — a v9 save
+        # may still carry research_cap / research_spent_season; drop
+        # them on load so no stale cap can ever be read again.
+        team.pop("research_cap", None)
+        team.pop("research_spent_season", None)
         team.setdefault("wanted", [])
-        team.setdefault("research_cap", None)
+        # v0.6.6: the junior income share (last race / this season,
+        # paid and received) and the pending contract-break notice.
+        team.setdefault("break_notice", None)
+        team.setdefault("junior_share_last_race", 0.0)
+        team.setdefault("junior_share_season", 0.0)
+        team.setdefault("junior_share_received_last_race", 0.0)
+        team.setdefault("junior_share_received_season", 0.0)
     doc.setdefault("relation_proposals", [])
+    # v0.6.6: pending donation requests between supplied teams.
+    doc.setdefault("donation_requests", [])
     for team in doc.get("teams") or []:
         team.setdefault("reg_total", 0.0)
         team.setdefault("reg_adapted", 0.0)

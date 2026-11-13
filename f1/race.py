@@ -27,7 +27,20 @@ RACE_LAP_BASE = 95.0
 # random pace offset per driver per session, so the best combo wins ~45%
 # of races instead of ~100%.
 RACE_TUNING_PER_LAP = 0.1
-RACE_GRID_PENALTY_PER_POS = 0.5
+# v0.6.6 (Proposal B, Matthew's call): the grid penalty was worth
+# less than one position — max 10.5s from P22 to P1, far less than
+# the per-race form randomness (~12.5s) — so qualifying barely
+# mattered: on a tight grid the winner started P7+ in 1 race in 4
+# and a P15+ qualifier finished top 5 in 1 race in 5. At 3.0s/pos
+# each grid spot is worth roughly one pace step (P12 costs 36s,
+# P22 costs 63s — comparable to the whole deterministic pace
+# spread), and the extra form randomness keeps the front
+# unpredictable (six different winners a season instead of five).
+# Measured over 1,000 seeded weekends per config: P12+ wins
+# 5.8% -> ~1.1%, great drives (P15+ -> top 5) 20.1% -> ~6.7%,
+# pole wins ~28%. Trade-off: the field spreads out (P22 gap
+# median ~93s -> ~148s).
+RACE_GRID_PENALTY_PER_POS = 3.0
 
 # v0.6.1: mechanical failures — a DNF costs the team a repair bill.
 DNF_REPAIR_COST = 1.0  # $M per DNF, charged after the race
@@ -123,25 +136,14 @@ def _team_perf(team, teams_by_id):
     return team["perf"]
 
 
-# v0.2: per-driver, per-session form ("race-day variance"). The v0.1 race
-# was too predictable: the per-lap noise (sigma 0.12) averages out over
-# 57 laps (total sigma ~0.9s) while the driver+car perf spread is ~1.8s/lap,
-# i.e. tens of seconds over a race — so the best driver+car combo won
-# every time. Qualifying was the same: one lap_sim draw with sigma 0.12*2.5
-# = 0.3s against a ~2.9s perf spread. The fix is one random pace offset
-# drawn ONCE per driver per session (not per lap, or it averages out
-# again) and different between qualifying and the race:
-#   qual:  + N(0, 0.35s) on the single lap time
-#   race:  + N(0, 0.22s) per lap, the same offset every lap (total sigma
-#          ~12.5s over 57 laps) on top of the per-lap noise.
-# Measured with the 2026 grid over 120 seeded races (see README): the
-# single best combo (Antonelli/Mercedes) wins 45% of races instead of
-# ~100%, with 5 different winners and 9 different poles (Antonelli on
-# pole 38%), while gaps stay plausible (qual P22 gap median 3.0s, race
-# P22 gap median ~96s, winner ~5,010s). v0.6.1 adds mechanical failures
-# (DNFs) on top of the lap-time randomness — see dnf_chance() above.
-SESSION_FORM_QUAL_SIGMA = 0.35   # seconds, one draw per driver per qual
-SESSION_FORM_RACE_SIGMA = 0.22   # seconds per lap, one draw per driver per race
+# v0.6.6 (Proposal B): race form 0.22 -> 0.35 s/lap and qual form
+# 0.35 -> 0.50 s — more lap randomness, still built on driver skill
+# and car perf. The form increase is what restores variety up front
+# once the bigger grid penalty anchors the backmarkers (grid
+# penalty alone made pole wins jump to ~37% and the top-2 share
+# stay ~49%; with the form increase the top-2 share falls to ~41%).
+SESSION_FORM_QUAL_SIGMA = 0.50   # seconds, one draw per driver per qual
+SESSION_FORM_RACE_SIGMA = 0.35   # seconds per lap, one draw per driver per race
 
 
 def simulate_qual(career, rng=None):
