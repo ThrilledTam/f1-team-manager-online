@@ -951,9 +951,11 @@ def relation_label(team):
 
 
 def donate(career, donor_team_id, recipient_team_id, amount):
-    """v0.6: donate money to a team you supply (customer or junior).
-    Any amount up to the donor's money, any time, no fee. The donor
-    loses it and the recipient gains it."""
+    """v0.6: donate money along a supply tie — down to a team you
+    supply (customer or junior), or v0.6.5 up to your supplier
+    (parent): a customer/junior team can now donate to the team
+    that supplies it. Any amount up to the donor's money, any time,
+    no fee. The donor loses it and the recipient gains it."""
     donor = get_team(career, donor_team_id)
     recipient = get_team(career, recipient_team_id)
     if not donor or not recipient:
@@ -968,10 +970,15 @@ def donate(career, donor_team_id, recipient_team_id, amount):
         return False, "Donation must be more than $0M."
     if amount > donor["money"]:
         return False, f"Not enough money — you have ${donor['money']:.2f}M."
-    if recipient.get("supplier_id") != donor["id"]:
-        return False, (f"{recipient['name']} is not supplied by "
-                       f"{donor['name']} — donations only go to teams "
-                       f"you supply.")
+    # v0.6.5: either direction along the same supply tie — the
+    # recipient is supplied by the donor, or the donor is supplied
+    # by the recipient (donating up to your parent).
+    if recipient.get("supplier_id") != donor["id"] \
+            and donor.get("supplier_id") != recipient["id"]:
+        return False, (f"{donor['name']} and {recipient['name']} have no "
+                       f"supply relation — donations only go along a "
+                       f"supply tie, to a team you supply or to your "
+                       f"supplier.")
     donor["money"] = round(donor["money"] - amount, 2)
     recipient["money"] = round(recipient["money"] + amount, 2)
     career["transfers"].append(
@@ -1117,6 +1124,14 @@ def propose_relation(career, proposer_team_id, target_team_id, kind,
         if not supplier or supplier["id"] not in (proposer["id"], target["id"]):
             return False, "The supplier must be one of the two teams."
         customer = target if supplier["id"] == proposer["id"] else proposer
+        # v0.6.5 (Matthew's rule): a team that already HAS a supplier
+        # — a customer or junior team — cannot offer supply contracts
+        # to other teams. It can still receive, end, downgrade or
+        # renew its own deal, but it cannot be anyone's supplier.
+        if supplier.get("supplier_id"):
+            return False, (f"{supplier['name']} already has a supplier — "
+                           f"a team that is a customer or junior cannot "
+                           f"offer supply contracts to other teams.")
         if kind == "customer":
             if customer.get("sup_stage", 0) != 0:
                 return False, f"{customer['name']} already has a supplier."
@@ -1546,12 +1561,17 @@ def release_driver(career, team_id, driver_id):
     the points they scored FOR this team stay with the team (banked
     into points_kept — the same real-F1 rule as a replacement, see
     _release_driver). A main driver's seat becomes empty; a T&R
-    driver just leaves the roster. Logged in Transfers. Round phase
-    only — in the winter break, lineups change through offers."""
+    driver just leaves the roster. Logged in Transfers. v0.6.5:
+    allowed in the winter break too (Matthew: teams could not drop
+    a driver there at all) — the fee uses the winter-break
+    rounds_remaining (contract_left x 12 rounds, the full remaining
+    contract), shown upfront the same way. An emptied main seat can
+    then be filled with winter-break offers, or auto-fills at season
+    start like any other empty seat."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
-    if career.get("phase") != "round":
+    if career.get("phase") not in ("round", "winter_break"):
         return False, "You can only release drivers between races."
     d = get_driver(career, driver_id)
     if not d or d.get("team_id") != team["id"] \
