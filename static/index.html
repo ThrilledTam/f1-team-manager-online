@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.6.3</title>
+<title>F1 Team Manager Online — v0.6.4</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -127,7 +127,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.3 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.4 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -276,6 +276,7 @@
     <div id="my-team"></div>
     <div id="advance-box" style="margin-top:10px">
       <button id="btn-advance">▶ Advance to Race Weekend</button>
+      <button id="btn-host-advance" class="secondary hidden">⏭ Host: start weekend anyway</button>
       <span id="advanced-list"></span>
     </div>
   </div>
@@ -894,7 +895,8 @@ function pickerTickUpdate(){
 }
 
 /* v0.1 results pages: qualifying first, then the race, each with a
-   unanimous NEXT vote (all connected humans) and a host-only skip. */
+   unanimous NEXT vote (all human players — a disconnected player is
+   still pending, never excluded) and a host-only skip. */
 function renderResults(){
   const c = room.career;
   const isQual = c.phase === "qual_results";
@@ -913,12 +915,17 @@ function renderResults(){
     ? `🔧 Repairs: −$${nDnf.toFixed(1)}M (${nDnf} DNF${nDnf > 1 ? "s" : ""} at $1.0M each)`
     : "";
   // Vote status: who has voted NEXT, who we are still waiting for.
+  // v0.6.4: the voters are ALL human teams, connected or not — a
+  // disconnected player is still pending (shown as "(away)"), never
+  // dropped from the count. The server counts the same way.
   const voted = new Set(c.results_vote || []);
-  const voters = c.teams.filter(t => t.owner_player_id && room.players.some(p => p.player_id === t.owner_player_id && p.connected));
+  const voters = c.teams.filter(t => t.owner_player_id);
   const votedNames = [], waitingNames = [];
   voters.forEach(t => {
     const p = room.players.find(x => x.player_id === t.owner_player_id);
-    (voted.has(t.owner_player_id) ? votedNames : waitingNames).push(p ? p.nickname : t.name);
+    const name = p ? p.nickname : t.name;
+    if (voted.has(t.owner_player_id)) votedNames.push(name);
+    else waitingNames.push(name + (p && !p.connected ? " (away)" : ""));
   });
   $("vote-status").innerHTML = `NEXT votes: ${votedNames.length}/${voters.length}` +
     (votedNames.length ? `<br>Voted: ${votedNames.map(esc).join(", ")}` : "") +
@@ -1180,6 +1187,10 @@ function renderGame(){
     $("advanced-list").innerHTML =
       (ready.length ? `<span class="pill adv">Ready: ${ready.join(", ")} ✓</span>` : "") +
       (waiting.length ? `<span class="pill wait">Waiting for: ${waiting.join(", ")}</span>` : "");
+    // v0.6.4: host-only override for the Advance — starts the
+    // weekend even though not every human has advanced. Only the
+    // host client ever sees this button (the server enforces it too).
+    $("btn-host-advance").classList.toggle("hidden", !room.is_host);
   }
   lastRound = c.round; lastPhase = c.phase;
   renderTabs();
@@ -1227,7 +1238,15 @@ function renderMyTeam(){
     const extraLine = (f.extra_charges_per_race || 0) > 0
       ? `<p>Per-race extra charges: <b>${money(f.extra_charges_per_race)}</b> (T&R fine ${money(f.tr_fine_per_race || 0)} · Academy ${money(f.academy_cost_per_race || 0)}${(f.academy_costs || []).length ? ` (${(f.academy_costs || []).map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")})` : ""} · Academy fine ${money(f.academy_fine_per_race || 0)})</p>`
       : "";
+    // v0.6.4: the per-race NET — one signed number, at a glance:
+    // per-race gains minus salaries minus extra charges. Positive
+    // = profit, negative = loss. Shown prominently, with the
+    // breakdown in the note so the manager sees why.
+    const netLine = (f.net_per_race !== undefined && f.net_per_race !== null)
+      ? `<p><b>Net per race: ${f.net_per_race >= 0 ? "+" : "−"}${money(Math.abs(f.net_per_race))}</b> <span class="note">(per-race gains ${money(f.eprg)} − salaries ${money(f.salary_per_race)} − extra charges ${money(f.extra_charges_per_race || 0)})</span></p>`
+      : "";
     $("finances-box").innerHTML = `<p>Funds: <b>${money(f.money)}</b> · Constructor position: ${f.constructor_pos}</p>
+      ${netLine}
       <p>Estimated post-season injection: +${money(f.epsci)} · Estimated per-race gains: +${money(f.eprg)}</p>
       <p>Per-race salary cost: ${money(f.salary_per_race)} (${f.driver_costs.map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")}${(f.tr_costs || []).length ? ` · T&R: ${(f.tr_costs || []).map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")}` : ""})</p>
       ${extraLine}
@@ -1740,6 +1759,7 @@ $("btn-new-career").onclick = () => send({type:"new_career", name: $("career-nam
 $("btn-create-custom").onclick = () => send({type:"create_custom_team", name: $("custom-name").value.trim(), colour: myColour, driver1_id: $("custom-d1").value, driver2_id: $("custom-d2").value});
 $("btn-start-career").onclick = () => send({type:"start_career"});
 $("btn-advance").onclick = () => send({type:"advance"});
+$("btn-host-advance").onclick = () => openConfirm("Start the weekend?", "Start the race weekend now, even though not every manager has advanced?", () => send({type:"host_advance"}));
 $("btn-vote-next").onclick = () => send({type:"vote_next"});
 $("btn-host-skip").onclick = () => openConfirm("Skip the vote?", "Skip the NEXT vote and continue now?", () => send({type:"host_skip"}));
 $("btn-results-leave").onclick = () => { sessionStorage.removeItem("f1code"); sessionStorage.removeItem("f1player"); location.href = "/"; };
