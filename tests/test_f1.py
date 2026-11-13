@@ -35,17 +35,19 @@ def two_human_career():
     return career
 
 
-def play_full_round(career, connected, rng):
+def play_full_round(career, rng):
     """Drive one round to completion the v0.1 way: all humans Advance,
-    then everyone votes NEXT on the qual page, then on the race page."""
+    then everyone votes NEXT on the qual page, then on the race page.
+    v0.6.4: the vote/advance count ALL human players (no connected
+    set is passed any more)."""
     for t in list(game.human_teams(career)):
-        game.advance_team(career, t["id"], connected, rng=rng)
+        game.advance_team(career, t["id"], rng=rng)
     assert career["phase"] == "qual_results"
-    for pid in sorted(connected):
-        game.vote_next(career, pid, connected, rng=rng)
+    for t in list(game.human_teams(career)):
+        game.vote_next(career, t["owner_player_id"], rng=rng)
     assert career["phase"] == "race_results"
-    for pid in sorted(connected):
-        game.vote_next(career, pid, connected, rng=rng)
+    for t in list(game.human_teams(career)):
+        game.vote_next(career, t["owner_player_id"], rng=rng)
     assert career["phase"] in ("round", "winter_break")
 
 
@@ -133,13 +135,12 @@ def test_custom_team_uses_main_py_formula():
 
 def test_simultaneous_advance_blocks_until_all_humans():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     t1, t2 = career["teams"][0], career["teams"][1]
-    ok, raced, _ = game.advance_team(career, t1["id"], connected, rng=seeded())
+    ok, raced, _ = game.advance_team(career, t1["id"], rng=seeded())
     assert ok and not raced
     assert career["round"] == 1
     assert career["last_race"] is None
-    ok, raced, _ = game.advance_team(career, t2["id"], connected, rng=seeded(7))
+    ok, raced, _ = game.advance_team(career, t2["id"], rng=seeded(7))
     assert ok and raced
     # v0.1: the race ran, but the room is on the qualifying results page —
     # the round does NOT advance until the NEXT votes are done.
@@ -152,17 +153,17 @@ def test_simultaneous_advance_blocks_until_all_humans():
     assert career["last_race"][0]["points"] == 25
     assert sum(d["points"] for d in career["drivers"]) > 0
     # One vote is not enough: the vote is unanimous.
-    ok, advanced, msg = game.vote_next(career, "p-matthew", connected, rng=seeded(7))
+    ok, advanced, msg = game.vote_next(career, "p-matthew", rng=seeded(7))
     assert ok and not advanced
     assert career["phase"] == "qual_results"
-    ok, advanced, msg = game.vote_next(career, "p-cousin", connected, rng=seeded(7))
+    ok, advanced, msg = game.vote_next(career, "p-cousin", rng=seeded(7))
     assert ok and advanced
     assert career["phase"] == "race_results"
     assert career["results_stage"] == "race"
     # Second vote returns everyone to their dashboards for round 2.
-    ok, advanced, _ = game.vote_next(career, "p-matthew", connected, rng=seeded(7))
+    ok, advanced, _ = game.vote_next(career, "p-matthew", rng=seeded(7))
     assert ok and not advanced
-    ok, advanced, _ = game.vote_next(career, "p-cousin", connected, rng=seeded(7))
+    ok, advanced, _ = game.vote_next(career, "p-cousin", rng=seeded(7))
     assert ok and advanced
     assert career["phase"] == "round"
     assert career["round"] == 2
@@ -170,10 +171,9 @@ def test_simultaneous_advance_blocks_until_all_humans():
 
 def test_race_points_and_money_change():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     money_before = {t["id"]: t["money"] for t in career["teams"]}
-    game.advance_team(career, career["teams"][0]["id"], connected, rng=seeded())
-    game.advance_team(career, career["teams"][1]["id"], connected, rng=seeded(7))
+    game.advance_team(career, career["teams"][0]["id"], rng=seeded())
+    game.advance_team(career, career["teams"][1]["id"], rng=seeded(7))
     assert any(t["money"] != money_before[t["id"]] for t in career["teams"])
     assert career["teams"][0]["points"] == max(t["points"] for t in career["teams"])
 
@@ -336,7 +336,7 @@ def test_full_season_rollover_applies_minor_reg_change():
     connected = {"p-matthew", "p-cousin"}
     rng = seeded(99)
     for _ in range(12):
-        play_full_round(career, connected, rng)
+        play_full_round(career, rng)
     assert career["phase"] == "winter_break"
     assert career["year"] == 2027
     assert career["next_reg_year"] == 2028
@@ -366,8 +366,7 @@ def test_full_season_rollover_applies_minor_reg_change():
 
 def test_save_load_round_trip_preserves_state():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(7))
+    play_full_round(career, seeded(7))
     assert career["round"] == 2
     snapshot = {t["id"]: (t["points"], t["money"], t["perf"]) for t in career["teams"]}
     with tempfile.TemporaryDirectory() as tmp:
@@ -532,13 +531,19 @@ def test_ws_lobby_kick_host_promotion_and_takeover():
                          if t["id"] == ai_team["id"])
             assert taken["owner_player_id"] == cousin_id
 
-            # Host disconnects -> the cousin is promoted to host.
+            # v0.6.4 RULE CHANGE (was: host disconnects -> the cousin
+            # is promoted to host immediately). A brief disconnect
+            # must NOT move the host crown — the cousin rejoins well
+            # inside the 60s grace period, so the crown stays with
+            # the original host (Matthew), who regains it on rejoin.
+            # The 60s transfer itself is tested at the unit level in
+            # test_host_crown_transfers_after_long_absence_v064.
     # (host_ws context exits here)
     with client.websocket_connect("/ws") as cousin_ws:
         cousin_ws.send_json({"type": "rejoin", "code": code,
                              "player_id": cousin_id})
         rejoined = recv_until(cousin_ws, "joined")
-        assert rejoined["room"]["host_id"] == cousin_id
+        assert rejoined["room"]["host_id"] == host_id
         assert rejoined["room"]["started"] is True
 
 
@@ -885,8 +890,7 @@ def test_mobile_friendly_markup():
 
 def test_results_payloads_never_contain_absolute_times():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(5))
+    play_full_round(career, seeded(5))
     for key in ("last_qual", "last_race"):
         rows = career[key]
         assert len(rows) == 22
@@ -908,7 +912,6 @@ def test_results_payloads_never_contain_absolute_times():
 
 def test_race_is_full_distance_with_plausible_gaps():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     for seed in (1, 7, 42):
         c = game.build_new_career("T", "H")
         rng = random.Random(seed)
@@ -927,7 +930,7 @@ def test_race_is_full_distance_with_plausible_gaps():
         assert 10 <= rtimes[-1] - winner <= 150  # last finisher's gap
         assert 5 <= rtimes[9] - winner <= 120    # P10 gap plausible
     # The played round agrees (server-side times are what the gaps came from).
-    play_full_round(career, connected, seeded(5))
+    play_full_round(career, seeded(5))
     assert career["last_race"][0]["gap"] == "LEADER"
     # v0.6.2: DNF rows (gap "DNF") sit after the finishers — the gap
     # check is on the last FINISHER, not the last row.
@@ -939,47 +942,54 @@ def test_race_is_full_distance_with_plausible_gaps():
 
 def test_next_vote_flow_host_override_and_disconnect():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     for t in list(game.human_teams(career)):
-        game.advance_team(career, t["id"], connected, rng=seeded())
+        game.advance_team(career, t["id"], rng=seeded())
     assert career["phase"] == "qual_results"
     # A player with no team cannot vote.
-    ok, _adv, _msg = game.vote_next(career, "p-stranger", connected, rng=seeded())
+    ok, _adv, _msg = game.vote_next(career, "p-stranger", rng=seeded())
     assert not ok
     # The host override is host-only.
-    ok, _adv, _msg = game.host_skip_results(career, "p-cousin", connected,
+    ok, _adv, _msg = game.host_skip_results(career, "p-cousin",
                                             is_host=False, rng=seeded())
     assert not ok
     assert career["phase"] == "qual_results"
-    ok, adv, _msg = game.host_skip_results(career, "p-matthew", connected,
+    ok, adv, _msg = game.host_skip_results(career, "p-matthew",
                                            is_host=True, rng=seeded())
     assert ok and adv
     assert career["phase"] == "race_results"
     # Second vote: one vote is not enough, both votes return to dashboards.
-    ok, adv, _ = game.vote_next(career, "p-matthew", connected, rng=seeded())
+    ok, adv, _ = game.vote_next(career, "p-matthew", rng=seeded())
     assert ok and not adv
     assert career["phase"] == "race_results"
-    ok, adv, _ = game.vote_next(career, "p-cousin", connected, rng=seeded())
+    ok, adv, _ = game.vote_next(career, "p-cousin", rng=seeded())
     assert ok and adv
     assert career["phase"] == "round" and career["round"] == 2
-    # Disconnected humans are excluded: one remaining voter can pass alone,
-    # and a recorded vote survives a disconnect/reconnect.
+    # v0.6.4 RULE CHANGE (was: disconnected humans are excluded, so
+    # one remaining voter could pass alone). Now the vote counts ALL
+    # human players: a player who has not voted is still pending,
+    # even if their connection dropped — the vote must not complete
+    # on one player's vote alone. A recorded vote still survives a
+    # disconnect/reconnect, and the host skip is the escape hatch.
     career2 = two_human_career()
     for t in list(game.human_teams(career2)):
-        game.advance_team(career2, t["id"], connected, rng=seeded())
-    ok, adv, _ = game.vote_next(career2, "p-matthew", connected, rng=seeded())
+        game.advance_team(career2, t["id"], rng=seeded())
+    ok, adv, _ = game.vote_next(career2, "p-matthew", rng=seeded())
     assert ok and not adv  # cousin has not voted yet
     assert "p-matthew" in career2["results_vote"]  # vote is recorded
-    connected2 = {"p-matthew"}  # cousin disconnected
-    assert game.check_results_vote(career2, connected2, rng=seeded())
+    # Cousin "disconnects" (stops voting): the vote must NOT complete
+    # on Matthew's vote alone — cousin is still a pending voter.
+    assert not game.check_results_vote(career2, rng=seeded())
+    assert career2["phase"] == "qual_results"
+    # Cousin reconnects and votes: now it completes.
+    ok, adv, _ = game.vote_next(career2, "p-cousin", rng=seeded())
+    assert ok and adv
     assert career2["phase"] == "race_results"
 
 
 def test_history_gp_revisit_returns_full_tables():
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(3))
-    play_full_round(career, connected, seeded(4))
+    play_full_round(career, seeded(3))
+    play_full_round(career, seeded(4))
     assert len(career["race_history"]) == 2
     circuits = [e["circuit"] for e in career["race_history"]]
     assert circuits == ["Bahrain Grand Prix", "Saudi Arabian Grand Prix"]
@@ -1039,10 +1049,9 @@ def test_calendar_covers_all_12_rounds():
     career = game.build_new_career("Test", "Matthew")
     assert career["circuit"] == "Bahrain Grand Prix"
     assert career["circuit_laps"] == 57
-    connected = {"p-matthew", "p-cousin"}
     # (two_human_career already picks teams; use a fresh one here)
     career = two_human_career()
-    play_full_round(career, connected, seeded(11))
+    play_full_round(career, seeded(11))
     assert career["circuit"] == "Saudi Arabian Grand Prix"
     assert career["circuit_laps"] == 50
 
@@ -1224,13 +1233,12 @@ def test_advance_toast_says_qualifying_not_race_weekend_complete():
     player is about to see the qualifying page first, the race page
     only after the NEXT vote."""
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     rng = seeded()
     ok, ran, _msg = game.advance_team(
-        career, career["teams"][0]["id"], connected, rng=rng)
+        career, career["teams"][0]["id"], rng=rng)
     assert ok and not ran
     ok, ran, msg = game.advance_team(
-        career, career["teams"][1]["id"], connected, rng=rng)
+        career, career["teams"][1]["id"], rng=rng)
     assert ok and ran
     assert career["phase"] == "qual_results"
     assert msg == "Qualifying complete — results are in."
@@ -1522,8 +1530,7 @@ def test_midseason_replacement_keeps_outgoing_points():
     old points."""
     from f1 import race as race_mod
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(5))
+    play_full_round(career, seeded(5))
     # Find a team with a points-scoring driver in a seat.
     team = outgoing = None
     for t in career["teams"]:
@@ -1570,7 +1577,7 @@ def test_midseason_replacement_keeps_outgoing_points():
     assert team["points"] >= out_points
     # ... and the banked points survive the next race too, while the
     # incoming driver's new points count only from now on.
-    play_full_round(career, connected, seeded(6))
+    play_full_round(career, seeded(6))
     assert team["points"] >= out_points
     assert incoming["points"] == 13 + incoming["team_points"]
 
@@ -1584,7 +1591,7 @@ def test_standings_order_carries_into_next_season():
     connected = {"p-matthew", "p-cousin"}
     rng = seeded(99)
     for _ in range(12):
-        play_full_round(career, connected, rng)
+        play_full_round(career, rng)
     assert career["phase"] == "winter_break"
     order = career["prev_driver_order"]
     assert len(order) == 22
@@ -1606,7 +1613,7 @@ def test_standings_order_carries_into_next_season():
     # Newcomers all sit after every carried-over driver.
     assert all(d["id"] not in order for d in standings[len(carried):])
     # After round 1, points sort takes over: the race winner leads.
-    play_full_round(career, connected, seeded(21))
+    play_full_round(career, seeded(21))
     standings2 = race_mod.driver_standings(career)
     assert standings2[0]["points"] == 25
     assert standings2[0]["name"] == career["last_race"][0]["driver"]
@@ -1634,8 +1641,7 @@ def test_midseason_move_keeps_points_across_teams():
     on for Audi count toward Audi."""
     from f1 import race as race_mod
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(5))
+    play_full_round(career, seeded(5))
     alpine = next(t for t in career["teams"] if t["name"] == "Alpine")
     audi = next(t for t in career["teams"] if t["name"] == "Audi")
     # The Alpine driver scored 44 points for Alpine this season.
@@ -1669,7 +1675,7 @@ def test_midseason_move_keeps_points_across_teams():
     # He scores for Audi in the next round: only the new points add
     # to Audi's total.
     before = {d["id"]: d["points"] for d in game.team_drivers(career, audi)}
-    play_full_round(career, connected, seeded(6))
+    play_full_round(career, seeded(6))
     gains = sum(game.get_driver(career, did)["points"] - pts
                 for did, pts in before.items())
     assert audi["points"] == audi_before + gains
@@ -2106,7 +2112,6 @@ def test_salary_paid_per_race_after_each_race():
     drivers, so it also pays the $1.5M/race T&R fine)."""
     from f1.rules import finance_estimates
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     team = career["teams"][0]  # McLaren
     # McLaren's salaries: Norris 5.2 + Piastri 4.6 + 4 T&R drivers
     # (de Vries 1.5, O'Ward 2.5, Fornaroli 2.0, Verschoor 2.2).
@@ -2116,8 +2121,8 @@ def test_salary_paid_per_race_after_each_race():
     money_before = team["money"]
     salaries = sum(d["salary"] for d in game.team_drivers(career, team)) \
         + sum(d["salary"] for d in game.team_tr_drivers(career, team))
-    game.advance_team(career, team["id"], connected, rng=seeded())
-    game.advance_team(career, career["teams"][1]["id"], connected, rng=seeded(7))
+    game.advance_team(career, team["id"], rng=seeded())
+    game.advance_team(career, career["teams"][1]["id"], rng=seeded(7))
     prize = sum(1.95 - 0.025 * d["race_pos"]
                 for d in game.team_drivers(career, team))
     expected = money_before + prize + finance_estimates(pos_before)["eprg"] \
@@ -2206,8 +2211,7 @@ def test_race_history_top3_has_team_id():
     raced for at the time."""
     from f1 import race as race_mod
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(3))
+    play_full_round(career, seeded(3))
     entry = career["race_history"][0]
     assert len(entry["top3"]) == 3
     for item in entry["top3"]:
@@ -2248,12 +2252,12 @@ def test_champion_history_prefill_and_append():
     connected = {"p-matthew", "p-cousin"}
     rng = seeded(99)
     for _ in range(11):
-        play_full_round(career, connected, rng)
+        play_full_round(career, rng)
     for t in list(game.human_teams(career)):
-        game.advance_team(career, t["id"], connected, rng=rng)
+        game.advance_team(career, t["id"], rng=rng)
     assert career["phase"] == "qual_results"
     for pid in sorted(connected):
-        game.vote_next(career, pid, connected, rng=rng)
+        game.vote_next(career, pid, rng=rng)
     assert career["phase"] == "race_results"
     champ = [d for d in race_mod.driver_standings(career)
              if d["status"] == "f1"][0]
@@ -2264,7 +2268,7 @@ def test_champion_history_prefill_and_append():
                 "trophies": champ["cha"] + 1,
                 "winning_team": winners[0]["name"]}
     for pid in sorted(connected):
-        game.vote_next(career, pid, connected, rng=rng)
+        game.vote_next(career, pid, rng=rng)
     assert career["phase"] == "winter_break"
     assert career["year"] == 2027
     assert len(career["champion_history"]) == 17
@@ -2415,15 +2419,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v063():
-    """The live version string is v0.6.3 everywhere it is shown."""
+def test_health_reports_v064():
+    """The live version string is v0.6.4 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.6.3"
+    assert client.get("/api/health").json()["version"] == "v0.6.4"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.6.3</title>" in html
-    assert "Online · v0.6.3 beta" in html
+    assert "<title>F1 Team Manager Online — v0.6.4</title>" in html
+    assert "Online · v0.6.4 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2709,8 +2713,7 @@ def test_swapped_zero_point_driver_stays_in_standings_after_a_real_round():
     T&R, and he is still in the Drivers' Championship."""
     from f1 import race as race_mod
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
-    play_full_round(career, connected, seeded(6))
+    play_full_round(career, seeded(6))
     assert career["round"] == 2
     target = None
     for t in career["teams"]:
@@ -3246,7 +3249,7 @@ def test_ws_winter_break_offers_next_and_start():
         connected = {joined["player_id"]}
         rng = seeded(11)
         for _ in range(12):
-            play_full_round(career, connected, rng)
+            play_full_round(career, rng)
         assert career["phase"] == "winter_break"
         # The human's team has an empty seat (its driver left at season
         # end) or not — either way, offers + NEXT work over the socket.
@@ -4151,10 +4154,9 @@ def test_gp_starts_wins_increment_and_survive():
     season rollover (they are career totals, never reset — while
     points and the season tally f1_races do reset)."""
     career = two_human_career()
-    connected = {"p-matthew", "p-cousin"}
     before = {d["id"]: (d["gp_starts"], d["gp_wins"])
               for d in career["drivers"]}
-    play_full_round(career, connected, seeded(6))
+    play_full_round(career, seeded(6))
     # Every F1 driver started once; nobody else did.
     for d in career["drivers"]:
         s0, _ = before[d["id"]]
@@ -4183,7 +4185,7 @@ def test_gp_starts_wins_increment_and_survive():
     # (Red Bull, an AI team) scores points every round, so no bot
     # swap touches him — he races all 12 rounds.
     for _ in range(11):
-        play_full_round(career, connected, seeded(6))
+        play_full_round(career, seeded(6))
     assert career["phase"] == "winter_break"
     ver = next(d for d in career["drivers"]
                if d["name"] == "Max Verstappen")
@@ -4959,3 +4961,451 @@ def test_relationships_tab_renders():
         assert not errors, errors
     finally:
         proc.terminate()
+
+
+# ---------------------------------------------------------------------------
+# v0.6.4 — Finances net gain; NEXT vote counts ALL humans; host
+# override host-only; host crown; bot AI never acts for a
+# disconnected human's team.
+# ---------------------------------------------------------------------------
+
+def test_finances_net_per_race_v064():
+    """v0.6.4: the Finances tab shows one signed net number — the
+    per-race gains minus the per-race salary cost minus the
+    per-race extra charges. Positive = profit, negative = loss."""
+    career = game.build_new_career("Test", "Matthew")
+    for team in career["teams"]:
+        f = game.finances_view(career, team)
+        expected = round(f["eprg"] - f["salary_per_race"]
+                         - f["extra_charges_per_race"], 2)
+        assert f["net_per_race"] == expected
+    # Positive case: a normal team is in profit per race.
+    rb = next(t for t in career["teams"] if t["name"] == "Red Bull")
+    assert game.finances_view(career, rb)["net_per_race"] > 0
+    # Negative case: overload Aston Martin with T&R drivers — the
+    # exponential T&R fine plus their salaries swamp the prize
+    # money, exactly the trap Matthew fell into while testing the
+    # Finances tab. The net must go negative.
+    am = next(t for t in career["teams"] if t["name"] == "Aston Martin")
+    assert game.finances_view(career, am)["net_per_race"] > 0
+    pool = game.free_agents(career) + game.f2_drivers(career)
+    for d in pool[:5]:
+        ok, why = game.sign_tr_driver(career, am["id"], d["id"], contract_years=2)
+        assert ok, why
+    f = game.finances_view(career, am)
+    assert f["net_per_race"] == round(
+        f["eprg"] - f["salary_per_race"] - f["extra_charges_per_race"], 2)
+    assert f["net_per_race"] < 0
+
+
+def test_next_vote_waits_for_disconnected_human_v064():
+    """v0.6.4: the NEXT vote counts ALL human players. A player who
+    has not voted is pending even if their connection dropped —
+    the vote must not complete on the other player's vote alone.
+    (The live bug: the Round 2 race ran on Matthew's vote alone
+    while Max's tab was down.)"""
+    career = two_human_career()
+    for t in list(game.human_teams(career)):
+        game.advance_team(career, t["id"], rng=seeded())
+    assert career["phase"] == "qual_results"
+    assert sorted(game.results_voters(career)) == ["p-cousin", "p-matthew"]
+    ok, adv, msg = game.vote_next(career, "p-matthew", rng=seeded())
+    assert ok and not adv
+    assert "1/2" in msg
+    # The other voter is "disconnected" (has not voted): the vote
+    # must NOT complete.
+    assert not game.check_results_vote(career, rng=seeded())
+    assert career["phase"] == "qual_results"
+    # They reconnect and vote: now it completes.
+    ok, adv, _ = game.vote_next(career, "p-cousin", rng=seeded())
+    assert ok and adv
+    assert career["phase"] == "race_results"
+
+
+def test_advance_waits_for_all_humans_and_host_skip_advance_v064():
+    """v0.6.4: the Advance waits for EVERY human team — a missing
+    advance is pending, never excluded — and only the host can
+    force the weekend with the host override. (The live bug: the
+    Melbourne weekend started on Matthew's advance alone.)"""
+    career = two_human_career()
+    t1, t2 = career["teams"][0], career["teams"][1]
+    ok, raced, _ = game.advance_team(career, t1["id"], rng=seeded())
+    assert ok and not raced
+    assert career["phase"] == "round"
+    # Advancing twice does not help — the other human is still pending.
+    ok, raced, _ = game.advance_team(career, t1["id"], rng=seeded())
+    assert ok and not raced
+    assert career["phase"] == "round"
+    # A non-host cannot force the weekend.
+    ok, raced, _ = game.host_skip_advance(career, "p-cousin",
+                                          is_host=False, rng=seeded())
+    assert not ok and not raced
+    assert career["phase"] == "round"
+    # The host can force it.
+    ok, raced, _ = game.host_skip_advance(career, "p-matthew",
+                                          is_host=True, rng=seeded())
+    assert ok and raced
+    assert career["phase"] == "qual_results"
+    # The host override is only for the management phase.
+    ok, raced, _ = game.host_skip_advance(career, "p-matthew",
+                                          is_host=True, rng=seeded())
+    assert not ok and not raced
+
+
+def test_disconnected_human_team_untouched_by_bot_round_v064():
+    """v0.6.4: the bot AI must NEVER act for a human-owned team,
+    even when its player is temporarily disconnected. (Live bug:
+    Red Bull's Tuning went 1 -> 3 and mystery research pools
+    1.03/0.35 appeared while Max's tab was down — ai_act had run
+    on his team during the race weekend.) The setup forces every
+    ai_act trigger so the test would catch it if the bot ran."""
+    from f1 import race as race_mod
+    career = two_human_career()
+    play_full_round(career, seeded(3))
+    play_full_round(career, seeded(4))
+    assert career["round"] == 3
+    team = career["teams"][0]  # McLaren, p-matthew
+    # Force the ai_act triggers: round >= 3, points > 0, lead
+    # driver > 70% of team points, constructor pos < 4 (ai_act
+    # would set tuning 3), and plenty of money (ai_act would
+    # invest research and add an academy driver).
+    team["points"] = 100
+    drivers = game.team_drivers(career, team)
+    drivers[0]["points"] = 90
+    drivers[1]["points"] = 10
+    career["teams"] = race_mod.constructor_standings(career)
+    team = next(t for t in career["teams"] if t["id"] == team["id"])
+    team["tuning"] = 1
+    team["perf_res"] = 0.0
+    team["reli_res"] = 0.0
+    team["money"] = 50.0
+    team["rel"] = 1.0  # no DNFs, so no repair bill muddies the money
+    perf_before = team["perf"]
+    academy_before = len(game.team_academy_drivers(career, team))
+    pos_before = game.constructor_pos(career, team["id"])
+    assert pos_before < 4
+    # Race-flow money for this team: salaries + extra charges out,
+    # EPRG in (the money block), PLUS the per-car prize money from
+    # apply_race_results (1.95 - 0.025*pos per finishing car) minus
+    # the DNF repair bill per DNF car. rel=1.0, so no DNFs here —
+    # but the formula is written generally.
+    from f1.race import DNF_REPAIR_COST
+    salary = game.salary_per_round(career, team)
+    extra = game.extra_charges_per_race(career, team)["total"]
+    eprg = finance_estimates(pos_before)["eprg"]
+    money_before = team["money"]
+    # Both humans advance -> the weekend runs. The human team's
+    # "disconnection" is irrelevant now: the bot must not touch it.
+    for t in list(game.human_teams(career)):
+        game.advance_team(career, t["id"], rng=seeded(9))
+    assert career["phase"] == "qual_results"
+    prize = 0.0
+    for row in career["last_race"]:
+        if row.get("team_id") == team["id"]:
+            if row["pos"] == "DNF":
+                prize -= DNF_REPAIR_COST
+            else:
+                prize += 1.95 - 0.025 * row["pos"]
+    expected_money = money_before - salary - extra + eprg + prize
+    assert team["tuning"] == 1  # ai_act would have set 3
+    assert team["perf_res"] == 0.0  # ai_act would have invested
+    assert team["reli_res"] == 0.0
+    assert team["perf"] == perf_before  # ai_act would have developed
+    assert len(game.team_academy_drivers(career, team)) == academy_before
+    # Money changed ONLY by the race flow (salaries + charges +
+    # gains + per-car prize money).
+    assert abs(team["money"] - expected_money) < 0.02
+
+
+def test_host_crown_grace_and_creator_restore_v064():
+    """v0.6.4: a brief host disconnect does NOT move the crown; the
+    crown only transfers after the 60s takeover grace, and the
+    original host (room creator) regains it on rejoin."""
+    import time as _time
+    import server as srv
+
+    room = srv.new_room("Matthew", "#e74c3c")
+    host = srv.add_player(room, "Matthew", "#e74c3c")
+    host_id = host["player_id"]
+    assert room["creator_id"] == host_id
+    assert room["host_id"] == host_id
+    cousin = srv.add_player(room, "Cousin", "#3498db")
+    cousin_id = cousin["player_id"]
+    # Host disconnects briefly (< 60s): no promotion.
+    host["connected"] = False
+    host["disconnected_at"] = _time.time()
+    srv.promote_host_if_needed(room)
+    assert room["host_id"] == host_id
+    # Host reconnects: crown is still theirs.
+    host["connected"] = True
+    host["disconnected_at"] = None
+    srv.promote_host_if_needed(room)
+    assert room["host_id"] == host_id
+    # Host disconnects for a long time (> 60s): the crown moves to
+    # the earliest-joined connected player.
+    host["connected"] = False
+    host["disconnected_at"] = _time.time() - 61
+    srv.promote_host_if_needed(room)
+    assert room["host_id"] == cousin_id
+    # The original host (creator) rejoins: the crown returns to
+    # them — the same restore the rejoin handler performs.
+    host["connected"] = True
+    host["disconnected_at"] = None
+    if room.get("creator_id") == host["player_id"]:
+        room["host_id"] = host["player_id"]
+    srv.promote_host_if_needed(room)
+    assert room["host_id"] == host_id
+
+
+def test_ws_vote_and_advance_wait_for_disconnected_human_v064():
+    """v0.6.4 end to end over real WebSockets: a disconnected
+    human's advance/vote is pending, never excluded — the weekend
+    and the vote must not complete until they reconnect and act."""
+    import time as _time
+    from fastapi.testclient import TestClient
+    import server as srv
+    from server import app
+
+    client = TestClient(app)
+
+    def recv_until(ws, want, limit=60, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({"type": "create_room", "nickname": "Matthew", "colour": "#e74c3c"})
+        joined = recv_until(host_ws, "joined")
+        code, host_id = joined["code"], joined["player_id"]
+        guest_ws = client.websocket_connect("/ws").__enter__()
+        guest_ws.send_json({"type": "join_room", "code": code,
+                            "nickname": "Cousin", "colour": "#3498db"})
+        g_joined = recv_until(guest_ws, "joined")
+        guest_id = g_joined["player_id"]
+        host_ws.send_json({"type": "new_career", "name": "Vote Career v064"})
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"] is not None)
+        teams = state["room"]["career"]["teams"]
+        host_ws.send_json({"type": "choose_team", "team_id": teams[0]["id"]})
+        guest_ws.send_json({"type": "choose_team", "team_id": teams[1]["id"]})
+        host_ws.send_json({"type": "start_career"})
+        recv_until(host_ws, "room_state",
+                   check=lambda m: m["room"]["started"] is True)
+        # Host advances; guest disconnects before advancing. The
+        # weekend must NOT start on the host's advance alone.
+        host_ws.send_json({"type": "advance"})
+        guest_ws.__exit__(None, None, None)
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"]["phase"] == "round")
+        assert state["room"]["career"]["round"] == 1
+        # Guest reconnects (same player) and advances: now it starts.
+        guest_ws = client.websocket_connect("/ws").__enter__()
+        guest_ws.send_json({"type": "rejoin", "code": code, "player_id": guest_id})
+        recv_until(guest_ws, "joined")
+        guest_ws.send_json({"type": "advance"})
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"]["phase"] == "qual_results")
+        assert state["room"]["career"]["round"] == 1
+        # Host votes NEXT; guest disconnects before voting. The vote
+        # must NOT complete on the host's vote alone.
+        host_ws.send_json({"type": "vote_next"})
+        act = recv_until(host_ws, "action")
+        assert "NEXT vote recorded (1/2)" in act["message"]
+        guest_ws.__exit__(None, None, None)
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"]["phase"] == "qual_results")
+        assert state["room"]["career"]["phase"] == "qual_results"
+        # Guest reconnects and votes: now the race page appears.
+        guest_ws = client.websocket_connect("/ws").__enter__()
+        guest_ws.send_json({"type": "rejoin", "code": code, "player_id": guest_id})
+        recv_until(guest_ws, "joined")
+        guest_ws.send_json({"type": "vote_next"})
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"]["phase"] == "race_results")
+        assert state["room"]["career"]["results_stage"] == "race"
+        guest_ws.__exit__(None, None, None)
+
+
+def test_ws_host_crown_returns_to_creator_on_rejoin_v064():
+    """v0.6.4 over real WebSockets: a brief host disconnect does not
+    move the crown; after a long absence the crown transfers, and
+    the original host (creator) regains it on rejoin."""
+    import time as _time
+    from fastapi.testclient import TestClient
+    import server as srv
+    from server import app
+
+    client = TestClient(app)
+
+    def recv_until(ws, want, limit=60, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({"type": "create_room", "nickname": "Matthew", "colour": "#e74c3c"})
+        joined = recv_until(host_ws, "joined")
+        code, host_id = joined["code"], joined["player_id"]
+        guest_ws = client.websocket_connect("/ws").__enter__()
+        guest_ws.send_json({"type": "join_room", "code": code,
+                            "nickname": "Cousin", "colour": "#3498db"})
+        g_joined = recv_until(guest_ws, "joined")
+        guest_id = g_joined["player_id"]
+        # Host disconnects briefly: the crown must stay with them.
+        host_ws.__exit__(None, None, None)
+        state = recv_until(guest_ws, "room_state",
+                           check=lambda m: m["room"]["host_id"] == host_id)
+        assert state["room"]["host_id"] == host_id
+        # Host rejoins: still host.
+        host_ws = client.websocket_connect("/ws").__enter__()
+        host_ws.send_json({"type": "rejoin", "code": code, "player_id": host_id})
+        rejoined = recv_until(host_ws, "joined")
+        assert rejoined["room"]["host_id"] == host_id
+        # Host disconnects again; age the disconnect past the 60s
+        # grace, then the guest rejoins — the crown transfers.
+        host_ws.__exit__(None, None, None)
+        room = srv.ROOMS[code]
+        host_player = next(p for p in room["players"] if p["player_id"] == host_id)
+        host_player["disconnected_at"] = _time.time() - 61
+        guest_ws.__exit__(None, None, None)
+        guest_ws = client.websocket_connect("/ws").__enter__()
+        guest_ws.send_json({"type": "rejoin", "code": code, "player_id": guest_id})
+        rejoined = recv_until(guest_ws, "joined")
+        assert rejoined["room"]["host_id"] == guest_id
+        # The original host (creator) rejoins: the crown returns.
+        host_ws = client.websocket_connect("/ws").__enter__()
+        host_ws.send_json({"type": "rejoin", "code": code, "player_id": host_id})
+        rejoined = recv_until(host_ws, "joined")
+        assert rejoined["room"]["host_id"] == host_id
+        guest_ws.__exit__(None, None, None)
+        host_ws.__exit__(None, None, None)
+
+
+def _playwright_server():
+    """Start the app on a random local port (same pattern as the
+    other Playwright tests) and return (port, server, thread)."""
+    import socket
+    import threading
+    import time as _time
+    import urllib.request
+    import uvicorn
+    from server import app
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = _time.time() + 20
+    while True:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=2) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            if _time.time() > deadline:
+                raise
+            _time.sleep(0.2)
+    return port, server, thread
+
+
+def test_playwright_host_skip_hidden_from_non_host_v064():
+    """v0.6.4 client half: in a real browser, the host-override
+    button ("skip vote & continue") is visible to the host and
+    hidden from a non-host on the results page."""
+    from playwright.sync_api import sync_playwright
+
+    port, server, thread = _playwright_server()
+    errors = []
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            # Host: create a room, start a career, take a team.
+            host_ctx = browser.new_context()
+            host = host_ctx.new_page()
+            host.on("pageerror", lambda e: errors.append(str(e)))
+            host.goto(f"http://127.0.0.1:{port}/")
+            host.fill("#home-nick", "Max")
+            host.click("#btn-create")
+            host.locator("#screen-lobby").wait_for(state="visible", timeout=10000)
+            host.click("#btn-new-career")
+            host.locator("#team-list button[data-team]").first.wait_for(
+                state="visible", timeout=10000)
+            host.locator("#team-list button[data-team]").first.click()
+            host.click("#btn-start-career")
+            host.locator("#screen-game").wait_for(state="visible", timeout=10000)
+            code = host.evaluate("() => room.code")
+            assert len(code) == 6
+            # Guest: join mid-career, take an AI team from the picker.
+            guest_ctx = browser.new_context()
+            guest = guest_ctx.new_page()
+            guest.on("pageerror", lambda e: errors.append(str(e)))
+            guest.goto(f"http://127.0.0.1:{port}/")
+            guest.fill("#home-nick", "Matthew")
+            guest.fill("#home-code", code)
+            guest.click("#btn-join")
+            guest.locator("#screen-picker").wait_for(state="visible", timeout=10000)
+            guest.locator("#picker-team-list button[data-team]").first.click()
+            guest.locator("#screen-game").wait_for(state="visible", timeout=10000)
+            # Both advance -> the qualifying results page (vote page).
+            host.click("#btn-advance")
+            guest.click("#btn-advance")
+            host.locator("#btn-vote-next").wait_for(state="visible", timeout=10000)
+            guest.locator("#btn-vote-next").wait_for(state="visible", timeout=10000)
+            # Host sees the override; the non-host does not.
+            assert host.locator("#btn-host-skip").is_visible()
+            assert not guest.locator("#btn-host-skip").is_visible()
+            # The host force-advance button is likewise host-only on
+            # the dashboard (visible here only after returning, so
+            # check it is hidden for the guest right now).
+            assert not guest.locator("#btn-host-advance").is_visible()
+            browser.close()
+        assert not errors, errors
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_playwright_finances_shows_net_per_race_v064():
+    """v0.6.4 client half: in a real browser, the Finances tab
+    shows one signed net figure ("Net per race: +$X.XXM") near the
+    top, with its breakdown."""
+    from playwright.sync_api import sync_playwright
+
+    port, server, thread = _playwright_server()
+    errors = []
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.locator("#screen-lobby").wait_for(state="visible", timeout=10000)
+            page.click("#btn-new-career")
+            page.locator("#team-list button[data-team]").first.wait_for(
+                state="visible", timeout=10000)
+            page.locator("#team-list button[data-team]").first.click()
+            page.click("#btn-start-career")
+            page.locator("#screen-game").wait_for(state="visible", timeout=10000)
+            page.click('[data-tab="finances"]')
+            page.locator("#tab-finances:not(.hidden)").wait_for(
+                state="visible", timeout=10000)
+            fin = page.inner_text("#finances-box")
+            assert "Net per race:" in fin, fin
+            assert "per-race gains" in fin, fin
+            assert "salaries" in fin, fin
+            browser.close()
+        assert not errors, errors
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
