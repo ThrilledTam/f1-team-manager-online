@@ -1987,17 +1987,19 @@ def human_teams(career):
     return [t for t in career["teams"] if t["owner_player_id"] is not None]
 
 
-def all_humans_advanced(career, connected_player_ids):
-    """True when every human team whose owner is still connected has
-    advanced. Disconnected owners' teams are AI-driven for that round."""
+def all_humans_advanced(career):
+    """True when EVERY human team has advanced — connected or not.
+    v0.6.4: a disconnected player counts as NOT advanced (pending),
+    never as advanced and never excluded from the count. The weekend
+    must not start until every human has advanced (or the host uses
+    the host override — see host_skip_advance)."""
     for team in human_teams(career):
-        if team["owner_player_id"] in connected_player_ids \
-                and team["id"] not in career["advanced"]:
+        if team["id"] not in career["advanced"]:
             return False
     return True
 
 
-def advance_team(career, team_id, connected_player_ids, rng=None):
+def advance_team(career, team_id, rng=None):
     """A human hits Advance. Returns (advanced_ok, race_ran, message)."""
     team = get_team(career, team_id)
     if not team:
@@ -2006,29 +2008,46 @@ def advance_team(career, team_id, connected_player_ids, rng=None):
         return False, False, "Not in a racing round right now."
     if team["id"] not in career["advanced"]:
         career["advanced"].append(team["id"])
-    if all_humans_advanced(career, connected_player_ids):
-        run_race_weekend(career, connected_player_ids, rng=rng)
+    if all_humans_advanced(career):
+        run_race_weekend(career, rng=rng)
         return True, True, "Qualifying complete — results are in."
     return True, False, "Waiting for the other teams to advance."
 
 
-def results_voters(career, connected_player_ids):
-    """Player ids that must vote NEXT at the current results stage: the
-    owners of human teams who are still connected. Disconnected humans are
-    excluded (their teams are AI-driven); bots never vote."""
-    return [t["owner_player_id"] for t in human_teams(career)
-            if t["owner_player_id"] in connected_player_ids]
+def host_skip_advance(career, player_id, is_host, rng=None):
+    """v0.6.4: the host's override for the Advance — starts the race
+    weekend now even though not every human has advanced. This is the
+    escape hatch when a human has disconnected and is not coming
+    back (the advance itself waits for ALL humans, connected or
+    not). Host-only, like host_skip_results."""
+    if not is_host:
+        return False, False, "Only the host can start the weekend."
+    if career["phase"] != "round":
+        return False, False, "Not in a racing round right now."
+    run_race_weekend(career, rng=rng)
+    return True, True, "Host started the race weekend — qualifying is in."
 
 
-def all_results_voted(career, connected_player_ids):
-    """True when every required voter has voted — or when nobody is left
-    connected to vote (then the stage must not get stuck)."""
-    voters = results_voters(career, connected_player_ids)
+def results_voters(career):
+    """Player ids that must vote NEXT at the current results stage:
+    the owners of ALL human teams, connected or not. v0.6.4: a
+    disconnected player counts as NOT voted (pending), never as voted
+    and never excluded from the denominator — the vote must not
+    complete until every human has voted (or the host skips it).
+    Bots never vote."""
+    return [t["owner_player_id"] for t in human_teams(career)]
+
+
+def all_results_voted(career):
+    """True when every required voter has voted. With no human teams
+    at all (an all-AI career) there is nobody to wait for, so the
+    stage advances — the same as before."""
+    voters = results_voters(career)
     voted = set(career.get("results_vote") or [])
     return all(v in voted for v in voters)
 
 
-def advance_results_stage(career, connected_player_ids, rng=None):
+def advance_results_stage(career, rng=None):
     """Move one results stage forward. qual -> race results page;
     race -> back to dashboards (next round, or winter break at season end).
     Returns True if the stage actually advanced."""
@@ -2045,43 +2064,47 @@ def advance_results_stage(career, connected_player_ids, rng=None):
     return False
 
 
-def check_results_vote(career, connected_player_ids, rng=None):
+def check_results_vote(career, rng=None):
     """Advance the results stage if the vote is complete. Returns True if
-    it advanced. Called after every vote, host skip, and disconnect."""
+    it advanced. Called after every vote and host skip. v0.6.4: a
+    disconnect no longer completes the vote — the disconnected voter
+    is still pending, so this is now a no-op when anyone is missing."""
     if career.get("phase") not in ("qual_results", "race_results"):
         return False
-    if all_results_voted(career, connected_player_ids):
-        return advance_results_stage(career, connected_player_ids, rng=rng)
+    if all_results_voted(career):
+        return advance_results_stage(career, rng=rng)
     return False
 
 
-def vote_next(career, player_id, connected_player_ids, rng=None):
+def vote_next(career, player_id, rng=None):
     """A human votes NEXT on the current results page. Returns
     (ok, advanced, message). Votes are stored by player_id, so a
     reconnecting player keeps their vote."""
     if career.get("phase") not in ("qual_results", "race_results"):
         return False, False, "There is no results vote right now."
-    if player_id not in results_voters(career, connected_player_ids):
+    if player_id not in results_voters(career):
         return False, False, "You have no team in this career, so you cannot vote."
     if player_id in (career.get("results_vote") or []):
         return True, False, "Your NEXT vote is already recorded."
     career.setdefault("results_vote", []).append(player_id)
-    advanced = check_results_vote(career, connected_player_ids, rng=rng)
-    total = len(results_voters(career, connected_player_ids))
+    advanced = check_results_vote(career, rng=rng)
+    total = len(results_voters(career))
     voted = len(career.get("results_vote") or [])
     if advanced:
         return True, True, "Everyone voted NEXT — moving on."
     return True, False, f"NEXT vote recorded ({voted}/{total}) ✓"
 
 
-def host_skip_results(career, player_id, connected_player_ids, is_host, rng=None):
+def host_skip_results(career, player_id, is_host, rng=None):
     """The host's override: advances the results stage immediately. Only
-    the host may call it (the button is only ever sent to the host)."""
+    the host may call it (the button is only ever sent to the host).
+    v0.6.4: the server enforces this too — a non-host gets an error
+    and the stage does not move."""
     if not is_host:
         return False, False, "Only the host can skip the vote."
     if career.get("phase") not in ("qual_results", "race_results"):
         return False, False, "There is no results vote to skip right now."
-    advanced = advance_results_stage(career, connected_player_ids, rng=rng)
+    advanced = advance_results_stage(career, rng=rng)
     return True, advanced, "Host skipped the vote — moving on."
 
 
@@ -2103,14 +2126,18 @@ def complete_race_weekend(career, rng=None):
             init_reg_state(career)
 
 
-def run_race_weekend(career, connected_player_ids, rng=None):
+def run_race_weekend(career, rng=None):
     """AI acts, then qualifying, then the race, then money. v0.1: the round
     does NOT advance here — the room goes to the qualifying results page
     first (phase 'qual_results'), and only the NEXT votes move it on."""
     rng = rng or random
-    # AI teams act; disconnected humans are AI-driven this round.
+    # v0.6.4: the bot AI acts ONLY for teams that are genuinely AI
+    # (no human owner). A human-owned team is NEVER bot-driven just
+    # because its player is temporarily disconnected — the bot used
+    # to set its Tuning and spend its research money while the
+    # player was away (Tuning 1 -> 3, mystery research pools).
     for team in career["teams"]:
-        if team["is_ai"] or team["owner_player_id"] not in connected_player_ids:
+        if team["is_ai"] or not team.get("owner_player_id"):
             ai_act(career, team, rng=rng)
     # Constructor order at the start of the weekend (for EPRG).
     standings_before = race_mod.constructor_standings(career)
@@ -3046,12 +3073,30 @@ def finances_view(career, team):
     # fines, all per race — so the manager sees them before signing.
     academy = team_academy_drivers(career, team)
     charges = extra_charges_per_race(career, team)
+    # v0.6.4: the per-race NET — what the team actually gains or
+    # loses each race, as one signed number: the per-race gains
+    # (EPRG, paid after each race) minus the per-race salary cost
+    # minus the per-race extra charges (T&R fine, academy stipends,
+    # academy fine). Positive = profit, negative = loss. This is the
+    # figure Matthew asked for ("am I in the positives or negatives")
+    # after signing too many T&R drivers and watching the fines eat
+    # the prize money. It uses only figures this tab already
+    # computes — no new accounting. It is computed from the same
+    # values the tab displays (the rounded per-race salary and the
+    # extra charges as shown), so the numbers the manager sees
+    # always add up — a net computed from the unrounded salary
+    # could differ by a cent from the displayed components. The
+    # extra charges themselves stay unrounded in the payload, so
+    # they still equal the sum of their components.
+    salary = round(salary_per_round(career, team), 2)
+    net_per_race = round(est["eprg"] - salary - charges["total"], 2)
     return {
         "money": round(team["money"], 2),
         "constructor_pos": pos,
         "epsci": est["epsci"],
         "eprg": est["eprg"],
-        "salary_per_race": round(salary_per_round(career, team), 2),
+        "net_per_race": net_per_race,
+        "salary_per_race": salary,
         "driver_costs": [{"driver": d["name"],
                           "per_race": round(d["salary"] / SEASON_LENGTH, 2)}
                          for d in drivers],
