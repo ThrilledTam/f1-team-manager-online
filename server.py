@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.6.4 (beta)
+F1 Team Manager Online — v0.6.5 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -128,7 +128,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.6.4", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.6.5", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -443,7 +443,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.4"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.5"}
 
 
 @app.get("/api/saves")
@@ -955,7 +955,8 @@ async def ws_endpoint(ws: WebSocket):
                                                       msg.get("contract_years", 2))
                     elif mtype == "release_driver":
                         # v0.4.3: release (drop) a main or T&R driver —
-                        # break fee = main-driver formula, round only.
+                        # break fee = main-driver formula. v0.6.5: round
+                        # and winter break (was round only).
                         ok, why = game.release_driver(career, team["id"],
                                                       msg.get("driver_id"))
                     elif mtype == "swap_driver":
