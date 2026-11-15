@@ -2510,14 +2510,14 @@
    {
     "pos": 19,
     "name": "Romain Grosjean",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 2.0,
     "wins": 0
    },
    {
     "pos": 20,
     "name": "Kevin Magnussen",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 1.0,
     "wins": 0
    },
@@ -2538,7 +2538,7 @@
    {
     "pos": 23,
     "name": "Pietro Fittipaldi",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 0.0,
     "wins": 0
    }
@@ -2594,7 +2594,7 @@
    },
    {
     "pos": 9,
-    "name": "Haas F1 Team",
+    "name": "Haas",
     "points": 3.0,
     "wins": 0
    },
@@ -2674,14 +2674,14 @@
    {
     "pos": 10,
     "name": "Fernando Alonso",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 81.0,
     "wins": 0
    },
    {
     "pos": 11,
     "name": "Esteban Ocon",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 74.0,
     "wins": 1
    },
@@ -2737,7 +2737,7 @@
    {
     "pos": 19,
     "name": "Mick Schumacher",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 0.0,
     "wins": 0
    },
@@ -2751,7 +2751,7 @@
    {
     "pos": 21,
     "name": "Nikita Mazepin",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 0.0,
     "wins": 0
    }
@@ -2783,7 +2783,7 @@
    },
    {
     "pos": 5,
-    "name": "Alpine F1 Team",
+    "name": "Alpine",
     "points": 155.0,
     "wins": 1
    },
@@ -2813,7 +2813,7 @@
    },
    {
     "pos": 10,
-    "name": "Haas F1 Team",
+    "name": "Haas",
     "points": 0.0,
     "wins": 0
    }
@@ -2873,14 +2873,14 @@
    {
     "pos": 8,
     "name": "Esteban Ocon",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 92.0,
     "wins": 0
    },
    {
     "pos": 9,
     "name": "Fernando Alonso",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 81.0,
     "wins": 0
    },
@@ -2908,7 +2908,7 @@
    {
     "pos": 13,
     "name": "Kevin Magnussen",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 25.0,
     "wins": 0
    },
@@ -2929,7 +2929,7 @@
    {
     "pos": 16,
     "name": "Mick Schumacher",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 12.0,
     "wins": 0
    },
@@ -2997,7 +2997,7 @@
    },
    {
     "pos": 4,
-    "name": "Alpine F1 Team",
+    "name": "Alpine",
     "points": 173.0,
     "wins": 0
    },
@@ -3021,7 +3021,7 @@
    },
    {
     "pos": 8,
-    "name": "Haas F1 Team",
+    "name": "Haas",
     "points": 37.0,
     "wins": 0
    },
@@ -3114,14 +3114,14 @@
    {
     "pos": 11,
     "name": "Pierre Gasly",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 62.0,
     "wins": 0
    },
    {
     "pos": 12,
     "name": "Esteban Ocon",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 58.0,
     "wins": 0
    },
@@ -3149,7 +3149,7 @@
    {
     "pos": 16,
     "name": "Nico H\u00fclkenberg",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 9.0,
     "wins": 0
    },
@@ -3170,7 +3170,7 @@
    {
     "pos": 19,
     "name": "Kevin Magnussen",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 3.0,
     "wins": 0
    },
@@ -3229,7 +3229,7 @@
    },
    {
     "pos": 6,
-    "name": "Alpine F1 Team",
+    "name": "Alpine",
     "points": 120.0,
     "wins": 0
    },
@@ -3253,7 +3253,7 @@
    },
    {
     "pos": 10,
-    "name": "Haas F1 Team",
+    "name": "Haas",
     "points": 12.0,
     "wins": 0
    }
@@ -3327,21 +3327,21 @@
    {
     "pos": 10,
     "name": "Pierre Gasly",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 42.0,
     "wins": 0
    },
    {
     "pos": 11,
     "name": "Nico H\u00fclkenberg",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 41.0,
     "wins": 0
    },
    {
     "pos": 12,
     "name": "Yuki Tsunoda",
-    "team": "RB F1 Team",
+    "team": "Racing Bulls",
     "points": 30.0,
     "wins": 0
    },
@@ -3355,14 +3355,14 @@
    {
     "pos": 14,
     "name": "Esteban Ocon",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 23.0,
     "wins": 0
    },
    {
     "pos": 15,
     "name": "Kevin Magnussen",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 16.0,
     "wins": 0
    },
@@ -3376,7 +3376,7 @@
    {
     "pos": 17,
     "name": "Daniel Ricciardo",
-    "team": "RB F1 Team",
+    "team": "Racing Bulls",
     "points": 12.0,
     "wins": 0
    },
@@ -3404,7 +3404,7 @@
    {
     "pos": 21,
     "name": "Liam Lawson",
-    "team": "RB F1 Team",
+    "team": "Racing Bulls",
     "points": 4.0,
     "wins": 0
    },
@@ -3425,7 +3425,7 @@
    {
     "pos": 24,
     "name": "Jack Doohan",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 0.0,
     "wins": 0
    }
@@ -3575,14 +3575,14 @@
    {
     "pos": 12,
     "name": "Isack Hadjar",
-    "team": "RB F1 Team",
+    "team": "Racing Bulls",
     "points": 51.0,
     "wins": 0
    },
    {
     "pos": 13,
     "name": "Oliver Bearman",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 41.0,
     "wins": 0
    },
@@ -3596,7 +3596,7 @@
    {
     "pos": 15,
     "name": "Esteban Ocon",
-    "team": "Haas F1 Team",
+    "team": "Haas",
     "points": 38.0,
     "wins": 0
    },
@@ -3610,14 +3610,14 @@
    {
     "pos": 17,
     "name": "Yuki Tsunoda",
-    "team": "RB F1 Team",
+    "team": "Racings Bulls",
     "points": 33.0,
     "wins": 0
    },
    {
     "pos": 18,
     "name": "Pierre Gasly",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 22.0,
     "wins": 0
    },
@@ -3631,14 +3631,14 @@
    {
     "pos": 20,
     "name": "Franco Colapinto",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 0.0,
     "wins": 0
    },
    {
     "pos": 21,
     "name": "Jack Doohan",
-    "team": "Alpine F1 Team",
+    "team": "Alpine",
     "points": 0.0,
     "wins": 0
    }
