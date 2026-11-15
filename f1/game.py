@@ -1354,11 +1354,22 @@ def _proposal_still_valid(career, proposal):
     if kind == "customer":
         if customer.get("sup_stage", 0) != 0:
             return False, f"{customer['name']} already has a supplier now."
+        # v0.7.2: the customer must not have become a supplier since
+        # the proposal was sent (a team is either a parent or a
+        # child, never both).
+        if supplied_teams(career, customer):
+            return False, (f"{customer['name']} already supplies other "
+                           f"teams now.")
     elif kind == "junior":
         if not (customer.get("sup_stage") == 1
                 and customer.get("supplier_id") == supplier["id"]):
             return False, (f"{customer['name']} is no longer a customer "
                            f"of {supplier['name']}.")
+        # v0.7.2: same mirror rule — a junior-to-be that has since
+        # taken on supplied teams of its own cannot be a junior.
+        if supplied_teams(career, customer):
+            return False, (f"{customer['name']} already supplies other "
+                           f"teams now.")
         other_junior = junior_team_of(career, supplier)
         if other_junior is not None and other_junior["id"] != customer["id"]:
             return False, f"{supplier['name']} already has a junior team."
@@ -1434,6 +1445,19 @@ def propose_relation(career, proposer_team_id, target_team_id, kind,
             return False, (f"{supplier['name']} already has a supplier — "
                            f"a team that is a customer or junior cannot "
                            f"offer supply contracts to other teams.")
+        # v0.7.2 (Matthew's rule, the mirror of the above): a team
+        # that already SUPPLIES other teams cannot become a customer
+        # or junior — it cannot be anyone's customer. Together the
+        # two rules mean a team is either a parent or a child, never
+        # both, and there are no supply chains (e.g. Aston cannot
+        # propose to supply Mercedes while Mercedes supplies Alpine,
+        # McLaren, Audi and Williams).
+        supplied = supplied_teams(career, customer)
+        if supplied:
+            names = ", ".join(t["name"] for t in supplied)
+            return False, (f"{customer['name']} already supplies {names} — "
+                           f"a team that supplies other teams cannot "
+                           f"become a customer or junior team.")
         if kind == "customer":
             if customer.get("sup_stage", 0) != 0:
                 return False, f"{customer['name']} already has a supplier."
@@ -3177,6 +3201,16 @@ def end_of_season(career, rng=None):
     # v0.4: record this season's final constructors' order too — the
     # next season opens in this order, and the winter-break offer
     # resolution processes teams in this order (champion first).
+    # v0.7.2: keep the PREVIOUS season's order first — the retirement
+    # chance below needs each team's trajectory (places gained vs
+    # last season), and this assignment overwrites it.
+    prev_order = list(career.get("prev_team_order") or [])
+    new_pos = {t["id"]: i + 1 for i, t in enumerate(standings)}
+    old_pos = {tid: i + 1 for i, tid in enumerate(prev_order)}
+    traj_by_team = {tid: old_pos.get(tid, new_pos[tid]) - new_pos[tid]
+                    for tid in new_pos}
+    top_perf = max((t.get("perf", 0.0) or 0.0 for t in career["teams"]),
+                   default=0.0)
     career["prev_team_order"] = [t["id"] for t in standings]
     # v0.4: snapshot the season just finished for the winter-break
     # review (stats, final standings, head-to-head) — taken BEFORE
@@ -3224,8 +3258,10 @@ def end_of_season(career, rng=None):
     # years (season_snapshots, same shape as last_season minus the
     # per-driver stats the detail view does not need) — before the
     # points reset below, so it records the real final numbers.
+    # v0.7.2: the live career is passed so the snapshot also captures
+    # this season's relationships as they stood at season end.
     career.setdefault("season_snapshots", []).append(
-        season_snapshot(career["last_season"]))
+        season_snapshot(career["last_season"], career))
     # v0.7.0: hidden team reputation moves at the season rollover.
     # Constructors' position: P1 +5, P6 0, P11 -5. Driver quality:
     # the average hidden rep of the team's two main drivers, centred
@@ -3296,19 +3332,30 @@ def end_of_season(career, rng=None):
     for pos, team in enumerate(standings, start=1):
         team["money"] += 12.0 if pos == 1 else (11.0 - (0.65 * pos))
         team["money"] += finance_estimates(pos)["epsci"]
-    # Retirements (F1 drivers, then free agents).
+    # Retirements (F1 drivers, then free agents). v0.7.2: the chance
+    # now weighs the whole situation — performance, car, reputation
+    # and the team's trajectory — and there is no maximum age.
     retired = []
     for d in list(drivers):
         team = get_team(career, d["team_id"]) if d.get("team_id") else None
         pos = constructor_pos(career, d["team_id"]) if team else len(career["teams"])
         team_pts = team["points"] if team else 0
-        if is_retiring(d["age"], d["cha"], pos, d["points"], team_pts, rng=rng):
+        if is_retiring(d["age"], d["cha"], pos, d["points"], team_pts,
+                       rep=d.get("rep", 2.5),
+                       wins=d.get("season_wins", 0) or 0,
+                       trajectory=traj_by_team.get(d.get("team_id"), 0),
+                       perf_gap=(top_perf - team["perf"]) if team else 0.0,
+                       rng=rng):
             retired.append(d)
     for d in list(free_agents(career)):
-        if d["age"] >= 40:
-            chance = 20.0 + ((d["age"] - 40) * 5)
-            if rng.random() * 100 <= chance or d["age"] >= 57:
-                retired.append(d)
+        # No team (worst position: last constructors' place), no
+        # forced retirement at any age — the same gentle curve.
+        chance = retirement_chance(d["age"], d["cha"], len(career["teams"]),
+                                   d["points"], 0,
+                                   rep=d.get("rep", 2.5),
+                                   wins=d.get("season_wins", 0) or 0)
+        if chance > 0 and rng.random() * 100 <= chance:
+            retired.append(d)
     for d in retired:
         team = get_team(career, d["team_id"]) if d.get("team_id") else None
         if team:
@@ -3579,11 +3626,41 @@ def winter_break_review(career, team_id=None):
     }
 
 
-def season_snapshot(season):
+def season_snapshot(season, career=None):
     """v0.7.0: strip a last_season-shaped dict down to the season
     snapshot stored in career['season_snapshots'] (and used by the
     clickable champion years) — the standings only, no per-driver
-    head-to-head / average-finish stats."""
+    head-to-head / average-finish stats.
+    v0.7.2: when the live career is passed (the rollover, and the
+    last_season fallback in get_season_detail), each team entry also
+    captures that season's relationship state as it stood at season
+    end — its supplier (id, name, customer/junior stage) and the
+    teams it supplies (id, name, kind) — so the detail view shows
+    the relationships AS THEY WERE that year, never the live ones.
+    Snapshots built without a career (the migration rebuild of
+    older saves) carry no relationship data; only the 2026 snapshot
+    is backfilled, from the 2026 grid (see f1/saves.py)."""
+    teams = [{
+        "id": t["id"], "name": t["name"], "points": t["points"],
+        "wins": t.get("wins", 0), "best_pos": t.get("best_pos"),
+    } for t in (season.get("teams") or [])]
+    if career is not None:
+        live = {t["id"]: t for t in career.get("teams") or []}
+        rel = {}
+        for entry in teams:
+            lt = live.get(entry["id"]) or {}
+            sup = live.get(lt.get("supplier_id")) if lt.get("supplier_id") else None
+            rel[entry["id"]] = {
+                "supplier_id": sup["id"] if sup else None,
+                "supplier_name": sup["name"] if sup else None,
+                "sup_stage": int(lt.get("sup_stage") or 0),
+            }
+        for entry in teams:
+            entry.update(rel[entry["id"]])
+            entry["supplies"] = [{
+                "id": t["id"], "name": t["name"],
+                "kind": "junior" if rel[t["id"]]["sup_stage"] == 2 else "customer",
+            } for t in teams if rel[t["id"]]["supplier_id"] == entry["id"]]
     return {
         "year": season.get("year"),
         "drivers": [{
@@ -3592,10 +3669,7 @@ def season_snapshot(season):
             "wins": d.get("wins", 0), "podiums": d.get("podiums", 0),
             "best_pos": d.get("best_pos"),
         } for d in (season.get("drivers") or [])],
-        "teams": [{
-            "id": t["id"], "name": t["name"], "points": t["points"],
-            "wins": t.get("wins", 0), "best_pos": t.get("best_pos"),
-        } for t in (season.get("teams") or [])],
+        "teams": teams,
     }
 
 
@@ -3638,10 +3712,13 @@ def get_season_detail(career, year):
     season_snapshots (falling back to last_season for the season
     just finished, in case the snapshot was never written); real
     years 2010-2025 come from the baked-in REAL_STANDINGS. Returns
-    {year, source, drivers, constructors} — drivers carry pos, name,
-    team, team_id (in-game only), points, wins; constructors carry
-    pos, name, points, wins — or None when the year has no recorded
-    standings. Team reputation is never part of a season detail."""
+    {year, source, has_relations, drivers, constructors} — drivers
+    carry pos, name, team, team_id (in-game only), points, wins;
+    constructors carry pos, name, points, wins, plus the SNAPSHOT's
+    relationship data (supplier_id, supplier_name, sup_stage,
+    supplies) when the snapshot has it — or None when the year has
+    no recorded standings. Team reputation is never part of a season
+    detail."""
     try:
         year = int(year)
     except (TypeError, ValueError):
@@ -3650,11 +3727,17 @@ def get_season_detail(career, year):
         snap = next((s for s in career.get("season_snapshots") or []
                      if s.get("year") == year), None)
         if snap is None and (career.get("last_season") or {}).get("year") == year:
-            snap = season_snapshot(career["last_season"])
+            snap = season_snapshot(career["last_season"], career)
         if snap is None:
             return None
+        # v0.7.2: constructors carry the SNAPSHOT's relationship data
+        # (supplier + supplied teams as they were that year). A
+        # snapshot built before v0.7.2 has none of these fields — the
+        # detail then shows no relationship info at all, never the
+        # live teams' current relations.
+        has_relations = any("supplier_id" in t for t in (snap.get("teams") or []))
         return {
-            "year": year, "source": "game",
+            "year": year, "source": "game", "has_relations": has_relations,
             "drivers": [{
                 "pos": i + 1, "name": d["name"],
                 "team": d.get("team", ""), "team_id": d.get("team_id"),
@@ -3663,6 +3746,10 @@ def get_season_detail(career, year):
             "constructors": [{
                 "pos": i + 1, "name": t["name"],
                 "points": t["points"], "wins": t.get("wins", 0),
+                "supplier_id": t.get("supplier_id"),
+                "supplier_name": t.get("supplier_name"),
+                "sup_stage": t.get("sup_stage"),
+                "supplies": list(t.get("supplies") or []),
             } for i, t in enumerate(snap.get("teams") or [])],
         }
     real = REAL_STANDINGS.get(str(year))
@@ -4155,18 +4242,33 @@ def start_next_season(career, rng=None):
 # ---------------------------------------------------------------------------
 
 def retirement_rumours(career):
-    """isRetiring(isRumour=True) for every F1 driver, as in Main.py's rumours."""
+    """isRetiring(isRumour=True) for every F1 driver, as in Main.py's rumours.
+    v0.7.2: the same reworked formula as the rollover — chance from
+    30, gentler, and lower when the driver is performing well, in a
+    good car, highly reputed, or on a team going up. Trajectory is
+    last season's final order (prev_team_order) vs the current
+    standings; there is no maximum age."""
     out = []
     # v0.2: driver_standings() also lists replaced drivers (free agents
     # with points), and v0.4.4: any driver who raced in F1 this season
     # — rumours are for current F1 drivers only.
     drivers = [d for d in race_mod.driver_standings(career)
                if d["status"] == "f1"]
+    prev_order = career.get("prev_team_order") or [
+        t["id"] for t in (career.get("last_season") or {}).get("teams") or []]
+    old_pos = {tid: i + 1 for i, tid in enumerate(prev_order)}
+    top_perf = max((t.get("perf", 0.0) or 0.0 for t in career["teams"]),
+                   default=0.0)
     for d in drivers:
         team = get_team(career, d["team_id"]) if d.get("team_id") else None
         pos = constructor_pos(career, d["team_id"]) if team else len(career["teams"])
+        traj = (old_pos.get(d["team_id"], pos) - pos) if team else 0
         chance = retirement_chance(d["age"], d["cha"], pos, d["points"],
-                                   team["points"] if team else 0)
+                                   team["points"] if team else 0,
+                                   rep=d.get("rep", 2.5),
+                                   wins=d.get("season_wins", 0) or 0,
+                                   trajectory=traj,
+                                   perf_gap=(top_perf - team["perf"]) if team else 0.0)
         out.append({"driver": d["name"], "team": team["name"] if team else "",
                     "age": d["age"], "chance": round(chance, 1)})
     return sorted(out, key=lambda r: -r["chance"])

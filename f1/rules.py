@@ -262,35 +262,53 @@ def add_rel_gain(investment):
 # table's year-over-year deltas. Retirement logic below is unchanged.
 
 
-def retirement_chance(age, championships, team_pos, driver_points, team_points,
-                      ret_min_age=42):
-    """From Main.py isRetiring(d, isRumour=True).
-
-    Returns the retirement chance in percent (0-100). Hard cap: age >= 49
-    always retires. Note: Main.py's retMinAge decrements were `==`
-    comparisons (no-ops), so it stays 42 — preserved here as the default.
+def retirement_chance(age, championships=0, team_pos=6, driver_points=0,
+                      team_points=0, ret_min_age=30, rep=2.5, wins=0,
+                      trajectory=0, perf_gap=0.0):
+    """v0.7.2 rework (Matthew): a driver starts having a retirement
+    chance at 30, not the original code's 42 — and the ramp above
+    the minimum is GENTLE, so drivers are not very likely to retire
+    within the first few years after it. Every factor that means
+    "in a better position" lowers the chance: performing well
+    (share of the team's points, plus wins), a good / frontrunner
+    car (constructors' position and how close its perf is to the
+    fastest car), a higher reputation, and a team whose trajectory
+    is going up (constructors' places gained vs last season).
+    Titles delay the start a little (a champion keeps going), as in
+    the original. There is NO maximum age any more — a driver who
+    is still performing at 50+ stays (Matthew: real drivers like
+    Lewis Hamilton say they are not ready to give up). Returns the
+    retirement chance in percent, clamped to [0, 95] — never certain.
     """
-    if age < ret_min_age + (championships / 1.5):
+    threshold = ret_min_age + championships / 1.5
+    if age < threshold:
         return 0.0
-    base = 10.0 + (age - ret_min_age) * 5
-    if team_points > 0:
-        performance_factor = driver_points / team_points
-        team_factor = (0.5 - performance_factor) * (100 + (team_pos - 0.5) * 5)
-        chance = base + team_factor
+    base = (age - ret_min_age) * 1.5
+    if team_points and team_points > 0:
+        share = driver_points / team_points
     else:
-        chance = base + 35.0
-    if age >= 49:
-        return 100.0
-    return chance
+        share = 0.5  # no team points to share (a pointless team, or a
+        # free agent): neutral — the team's position already says
+        # how bad the situation is.
+    perf_term = (0.5 - share) * 25.0 - min(wins, 5) * 1.0
+    team_term = (team_pos - 1) * 2.0
+    rep_term = (2.5 - rep) * 6.0
+    traj = max(-3, min(3, trajectory))
+    traj_term = -4.0 * traj
+    gap_term = min(max(perf_gap, 0.0), 60.0) / 10.0
+    chance = base + perf_term + team_term + rep_term + traj_term + gap_term
+    return max(0.0, min(95.0, chance))
 
 
-def is_retiring(age, championships, team_pos, driver_points, team_points,
-                ret_min_age=42, rng=None):
+def is_retiring(age, championships=0, team_pos=6, driver_points=0,
+                team_points=0, ret_min_age=30, rng=None, rep=2.5, wins=0,
+                trajectory=0, perf_gap=0.0):
+    """v0.7.2: one roll against retirement_chance — no forced
+    retirement at any age. A strong 50+ performer can keep racing."""
     rng = rng or random
-    if age >= 49:
-        return True
     chance = retirement_chance(age, championships, team_pos, driver_points,
-                               team_points, ret_min_age)
+                               team_points, ret_min_age, rep=rep, wins=wins,
+                               trajectory=trajectory, perf_gap=perf_gap)
     if chance <= 0:
         return False
     return rng.random() * 100 <= chance

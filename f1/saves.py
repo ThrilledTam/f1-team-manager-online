@@ -14,20 +14,24 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 12  # v0.7.1: random driver illness / injury (ill_*
-# fields on every driver — default: no driver ill) + F2 promoted
-# drivers keep a frozen F2 tally (f2_left + frozen values) + the slot
-# a driver last held on a team (last_slot, for the winter-break
-# re-sign offer). v0.7.0: hidden team reputation (team_rep on
-# every team, 50.0 for migrated saves) + season snapshots (one per
-# completed season, rebuilt from last_season / race_history for old
-# saves) for the clickable champion years. v0.6.6: team
-# relationships, second pass — the research cap is REMOVED entirely
-# (setting, enforcement, bot cap); WANTED works for customer teams
-# too; the junior income share (15% of race prize to the parent) +
-# parent promotion/swap of junior drivers + two-way donation
-# requests + the 3-round contract-break notice (break_notice on
-# teams, donation_requests on the career). v9 saves load fine: the
+SAVE_VERSION = 13  # v0.7.2: season snapshots carry relationship data
+# (supplier / supplied teams per year, captured at the rollover);
+# the retirement formula is reworked (chance from age 30, gentler
+# ramp, position-based decreases, NO maximum age). v0.7.1: random
+# driver illness / injury (ill_* fields on every driver — default:
+# no driver ill) + F2 promoted drivers keep a frozen F2 tally
+# (f2_left + frozen values) + the slot a driver last held on a team
+# (last_slot, for the winter-break re-sign offer). v0.7.0: hidden
+# team reputation (team_rep on every team, 50.0 for migrated saves)
+# + season snapshots (one per completed season, rebuilt from
+# last_season / race_history for old saves) for the clickable
+# champion years. v0.6.6: team relationships, second pass — the
+# research cap is REMOVED entirely (setting, enforcement, bot cap);
+# WANTED works for customer teams too; the junior income share (15%
+# of race prize to the parent) + parent promotion/swap of junior
+# drivers + two-way donation requests + the 3-round contract-break
+# notice (break_notice on teams, donation_requests on the career).
+# v9 saves load fine: the
 # removed cap fields are dropped on load and the new fields backfill
 # to their defaults.
 # v0.6: team relationships (supplier / customer / junior contracts,
@@ -368,6 +372,36 @@ def migrate_save(doc):
                 snaps.append(season_snapshot(rec))
         snaps.sort(key=lambda s: s.get("year") or 0)
         doc["season_snapshots"] = snaps
+    # v0.7.2 (save v13): season snapshots gain relationship data.
+    # A snapshot built at a v0.7.2 rollover already carries it (see
+    # game.season_snapshot), so this only touches snapshots that
+    # lack it — and only the 2026 one can be backfilled, from the
+    # code's own 2026 grid (grid_by_name, above): Mercedes supplies
+    # McLaren / Williams / Alpine as customers, Red Bull supplies
+    # Racing Bulls as its junior, Ferrari supplies Haas / Cadillac
+    # as customers; everyone else was independent. 2027/2028
+    # snapshots keep NO relationship data — do NOT fabricate it.
+    # The detail view omits the relationship line for those years
+    # instead of showing the live teams' current relations.
+    for snap in doc.get("season_snapshots") or []:
+        if snap.get("year") != 2026:
+            continue
+        teams = snap.get("teams") or []
+        if not teams or any("supplier_id" in t for t in teams):
+            continue
+        by_name = {t.get("name"): t for t in teams}
+        for entry in teams:
+            grid = grid_by_name.get(entry.get("name")) or {}
+            sup_name = grid.get("supplier")
+            sup = by_name.get(sup_name) if sup_name else None
+            entry["supplier_id"] = sup["id"] if sup else None
+            entry["supplier_name"] = sup_name
+            entry["sup_stage"] = int(grid.get("sup_stage") or 0)
+        for entry in teams:
+            entry["supplies"] = [{
+                "id": t["id"], "name": t["name"],
+                "kind": "junior" if t.get("sup_stage") == 2 else "customer",
+            } for t in teams if t.get("supplier_id") == entry["id"]]
     # A career saved mid-results under v0 never existed (v0 had no results
     # stages), but guard anyway: drop back to the dashboard round.
     if doc.get("phase") == "race_results":
@@ -390,6 +424,15 @@ def migrate_save(doc):
         for key in ("qual", "race"):
             for row in entry.get(key) or []:
                 row.pop("time", None)
+    # v0.7.2: a document that has been through every migration step
+    # above IS at the current format, so it reports the current
+    # version — an old save loaded through load_save used to keep
+    # reporting its file version (v10) even after the v13 steps had
+    # run. The write paths stamp the same value anyway (see
+    # save_career / import_save); stamping here is idempotent, and
+    # every step above is unconditional, so a second migration is a
+    # no-op.
+    doc["version"] = SAVE_VERSION
     return doc
 
 
