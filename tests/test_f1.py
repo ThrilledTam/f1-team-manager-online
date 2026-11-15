@@ -17,7 +17,7 @@ from f1 import game
 from f1.data import CALENDAR, circuit_for_round
 from f1.rules import (
     POINTS_DIST, add_perf_gain, finance_estimates, reg_change,
-    retirement_chance,
+    is_retiring, retirement_chance,
 )
 from f1.saves import delete_save, list_saves, load_save, migrate_save, save_career
 
@@ -315,9 +315,58 @@ def test_tuning_bounds():
 
 def test_retirement_chance():
     assert retirement_chance(25, 0, 1, 0, 0) == 0.0
-    assert retirement_chance(49, 0, 1, 0, 0) == 100.0
+    # v0.7.2: no maximum retirement age — a 49-year-old frontrunner
+    # is not forced out (the old formula returned 100.0 here).
+    assert retirement_chance(49, 0, 1, 0, 0) == 28.5
     # Older + fewer titles + backmarker team share => higher chance.
     assert retirement_chance(45, 0, 11, 0, 100) > retirement_chance(45, 7, 1, 80, 100)
+
+
+def test_v072_retirement_gentle_ramp_and_no_max_age():
+    """v0.7.2 retirement rework: the chance starts at 30 (0 below
+    it), rises GENTLY with age for a midfield driver, is much lower
+    for a frontrunner with high reputation than a backmarker at the
+    same age, lower in a rising team than a falling one — and there
+    is no forced retirement at any age (a strong 50+ performer has
+    a low chance; a 50+ backmarker is high but never certain)."""
+    # P = 0 below 30.
+    for age in (20, 25, 29):
+        assert retirement_chance(age, 0, 6, 50, 100) == 0.0
+    # Midfield driver (P6, half the team's points, average rep,
+    # no wins, flat trajectory, midfield car): a gentle rise,
+    # +7.5 points per 5 years — not very likely to retire in the
+    # first few years after 30.
+    midfield = {a: retirement_chance(a, 0, 6, 50, 100)
+                for a in (30, 35, 40, 45, 50, 55)}
+    assert midfield == {30: 10.0, 35: 17.5, 40: 25.0,
+                        45: 32.5, 50: 40.0, 55: 47.5}
+    # Same age, better position => lower chance (frontrunner with
+    # a high reputation, wins and a rising team; backmarker with a
+    # low reputation, no wins, a falling team and a slow car).
+    for age in (45, 50, 55):
+        front = retirement_chance(age, 0, 1, 60, 100, rep=4.4,
+                                  wins=3, trajectory=2)
+        back = retirement_chance(age, 0, 11, 0, 100, rep=1.5,
+                                 wins=0, trajectory=-2, perf_gap=50)
+        assert front < back, (age, front, back)
+    assert retirement_chance(50, 0, 1, 60, 100, rep=4.4, wins=3,
+                             trajectory=2) < 10.0  # strong 50yo: ~5%
+    assert retirement_chance(55, 0, 11, 0, 100, rep=1.5, wins=0,
+                             trajectory=-2, perf_gap=50) < 95.0
+    # Rising team < falling team at the same age.
+    assert retirement_chance(45, 0, 6, 50, 100, trajectory=2) == 24.5
+    assert retirement_chance(45, 0, 6, 50, 100, trajectory=-2) == 40.5
+    # No forced retirement at 49 / 50 / 55 — the chance stays below
+    # 1.0 even for the worst case, and a roll can keep anyone.
+    for age in (49, 50, 55):
+        assert retirement_chance(age, 0, 11, 0, 100, rep=1.5, wins=0,
+                                 trajectory=-2, perf_gap=50) < 100.0
+    # is_retiring is one roll against the chance, never forced: a
+    # 49-year-old frontrunner survives a high roll, and a 55-year-old
+    # backmarker can survive a low one.
+    assert not is_retiring(49, 0, 1, 0, 0, rng=seeded(0))
+    assert not is_retiring(55, 0, 11, 0, 100, rng=seeded(2),
+                           rep=1.5, wins=0, trajectory=-2, perf_gap=50)
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +445,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 12  # v0.7.1 save format
+        assert loaded["version"] == 13  # v0.7.2 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -2333,7 +2382,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 12
+        assert loaded["version"] == 13
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2441,15 +2490,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v071():
-    """The live version string is v0.7.1 everywhere it is shown."""
+def test_health_reports_v072():
+    """The live version string is v0.7.2 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.7.1"
+    assert client.get("/api/health").json()["version"] == "v0.7.2"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.7.1</title>" in html
-    assert "Online · v0.7.1 beta" in html
+    assert "<title>F1 Team Manager Online — v0.7.2</title>" in html
+    assert "Online · v0.7.2 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3059,7 +3108,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 12
+    assert SAVE_VERSION == 13
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -4437,57 +4486,61 @@ def test_relation_progression():
     Mercedes — McLaren, a Mercedes customer, cannot offer supply
     contracts at all."""
     career = game.build_new_career("Test", "Matthew")
-    # McLaren + Ferrari as the two humans (no relation between them —
-    # two_human_career picks McLaren + Mercedes, who already have one).
+    # McLaren + Aston Martin as the two humans (no relation between
+    # them — two_human_career picks McLaren + Mercedes, who already
+    # have one). v0.7.2: Ferrari can no longer play the customer
+    # here — it supplies Haas and Cadillac, so a team that supplies
+    # others cannot become a customer or junior team; Aston Martin
+    # is independent and supplies nobody.
     # Mercedes plays the supplier role: it is independent, while
     # McLaren — a Mercedes customer — cannot offer supply contracts
     # at all under v0.6.5.
     ok, _ = game.choose_team(career, team_by_name(career, "McLaren")["id"], "p-matthew")
     assert ok
-    ok, _ = game.choose_team(career, team_by_name(career, "Ferrari")["id"], "p-cousin")
+    ok, _ = game.choose_team(career, team_by_name(career, "Aston Martin")["id"], "p-cousin")
     assert ok
     mclaren = team_by_name(career, "McLaren")
-    ferrari = team_by_name(career, "Ferrari")
+    aston = team_by_name(career, "Aston Martin")
     mercedes = team_by_name(career, "Mercedes")
     # Outside the winter break: rejected.
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                     "customer", mercedes["id"], 3)
     assert not ok and "winter break" in why
     career["phase"] = "winter_break"
     # Direct nothing -> junior: rejected.
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                     "junior", mercedes["id"], 2)
     assert not ok and "must be a customer" in why
-    # Customer formation: Ferrari is human, so the proposal stays pending.
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+    # Customer formation: Aston Martin is human, so the proposal stays pending.
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                     "customer", mercedes["id"], 3)
     assert ok, why
     assert len(career["relation_proposals"]) == 1
-    assert ferrari["sup_stage"] == 0  # not applied until accepted
+    assert aston["sup_stage"] == 0  # not applied until accepted
     proposal = career["relation_proposals"][0]
     # Only the target may answer.
     ok, why = game.respond_relation(career, mclaren["id"], proposal["id"], True)
     assert not ok and "Only the team" in why
-    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
     assert ok, why
-    assert ferrari["sup_stage"] == 1
-    assert ferrari["supplier_id"] == mercedes["id"]
-    assert ferrari["relation_years"] == 3
+    assert aston["sup_stage"] == 1
+    assert aston["supplier_id"] == mercedes["id"]
+    assert aston["relation_years"] == 3
     assert career["relation_proposals"] == []
     # A second supplier for the same team is rejected.
     redbull = team_by_name(career, "Red Bull")
-    ok, why = game.propose_relation(career, redbull["id"], ferrari["id"],
+    ok, why = game.propose_relation(career, redbull["id"], aston["id"],
                                     "customer", redbull["id"], 2)
     assert not ok and "already has a supplier" in why
     # Upgrade to junior, then a second junior for Mercedes is rejected.
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                     "junior", mercedes["id"], 2)
     assert ok, why
     proposal = career["relation_proposals"][0]
-    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
     assert ok, why
-    assert ferrari["sup_stage"] == 2
-    assert ferrari["relation_years"] == 2
+    assert aston["sup_stage"] == 2
+    assert aston["relation_years"] == 2
     # Audi becomes Mercedes' customer first (AI target: Mercedes is
     # faster, so the bot accepts on the spot) — then a second junior
     # for Mercedes is rejected.
@@ -4500,48 +4553,48 @@ def test_relation_progression():
                                     "junior", mercedes["id"], 2)
     assert not ok and "already has a junior" in why
     # Downgrade: junior -> customer, years unchanged. The supplier
-    # proposes it to human Ferrari so it stays pending (an AI target
+    # proposes it to human Aston Martin so it stays pending (an AI target
     # would decide on the spot).
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                     "downgrade")
     assert ok, why
     proposal = career["relation_proposals"][0]
-    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
     assert ok, why
-    assert ferrari["sup_stage"] == 1
-    assert ferrari["relation_years"] == 2
+    assert aston["sup_stage"] == 1
+    assert aston["relation_years"] == 2
     # End: customer -> nothing.
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"], "end")
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"], "end")
     assert ok, why
     proposal = career["relation_proposals"][0]
-    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
     assert ok, why
-    assert ferrari["sup_stage"] == 0
-    assert ferrari["supplier_id"] is None
-    assert ferrari["relation_years"] == 0
+    assert aston["sup_stage"] == 0
+    assert aston["supplier_id"] is None
+    assert aston["relation_years"] == 0
     # Junior -> nothing directly (skip customer).
     for kind in ("customer", "junior"):
-        ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+        ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                         kind, mercedes["id"], 2)
         assert ok, why
         proposal = career["relation_proposals"][0]
-        ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+        ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
         assert ok, why
-    assert ferrari["sup_stage"] == 2
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"], "end")
+    assert aston["sup_stage"] == 2
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"], "end")
     assert ok, why
     proposal = career["relation_proposals"][0]
-    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], True)
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
     assert ok, why
-    assert ferrari["sup_stage"] == 0
+    assert aston["sup_stage"] == 0
     # Declining leaves everything as it was.
-    ok, why = game.propose_relation(career, mercedes["id"], ferrari["id"],
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
                                     "customer", mercedes["id"], 2)
     assert ok, why
     proposal = career["relation_proposals"][0]
-    ok, why = game.respond_relation(career, ferrari["id"], proposal["id"], False)
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], False)
     assert ok, why
-    assert ferrari["sup_stage"] == 0
+    assert aston["sup_stage"] == 0
     assert career["relation_proposals"] == []
 
 
@@ -4830,7 +4883,7 @@ def test_migration_v8_to_v12():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 12
+    assert SAVE_VERSION == 13
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -4925,14 +4978,18 @@ def test_bot_relations():
     assert not ok and "already has a supplier" in why
     assert aston["sup_stage"] == 0
     assert career["relation_proposals"] == []
-    # A comfortable team declines a slower supplier: Aston
-    # (independent, 125 perf) offers to supply Mercedes (210 perf,
-    # $7.0M — comfortable, so it says no).
-    mercedes = team_by_name(career, "Mercedes")
-    ok, why = game.propose_relation(career, aston["id"], mercedes["id"],
+    # A comfortable team declines a slower supplier: Aston (independent,
+    # 125 perf) offers to supply Audi (145 perf — faster, so the
+    # supplier is slower — and made comfortable here with $25M, so
+    # it says no). v0.7.2: Mercedes can no longer play this role —
+    # it supplies McLaren / Williams / Alpine, so it cannot become a
+    # customer team at all.
+    audi = team_by_name(career, "Audi")
+    audi["money"] = 25.0
+    ok, why = game.propose_relation(career, aston["id"], audi["id"],
                                     "customer", aston["id"], 2)
     assert ok and "declined" in why, why
-    assert mercedes["sup_stage"] == 0
+    assert audi["sup_stage"] == 0
     assert career["relation_proposals"] == []
     career = game.build_new_career("Test", "Matthew")
     career["phase"] = "winter_break"
@@ -7135,9 +7192,9 @@ def test_resign_offer_counts_toward_limit_and_not_guaranteed():
     assert aston["driver2_id"] is None
     assert norris["status"] == "free"
     assert mclaren["driver2_id"] is None
-    # Aston's re-sign offer (into the empty Seat 2 — the button
-    # targets the team's currently-empty seat, not the old seat
-    # number) + two more offers = the 3-offer limit. A 4th is refused.
+    # Aston's re-sign offer (into the empty Seat 2 — the v0.7.2 seat
+    # picker offers every empty seat, and the driver lands in the one
+    # picked) + two more offers = the 3-offer limit. A 4th is refused.
     free = game.free_agents(career)
     other1 = next(d for d in free if d["id"] != alonso["id"])
     other2 = next(d for d in free if d["id"] not in (alonso["id"], other1["id"]))
@@ -7165,13 +7222,20 @@ def test_resign_offer_counts_toward_limit_and_not_guaranteed():
     assert mclaren["driver2_id"] == alonso["id"]
     assert aston["driver1_id"] != alonso["id"]
     assert aston["driver2_id"] != alonso["id"]
-    # The Drivers tab offers the expired driver for re-signing (the
-    # button targets the team's currently-empty seat — see the
-    # handler in the page).
+    # The Drivers tab offers the expired driver for re-signing with a
+    # seat picker (Seat 1 / Seat 2 / T&R) — an occupied seat is a
+    # disabled button naming its driver, empty seats are selectable,
+    # and an unknown old seat says so instead of defaulting to Seat 1.
     html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
     assert "Expired — re-sign" in html
     assert "data-resign" in html
-    assert "currently-empty seat" in html
+    # The seat buttons are built by a template ("Re-sign Seat ${s}"),
+    # T&R is a literal button; an occupied seat is a disabled button
+    # naming its driver, an unknown old seat says so.
+    assert "Re-sign Seat ${s}" in html
+    assert "Re-sign T&R" in html
+    assert "Occupied by" in html
+    assert "seat unknown" in html
 
 
 def test_market_compact_grouped_headers():
@@ -7239,7 +7303,7 @@ def test_v12_migration_adds_illness_f2_and_resign_fields():
     slot — and the real Season 3 save loads with them (its file is
     never modified by loading it)."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save
-    assert SAVE_VERSION == 12
+    assert SAVE_VERSION == 13
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
     doc["version"] = 11
@@ -7273,3 +7337,289 @@ def test_v12_migration_adds_illness_f2_and_resign_fields():
     assert all(d["ill_until_round"] is None for d in loaded["drivers"])
     assert all(d["f2_left"] is False for d in loaded["drivers"])
     assert path.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# v0.7.2 — snapshot relationships are year-correct everywhere (season
+# detail, race history, champion table, winter recap), no supply
+# chains, the re-sign seat picker, and the gentler retirement.
+# ---------------------------------------------------------------------------
+
+def test_v072_snapshot_carries_relationships_and_detail_uses_them():
+    """v0.7.2 (1): a snapshot built at the rollover captures each
+    team's supplier and supplied teams as they stood that season,
+    and get_season_detail returns the SNAPSHOT's relationships even
+    after the live relations have changed. A pre-v0.7.2 snapshot
+    without relationship data renders with none (has_relations
+    False, no supplier, no supplies) — never the live teams'."""
+    career = game.build_new_career("Test", "Matthew")
+    for d in career["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(11))
+    assert career["phase"] == "winter_break"
+    snap = next(s for s in career["season_snapshots"] if s["year"] == 2026)
+    by_name = {t["name"]: t for t in snap["teams"]}
+    # The 2026 grid, as it was: Mercedes supplies McLaren /
+    # Williams / Alpine (customers), Red Bull has Racing Bulls
+    # (junior), Ferrari supplies Haas / Cadillac (customers),
+    # Aston Martin supplies nobody.
+    assert {s["name"] for s in by_name["Mercedes"]["supplies"]} == {
+        "McLaren", "Williams", "Alpine"}
+    assert all(s["kind"] == "customer"
+               for s in by_name["Mercedes"]["supplies"])
+    assert by_name["Red Bull"]["supplies"] == [{
+        "id": by_name["Racing Bulls"]["id"], "name": "Racing Bulls",
+        "kind": "junior"}]
+    assert {s["name"] for s in by_name["Ferrari"]["supplies"]} == {
+        "Haas", "Cadillac"}
+    assert by_name["McLaren"]["supplier_name"] == "Mercedes"
+    assert by_name["McLaren"]["sup_stage"] == 1
+    assert by_name["Cadillac"]["supplier_name"] == "Ferrari"
+    assert by_name["Aston Martin"]["supplier_id"] is None
+    assert by_name["Aston Martin"]["supplies"] == []
+    # Now change the LIVE relations (Aston takes Cadillac, McLaren
+    # goes independent) — the detail for 2026 must still show the
+    # snapshot's relations, not the live ones.
+    mclaren = team_by_name(career, "McLaren")
+    cadillac = team_by_name(career, "Cadillac")
+    mclaren["supplier_id"] = None
+    mclaren["sup_stage"] = 0
+    cadillac["supplier_id"] = team_by_name(career, "Aston Martin")["id"]
+    cadillac["sup_stage"] = 1
+    detail = game.get_season_detail(career, 2026)
+    assert detail is not None and detail["has_relations"] is True
+    det = {c["name"]: c for c in detail["constructors"]}
+    assert det["McLaren"]["supplier_name"] == "Mercedes"
+    assert det["Cadillac"]["supplier_name"] == "Ferrari"
+    assert {s["name"] for s in det["Mercedes"]["supplies"]} == {
+        "McLaren", "Williams", "Alpine"}
+    assert det["Aston Martin"]["supplies"] == []
+    # A pre-v0.7.2 snapshot (relationship fields stripped) renders
+    # with no relationship info at all.
+    career2 = game.build_new_career("Test", "Matthew")
+    for d in career2["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career2, rng=seeded(11))
+    snap2 = next(s for s in career2["season_snapshots"]
+                 if s["year"] == 2026)
+    for t in snap2["teams"]:
+        for k in ("supplier_id", "supplier_name", "sup_stage", "supplies"):
+            t.pop(k, None)
+    detail2 = game.get_season_detail(career2, 2026)
+    assert detail2 is not None and detail2["has_relations"] is False
+    assert all(c["supplier_name"] is None
+               for c in detail2["constructors"])
+    assert all(c["supplies"] == [] for c in detail2["constructors"])
+
+
+def test_v072_race_history_gp_uses_snapshot_relationships():
+    """v0.7.2 (1, race history): the full-GP classification table
+    renders a past race's team relationships from that year's
+    season snapshot — a 2028 Cadillac shows Ferrari, never today's
+    supplier — and a snapshot without relationship data renders a
+    plain team name. The GP overlay, champion table and winter
+    recap all resolve through the snapshot helpers."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    import subprocess, time, urllib.request
+    port = 8792
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/")
+            row = ("[{pos:1,driver:'Sergio Pérez',driver_id:'x',"
+                   "team:'Cadillac',team_id:'t-cad',cha:0,gap:'LEADER',"
+                   "points:25,gl:0}]")
+            snap = ("{byId:{'t-cad':{id:'t-cad',name:'Cadillac',"
+                    "supplier_id:'t-fer',supplier_name:'Ferrari',"
+                    "sup_stage:1}}, byName:{'Cadillac':{id:'t-cad',"
+                    "name:'Cadillac',supplier_id:'t-fer',"
+                    "supplier_name:'Ferrari',sup_stage:1}}}")
+            table = page.evaluate(
+                f"window.F1UI.classificationTable({row},"
+                f"{{showGL:true, teams:{snap}}})")
+            assert "Cadillac" in table and "Ferrari" in table
+            assert "Aston Martin" not in table
+            plain = ("{byId:{'t-cad':{id:'t-cad',name:'Cadillac'}},"
+                     " byName:{'Cadillac':{id:'t-cad',name:'Cadillac'}}}")
+            table2 = page.evaluate(
+                f"window.F1UI.classificationTable({row},"
+                f"{{showGL:true, teams:{plain}}})")
+            assert "Cadillac" in table2
+            assert "Ferrari" not in table2
+            assert "Aston Martin" not in table2
+            browser.close()
+    finally:
+        proc.terminate()
+    # The history surfaces resolve teams through the snapshot
+    # helpers, not the live teams.
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert "snapshotTeamMap(r.year)" in html
+    assert "opts.teams" in html
+    assert "snapshotForYear(h.year)" in html
+    assert "snapshotForYear(rc.year)" in html
+
+
+def test_v072_propose_to_supplier_rejected_and_stale_proposal_rejected():
+    """v0.7.2 (2): a team that already supplies other teams cannot
+    be proposed as a customer or junior — in either direction (as
+    the customer, or as the would-be supplier's customer) — and a
+    proposal sent before its target became a supplier is rejected
+    when the target tries to accept it. The UI disables such
+    targets with the reason."""
+    career = game.build_new_career("Test", "Matthew")
+    for d in career["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(11))
+    assert career["phase"] == "winter_break"
+    aston = team_by_name(career, "Aston Martin")
+    mercedes = team_by_name(career, "Mercedes")
+    audi = team_by_name(career, "Audi")
+    cadillac = team_by_name(career, "Cadillac")
+    # Mercedes supplies McLaren / Williams / Alpine in 2026, so
+    # Aston cannot propose to supply it.
+    ok, why = game.propose_relation(career, aston["id"], mercedes["id"],
+                                    "customer", supplier_team_id=aston["id"],
+                                    years=2)
+    assert not ok and "already supplies" in why
+    # The mirror direction: Mercedes cannot be Aston Martin's
+    # customer either, because Mercedes itself supplies teams.
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
+                                    "customer", supplier_team_id=aston["id"],
+                                    years=2)
+    assert not ok and "already supplies" in why
+    # Audi supplies nobody, so proposing to supply it is allowed —
+    # and stays pending because Audi is a human team here.
+    audi["is_ai"] = False
+    ok, why = game.propose_relation(career, aston["id"], audi["id"],
+                                    "customer", supplier_team_id=aston["id"],
+                                    years=2)
+    assert ok, why
+    assert "waiting" in why
+    proposal = career["relation_proposals"][-1]
+    assert proposal["supplier_team_id"] == aston["id"]
+    assert proposal["customer_team_id"] == audi["id"]
+    # Audi then becomes a supplier itself (takes Cadillac) — the
+    # pending proposal is now stale and must be rejected on accept.
+    cadillac["supplier_id"] = audi["id"]
+    cadillac["sup_stage"] = 1
+    cadillac["relation_years"] = 2
+    ok, why = game.respond_relation(career, audi["id"], proposal["id"],
+                                    accept=True)
+    assert not ok and "already supplies other teams now" in why
+    # The UI disables targets that already supply others, with the
+    # reason, for both roles.
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert "already supplies teams" in html
+    assert "data-supplies" in html
+    assert "They supply me" in html
+    assert "your team already supplies others" in html
+
+
+def test_v072_resign_seat_picker_old_seat_occupied():
+    """v0.7.2 (3): re-signing a driver whose old seat is now
+    occupied lands them in the seat the player PICKS — here Seat 2,
+    the empty one — not the old seat number."""
+    career = game.build_new_career("Test", "Matthew")
+    aston = team_by_name(career, "Aston Martin")
+    alonso = game.get_driver(career, aston["driver1_id"])
+    stroll = game.get_driver(career, aston["driver2_id"])
+    alonso["age"] = 35  # no retirement at the rollover
+    alonso["contract_left"] = 1  # expires at the rollover
+    for d in career["drivers"]:
+        d["age"] = 25 if d is not alonso else 35
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(11))
+    assert career["phase"] == "winter_break"
+    # Alonso expired from Seat 1; the rollover moved Stroll up into
+    # Seat 1, so Seat 1 is occupied and Seat 2 is the empty one.
+    assert alonso["status"] == "free"
+    assert alonso["last_slot"] == "seat1"
+    assert aston["driver1_id"] == stroll["id"]
+    assert aston["driver2_id"] is None
+    ok, why = game.submit_winter_offers(career, aston["id"], [
+        {"driver_id": alonso["id"], "target": "seat", "seat": 2,
+         "years": 2}])
+    assert ok, why
+    game.resolve_winter_break_round(career, rng=seeded(1))
+    assert alonso["team_id"] == aston["id"]
+    assert alonso["status"] == "f1"
+    assert aston["driver2_id"] == alonso["id"]
+    assert aston["driver1_id"] == stroll["id"]
+    assert alonso["contract_left"] == 2
+
+
+def test_v13_migration_backfills_2026_snapshot_relationships():
+    """v0.7.2 (save v13): the 2026 season snapshot backfills its
+    relationship data from the 2026 grid — Mercedes -> McLaren /
+    Williams / Alpine customers, Red Bull -> Racing Bulls junior,
+    Ferrari -> Haas / Cadillac customers — while the 2027/2028
+    snapshots keep NO relationship data (never fabricated). The
+    real Season 3 save (v10) and the Season 4 Round 2 export (v12)
+    migrate cleanly, and their files are never modified."""
+    from f1.saves import SAVE_VERSION, load_save
+    assert SAVE_VERSION == 13
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    before = path.read_bytes()
+    loaded = _load_s3_save()
+    assert loaded is not None
+    assert loaded["version"] == 13
+    assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
+    snaps = {s["year"]: s for s in loaded["season_snapshots"]}
+    assert {2026, 2027, 2028} <= set(snaps)
+    by_name = {t["name"]: t for t in snaps[2026]["teams"]}
+    assert {s["name"] for s in by_name["Mercedes"]["supplies"]} == {
+        "McLaren", "Williams", "Alpine"}
+    assert all(s["kind"] == "customer"
+               for s in by_name["Mercedes"]["supplies"])
+    assert {s["name"] for s in by_name["Red Bull"]["supplies"]} == {
+        "Racing Bulls"}
+    assert by_name["Red Bull"]["supplies"][0]["kind"] == "junior"
+    assert {s["name"] for s in by_name["Ferrari"]["supplies"]} == {
+        "Haas", "Cadillac"}
+    assert by_name["McLaren"]["supplier_name"] == "Mercedes"
+    assert by_name["McLaren"]["sup_stage"] == 1
+    assert by_name["Racing Bulls"]["supplier_name"] == "Red Bull"
+    assert by_name["Racing Bulls"]["sup_stage"] == 2
+    assert by_name["Cadillac"]["supplier_name"] == "Ferrari"
+    assert by_name["Aston Martin"]["supplier_id"] is None
+    assert by_name["Aston Martin"]["supplies"] == []
+    for y in (2027, 2028):
+        for t in snaps[y]["teams"]:
+            assert "supplier_id" not in t, (y, t["name"])
+    assert path.read_bytes() == before
+    # The Season 4 Round 2 export (v12) migrates the same way.
+    path4 = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s4-round2.json"
+    if path4.exists():
+        before4 = path4.read_bytes()
+        loaded4 = load_save(str(path4.parent), "matthew-max-wugynr-s4-round2")
+        assert loaded4 is not None
+        assert loaded4["version"] == 13
+        assert loaded4["year"] == 2029 and loaded4["round"] == 2
+        assert loaded4["phase"] == "round"
+        rb = team_by_name(loaded4, "Red Bull")
+        assert abs(rb["money"] - 66.63) < 0.01
+        snaps4 = {s["year"]: s for s in loaded4["season_snapshots"]}
+        by4 = {t["name"]: t for t in snaps4[2026]["teams"]}
+        assert by4["McLaren"]["supplier_name"] == "Mercedes"
+        assert by4["Cadillac"]["supplier_name"] == "Ferrari"
+        for y in (2027, 2028):
+            for t in snaps4[y]["teams"]:
+                assert "supplier_id" not in t, (y, t["name"])
+        assert path4.read_bytes() == before4
