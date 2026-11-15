@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.6.6</title>
+<title>F1 Team Manager Online — v0.7.0</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -103,6 +103,19 @@
   .hist-cell:hover { border-color:#1f6feb; }
   .hist-cell.empty { cursor:default; background:transparent; color:#8b949e; }
   .hist-cell.empty:hover { border-color:#21262d; }
+  /* v0.7.0: clickable champion years — a year with recorded
+     standings (every real 2010–2025 year; in-game years with a
+     season snapshot) opens the full season standings. A button
+     styled as a link (the design system: every clickable thing is
+     a button — see test_mobile_friendly_markup), so the global
+     button chrome is reset here. */
+  .season-link { color:#58a6ff; text-decoration:underline; cursor:pointer; background:none; border:0; padding:0; margin:0; min-height:0; min-width:0; font-size:inherit; }
+  .season-link:hover { color:#79c0ff; }
+  /* v0.7.0: the winter-break season recap panel — the recap style
+     (dark card rows, team colours, coloured '|' bars) at the top of
+     the winter-break screen. */
+  #winter-recap h3 { margin-top:4px; }
+  #winter-recap table { margin-bottom:8px; }
   /* v0.1 toasts: every action confirms (or errors) where you can see it. */
   #toasts { position:fixed; left:0; right:0; bottom:16px; display:flex; flex-direction:column; align-items:center; gap:8px; z-index:50; pointer-events:none; padding:0 12px; }
   .toast { background:#0e2a18; border:1px solid #238636; color:#a9e8bd; border-radius:8px; padding:12px 16px; font-size:15px; max-width:560px; box-shadow:0 4px 16px rgba(0,0,0,.5); }
@@ -131,7 +144,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.6.6 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.0 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -263,6 +276,7 @@
     <h2>❄️ Winter break</h2>
     <p id="winter-text"></p>
     <p id="winter-round" class="note"></p>
+    <div id="winter-recap"></div>
     <div id="winter-seats"></div>
     <div id="winter-offers-box"></div>
     <div id="winter-review"></div>
@@ -373,7 +387,7 @@
 const $ = id => document.getElementById(id);
 const PALETTE = ["#e74c3c","#e67e22","#f1c40f","#2ecc71","#1abc9c","#3498db","#9b59b6","#fd79a8","#00cec9","#6c5ce7"];
 let ws = null, myId = null, myCode = null, myColour = PALETTE[0], room = null, myTeam = null;
-let chartDefault = true, lastRound = null, lastPhase = null, viewingGP = null;
+let chartDefault = true, lastRound = null, lastPhase = null, viewingGP = null, viewingSeason = null, seasonDetail = null;
 /* v0.3: a Driver Market signing is a two-step flow — tap a seat, then
    pick the contract length (1–4 years). pendingSign holds the seat
    the player is about to sign into until they pick (or cancel).
@@ -426,6 +440,7 @@ function popupById(id){ return popupStack.find(p => p.id === id); }
 function clearPopupState(id){
   if(id === "gp") viewingGP = null;
   if(id === "sign") pendingSign = null;
+  if(id === "season"){ viewingSeason = null; seasonDetail = null; }
 }
 function syncBackdrop(){
   const anyOpen = popupStack.some(p => p.kind === "overlay" && !p.minimized);
@@ -516,6 +531,29 @@ function renderOverlayBody(p){
       <span class="note">Pick the contract length:</span>
       ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
       <button class="secondary" id="btn-sign-cancel">Cancel</button>`;
+  } else if(p.id === "season"){
+    // v0.7.0: clickable champion years — the full drivers' +
+    // constructors' standings for one season, as a minimizable
+    // overlay pop-up like the full-GP view. A pos of null means
+    // unclassified ("NC"); real points can be .5 (shortened races)
+    // and print without a trailing .0 when whole.
+    const d = seasonDetail;
+    if(!d || d.year !== viewingSeason){ closePopup("season", {silent:true}); return; }
+    key = `season:${d.year}:${d.source}:${d.drivers.length}:${d.constructors.length}`;
+    if(p.bodyKey === key) return;
+    const drvRows = d.drivers.map(r => {
+      const tm = r.team_id ? teamById(r.team_id) : (room && room.career ? room.career.teams.find(t => t.name === r.team) : null);
+      const col = tm ? tm.colour : null;
+      return `<tr><td>${r.pos === null || r.pos === undefined ? "NC" : r.pos}</td><td>${driverNameHtml(r.name, col, 0, !!col, col)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team || "")}</td><td>${fmtPts(r.points)}</td><td>${r.wins}</td></tr>`;
+    }).join("");
+    const teamRows = d.constructors.map(r => {
+      const tm = room && room.career ? room.career.teams.find(t => t.name === r.name) : null;
+      const col = tm ? tm.colour : null;
+      return `<tr><td>${r.pos === null || r.pos === undefined ? "NC" : r.pos}</td><td>${col ? `<span class="team-bar" style="color:${col}">|</span> <span class="colour-dot" style="background:${col}"></span>` : ""}${tm ? teamNameHtml(tm) : esc(r.name)}</td><td>${fmtPts(r.points)}</td><td>${r.wins}</td></tr>`;
+    }).join("");
+    const realTag = d.source === "real" ? " (real F1)" : "";
+    html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
+      `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>`;
   }
   p.bodyKey = key;
   body.innerHTML = html;
@@ -581,6 +619,14 @@ function syncOverlays(){
     p.onClose = () => { viewingGP = null; renderTabs(); };
   } else if(popupById("gp")){
     closePopup("gp", {silent:true});
+  }
+  // v0.7.0: the season-detail overlay (clickable champion year) —
+  // opens once the server answers with the standings for that year.
+  if(viewingSeason != null && seasonDetail){
+    const p = openOverlay("season", `Season ${viewingSeason} standings`);
+    p.onClose = () => { viewingSeason = null; seasonDetail = null; renderTabs(); };
+  } else if(popupById("season")){
+    closePopup("season", {silent:true});
   }
   if(pendingSign && myTeam){
     const pd = driverById(pendingSign.driver_id);
@@ -657,6 +703,9 @@ function toast(msg, isErr){
 }
 function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function money(v){ return "$" + (v ?? 0).toFixed(2) + "M"; }
+/* v0.7.0: real-world points can be .5 (shortened races) — print whole
+   numbers without a trailing .0. */
+function fmtPts(p){ const n = Number(p); return (n === Math.round(n)) ? String(Math.round(n)) : String(n); }
 function driverById(id){ if(!room || !room.career) return null; return room.career.drivers.find(d => d.id === id) || null; }
 function teamById(id){ if(!room || !room.career) return null; return room.career.teams.find(t => t.id === id) || null; }
 /* v0.2.1: the team shown for a driver in the standings — their current
@@ -822,6 +871,7 @@ function connect(){
       // the current screen now that myTeam is fresh.
       renderAll();
     } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box) box.innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>` + m.rumours.map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; return `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join("") + "</table></div>";
+    } else if(m.type === "season_detail"){ seasonDetail = m.detail; viewingSeason = m.detail.year; syncOverlays();
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
     } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
     } else if(m.type === "action"){ showOk(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
@@ -1160,6 +1210,35 @@ function renderGame(){
       (!submitted.length && !wbOffers.length ? `<p class="note">No offers yet this round — pick drivers in the Driver Market tab (Offer Seat 1 / Seat 2 / T&R). Offers are only required if your lineup is not full.</p>` : "");
     const wbClear = document.querySelector("[data-wb-clear]");
     if(wbClear) wbClear.onclick = () => { wbOffers = []; renderGame(); };
+    // v0.7.0: the season recap panel at the TOP of the winter-break
+    // screen — Top 8 drivers, Top 5 constructors, 12 round winners
+    // of the season just finished, in the recap style (team colours,
+    // bold UPPERCASE surnames, coloured '|' bars). Same standings
+    // styling as the Standings tab.
+    const rc = c.wb_recap;
+    if(rc && rc.year){
+      const rcDrivers = (rc.drivers || []).map((d, i) => {
+        const tm = d.team_id ? teamById(d.team_id) : c.teams.find(t => t.name === d.team);
+        const col = tm ? tm.colour : null;
+        return `<tr><td>${i + 1}</td><td>${driverNameHtml(d.name, col, 0, !!col, col)}</td><td>${tm ? teamNameHtml(tm) : esc(d.team || "")}</td><td>${d.points}</td><td>${d.wins || 0}</td></tr>`;
+      }).join("");
+      const rcTeams = (rc.teams || []).map((t, i) => {
+        const tm = teamById(t.id) || c.teams.find(x => x.name === t.name);
+        const col = tm ? tm.colour : null;
+        return `<tr><td>${i + 1}</td><td>${col ? `<span class="team-bar" style="color:${col}">|</span> <span class="colour-dot" style="background:${col}"></span>` : ""}${tm ? teamNameHtml(tm) : esc(t.name)}</td><td>${t.points}</td><td>${t.wins || 0}</td></tr>`;
+      }).join("");
+      const rcWinners = (rc.winners || []).map(w => {
+        const tm = w.team_id ? teamById(w.team_id) : c.teams.find(t => t.name === w.team);
+        const col = tm ? tm.colour : null;
+        return `<tr><td>R${w.round}</td><td>${esc(w.circuit || "")}</td><td>${driverNameHtml(w.driver, col, 0, !!col, col)}</td></tr>`;
+      }).join("");
+      $("winter-recap").innerHTML = `<h3>Season ${rc.year} in review</h3>` +
+        `<p><b>Top drivers</b></p><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${rcDrivers}</table></div>` +
+        `<p><b>Top constructors</b></p><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${rcTeams}</table></div>` +
+        `<p><b>Round winners</b></p><div class="table-scroll"><table><tr><th>Round</th><th>Grand Prix</th><th>Winner</th></tr>${rcWinners}</table></div>`;
+    } else {
+      $("winter-recap").innerHTML = "";
+    }
     // Last-season review: final standings + my two drivers' head-to-head.
     // v0.4.1: the server sends wb_review (final driver top 5,
     // constructors, and the head-to-head of my two main drivers last
@@ -1833,7 +1912,14 @@ function renderTabs(){
   // start), CAR (team), PTS, TROPHIES (🏆 xN, cumulative career
   // championships at that year), WINNING TEAM (constructors
   // champion). Pre-filled with the real 2010–2025 table; in-game
-  // seasons append as they complete.
+  // seasons append as they complete. v0.7.0: a year with recorded
+  // standings is a clickable link — every real 2010–2025 year, and
+  // any in-game year with a season snapshot (or the season just
+  // finished) — and opens the full drivers' + constructors'
+  // standings for that season in a minimizable overlay pop-up.
+  const hasSeasonSnap = y => (c.season_snapshots || []).some(s => s.year === y)
+    || (c.last_season && c.last_season.year === y);
+  const yearClickable = y => (y >= 2010 && y <= 2025) || (y >= 2026 && hasSeasonSnap(y));
   const champs = (c.champion_history || []).length
     ? `<div class="table-scroll"><table><tr><th>Year</th><th>Driver</th><th>Age</th><th>Car</th><th>Pts</th><th>Trophies</th><th>Winning team</th></tr>` +
       (c.champion_history || []).map(h => {
@@ -1841,7 +1927,10 @@ function renderTabs(){
         const wt = c.teams.find(t => t.name === h.winning_team);
         const age = (h.age === null || h.age === undefined) ? "—" : h.age;
         const trophies = (h.trophies === null || h.trophies === undefined) ? "—" : `🏆 x${h.trophies}`;
-        return `<tr><td>${h.year}</td><td>${driverNameHtml(h.driver, tm ? tm.colour : null, 0, false)}</td><td>${age}</td><td>${tm ? teamNameHtml(tm) : esc(h.team || "")}</td><td>${h.points}</td><td>${trophies}</td><td>${wt ? teamNameHtml(wt) : esc(h.winning_team || "—")}</td></tr>`;
+        const yearCell = yearClickable(h.year)
+          ? `<button type="button" class="season-link" data-season-year="${h.year}" title="See the full ${h.year} standings">${h.year}</button>`
+          : h.year;
+        return `<tr><td>${yearCell}</td><td>${driverNameHtml(h.driver, tm ? tm.colour : null, 0, false)}</td><td>${age}</td><td>${tm ? teamNameHtml(tm) : esc(h.team || "")}</td><td>${h.points}</td><td>${trophies}</td><td>${wt ? teamNameHtml(wt) : esc(h.winning_team || "—")}</td></tr>`;
       }).join("") + "</table></div>"
     : "<p class='note'>No champions yet.</p>";
   // (The full-GP view is an overlay pop-up now — clicking a cell
@@ -1849,6 +1938,9 @@ function renderTabs(){
   // history" button inside it is wired by the #ov-root delegation.)
   $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`;
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
+  // v0.7.0: clicking a champion year asks the server for that
+  // season's full standings (see the season_detail message).
+  document.querySelectorAll("[data-season-year]").forEach(b => b.onclick = e => { e.preventDefault(); send({type:"season_detail", year: parseInt(b.dataset.seasonYear)}); });
   const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
   renderDriversTab();
   renderRelationsTab($("relations-box"));
