@@ -296,6 +296,90 @@ def is_retiring(age, championships, team_pos, driver_points, team_points,
     return rng.random() * 100 <= chance
 
 
+# ---------------------------------------------------------------------------
+# v0.7.1: driver reputation redesign (hidden from all player UI; bot
+# judgements only). Rep lives on the same scale (~1.0-4.4+, Verstappen
+# 4.4) and is clamped to [1.0, 5.0] after every change. Three
+# components:
+#   (a) teammate comparison, Elo-style, after each race weekend —
+#       race head-to-head (K 0.08) and qualifying head-to-head
+#       (K 0.04, half the race weight), zero-sum, only when both
+#       teammates actually raced / qualified that round;
+#   (b) finish vs team context, race only — the base gain by finish
+#       is multiplied by a team factor (winning from a backmarker
+#       team is worth up to 2.5x a win from the constructors'
+#       leaders);
+#   (c) season end at the rollover — standings vs team position,
+#       plus the championship bonus.
+# The F2 rep formula (a slow moving average in
+# run_race_weekend's F2 loop) is untouched; the F2 champion gets a
+# separate +0.5 boost at the rollover.
+# ---------------------------------------------------------------------------
+DRIVER_REP_MIN = 1.0
+DRIVER_REP_MAX = 5.0
+DRIVER_REP_K_RACE = 0.08
+DRIVER_REP_K_QUALI = 0.04
+DRIVER_REP_ELO_DIVISOR = 1.0
+DRIVER_REP_CHAMPION_BONUS = 0.5
+DRIVER_REP_CHAMPION_BONUS_NON_TOP = 0.75  # ...from a team that did not win the constructors'
+DRIVER_REP_SEASON_RATE = 0.02  # per place above/below the team, season end
+DRIVER_REP_SEASON_CAP = 0.15
+DRIVER_REP_F2_CHAMPION_BONUS = 0.5
+
+# v0.7.1: random driver illness / injury — 0.5% per F1 main driver
+# per race round, so about one incident a season across the whole
+# 22-driver grid.
+ILLNESS_CHANCE = 0.005
+ILLNESS_MIN_ROUNDS = 1
+ILLNESS_MAX_ROUNDS = 2
+
+
+def clamp_driver_rep(rep):
+    """Keep driver reputation on [1.0, 5.0]."""
+    return max(DRIVER_REP_MIN, min(DRIVER_REP_MAX, float(rep)))
+
+
+def elo_expected(rep_a, rep_b):
+    """Expected score for driver A against teammate B:
+    E = 1 / (1 + 10^(-(rep_a - rep_b) / 1.0)). A 2.12 driver against
+    a 4.41 teammate expects ~0.005 — losing costs them almost
+    nothing, beating the 4.41 gains almost the full K."""
+    return 1.0 / (1.0 + 10.0 ** (-(rep_a - rep_b) / DRIVER_REP_ELO_DIVISOR))
+
+
+def teammate_elo_delta(rep_a, rep_b, actual_a, k):
+    """Zero-sum Elo change for driver A: K * (actual - expected).
+    actual_a is 1 if A finished ahead, 0 if behind, 0.5 if tied.
+    Returns the delta for A; B loses exactly this much."""
+    return k * (actual_a - elo_expected(rep_a, rep_b))
+
+
+def finish_rep_base(pos):
+    """v0.7.1 (b): base rep change by race finish — P1 +0.10, P2
+    +0.06, P3 +0.04, P4-5 +0.02, P6-10 +0.01, P11+ 0. A mechanical
+    DNF (pos None) is not the driver's fault: 0."""
+    if pos is None:
+        return 0.0
+    if pos == 1:
+        return 0.10
+    if pos == 2:
+        return 0.06
+    if pos == 3:
+        return 0.04
+    if pos <= 5:
+        return 0.02
+    if pos <= 10:
+        return 0.01
+    return 0.0
+
+
+def team_rep_factor(team_pos):
+    """v0.7.1 (b): 1 + (team_constructors_pos - 1) * 0.15, capped at
+    2.5. Winning from the 1st-place team is worth the base; from a
+    5th-place team 1.6x; from an 11th-place team 2.5x."""
+    return min(2.5, 1.0 + (team_pos - 1) * 0.15)
+
+
 def finance_estimates(constructor_pos):
     """From Main.py Finances screen (displayed as estimates there).
 

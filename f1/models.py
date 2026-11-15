@@ -86,6 +86,37 @@ def make_driver(data, status="free", team_id=None):
         # See game.py team_tr_drivers().
         "status": status,          # "f1" | "free" | "f2" | "queued" | "pool" | "retired" | "tr"
         "team_id": team_id,
+        # v0.7.1: illness / injury. A driver out of their race seat
+        # carries ill_until_round (the last round they miss this
+        # season) + ill_label ("ill" / "injured") + ill_seat (the
+        # seat they own). The substitute standing in carries
+        # ill_sub_for (the ill driver's id) and ill_sub_from
+        # ("tr" = the team's Test & Reserve, "free" = a free-agent
+        # fill). A driver standing in for someone else has
+        # ill_until_round None while their ill_sub_* fields point
+        # at the driver they cover.
+        "ill_until_round": None,
+        "ill_label": None,
+        "ill_seat": None,
+        "ill_sub_id": None,
+        "ill_sub_for": None,
+        "ill_sub_from": None,
+        # v0.7.1: an F2 driver promoted to F1 mid-season STAYS in
+        # the F2 standings with their points frozen at departure
+        # (f2_left + the frozen tally) — they score no more F2
+        # points, and they cannot win the F2 title (see
+        # end_of_season, which picks the champion among drivers
+        # still in F2). Cleared for all drivers at the rollover.
+        "f2_left": False,
+        "f2_points": 0,
+        "f2_wins": 0,
+        "f2_best_pos": None,
+        "f2_best_finish_round": None,
+        # v0.7.1: the slot the driver last held on a team ("seat1" /
+        # "seat2" / "tr") — set when they leave a team slot so the
+        # winter-break Drivers tab can offer expired drivers for
+        # re-signing into the slot they held.
+        "last_slot": None,
         # v0.4.2: Driver Academy affiliation — the team whose junior
         # programme the driver belongs to (None = no academy). The
         # driver keeps their status ("f2" or "free") and still races

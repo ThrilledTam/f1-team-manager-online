@@ -10,6 +10,8 @@ winner's total is a Grand Prix length (~5,000s). See race_lap_time().
 """
 import random
 
+from . import rules as rules_mod
+
 BASELINE_LAP = 75.000
 
 RACE_LAP_BASE = 95.0
@@ -236,12 +238,46 @@ def simulate_f2(career, rng=None):
     return f2
 
 
+def adjust_driver_rep(driver, delta):
+    """v0.7.1: move a driver's hidden reputation by delta, clamped
+    to [1.0, 5.0]."""
+    driver["rep"] = rules_mod.clamp_driver_rep(
+        driver.get("rep", 2.0) + delta)
+
+
+def apply_teammate_elo(d1, d2, pos1, pos2, k, rep1=None, rep2=None):
+    """v0.7.1 (a): the teammate comparison, Elo-style — d1 finished
+    pos1, d2 finished pos2 (lower is better). The expected score
+    comes from the reps going INTO the session (rep1/rep2 — when
+    omitted they are read from the drivers, which is right for
+    qualifying, where no rep change has run yet); the change is K *
+    (actual - expected), zero-sum: what one teammate gains, the
+    other loses. A tie (both DNF — the caller must not call this
+    when either DNF'd, since a mechanical DNF is not the driver's
+    fault) scores 0.5."""
+    if rep1 is None:
+        rep1 = d1.get("rep", 2.0)
+    if rep2 is None:
+        rep2 = d2.get("rep", 2.0)
+    if pos1 < pos2:
+        actual1 = 1.0
+    elif pos2 < pos1:
+        actual1 = 0.0
+    else:
+        actual1 = 0.5
+    delta = rules_mod.teammate_elo_delta(rep1, rep2, actual1, k)
+    adjust_driver_rep(d1, delta)
+    adjust_driver_rep(d2, -delta)
+
+
 def apply_race_results(career, race_entries, points_dist, dnf_entries=None):
     """From Race.py displayRaceResults(): points, best pos, rep, prize money.
 
     Per driver: points for top 10, best_pos update, rep update
-    new_rep = (race_rep + rep*11) / 12 where race_rep = 5 - (pos/(n*2))*3.2,
-    team money += 1.95 - 0.025*pos. Team points are recomputed afterwards.
+    (v0.7.1: the redesigned driver reputation — finish vs team
+    context, plus the teammate Elo head-to-head — replaces the old
+    moving-average formula), team money += 1.95 - 0.025*pos. Team
+    points are recomputed afterwards.
 
     v0.6.1: dnf_entries are the (driver, team) pairs that broke down
     (from simulate_race). A DNF driver scores 0 points, keeps their
@@ -253,8 +289,16 @@ def apply_race_results(career, race_entries, points_dist, dnf_entries=None):
     the finishers only (a DNF holds no points-paying slot). Returns
     the number of DNFs.
     """
-    n_teams = len(career["teams"])
     teams_by_id = {t["id"]: t for t in career["teams"]}
+    # v0.7.1 (b): the constructors' position at the time of the race
+    # — taken BEFORE any driver points change, since the finish
+    # context factor depends on where each team stood going in.
+    # rep_before is the same idea for the teammate Elo below: the
+    # expectation uses the reps going into the race, not the ones
+    # already moved by component (b).
+    pos_before = {t["id"]: i + 1
+                  for i, t in enumerate(constructor_standings(career))}
+    rep_before = {d["id"]: d.get("rep", 2.0) for d in career["drivers"]}
     for pos, (d, team) in enumerate(race_entries, start=1):
         d["race_pos"] = pos
         # v0.4: best finish + the round it was achieved (standings
@@ -295,8 +339,30 @@ def apply_race_results(career, race_entries, points_dist, dnf_entries=None):
             team["best_pos"] = pos
             team["best_finish_round"] = career["round"]
         team["money"] += 1.95 - (0.025 * pos)
-        race_rep = 5 - (pos / (n_teams * 2)) * 3.2
-        d["rep"] = (race_rep + d["rep"] * 11) / 12
+        # v0.7.1 (b): finish vs team context — the base gain by race
+        # finish, multiplied by the team factor (a win from a
+        # backmarker team is worth up to 2.5x a win from the
+        # constructors' leaders). pos_before is the constructors'
+        # order going into the race.
+        base = rules_mod.finish_rep_base(pos)
+        if base:
+            adjust_driver_rep(
+                d, base * rules_mod.team_rep_factor(pos_before[team["id"]]))
+    # v0.7.1 (a): the teammate comparison for the RACE, Elo-style —
+    # zero-sum, and only when BOTH teammates finished the race (a
+    # mechanical DNF is not the driver's fault, so a pair where
+    # either DNF'd moves neither rep — see the DNF test).
+    drivers_by_id = {d["id"]: d for d in career["drivers"]}
+    for team in career["teams"]:
+        d1 = drivers_by_id.get(team["driver1_id"]) if team.get("driver1_id") else None
+        d2 = drivers_by_id.get(team["driver2_id"]) if team.get("driver2_id") else None
+        if (d1 is not None and d2 is not None
+                and d1.get("race_pos") is not None
+                and d2.get("race_pos") is not None):
+            apply_teammate_elo(d1, d2, d1["race_pos"], d2["race_pos"],
+                               rules_mod.DRIVER_REP_K_RACE,
+                               rep1=rep_before.get(d1["id"]),
+                               rep2=rep_before.get(d2["id"]))
     # v0.6.1: the DNF drivers — 0 points, no best finish, still counted
     # as having raced, rep unchanged, no prize money, and a repair bill.
     n_dnf = 0
@@ -358,12 +424,42 @@ def driver_standings(career):
     return sorted(f1, key=lambda d: _driver_sort_key(d, prev))
 
 
+def _f2_effective(d):
+    """v0.7.1: the F2 standings values for a driver — live for a
+    driver still in F2, the frozen departure tally for a driver who
+    left F2 for F1 (their points, wins and best finish froze the
+    moment they were promoted)."""
+    if d.get("f2_left"):
+        return (d.get("f2_points", 0), d.get("f2_wins", 0),
+                d.get("f2_best_pos"), d.get("f2_best_finish_round"))
+    return (d["points"], d.get("season_wins", 0), d.get("best_pos"),
+            d.get("best_finish_round"))
+
+
 def f2_standings(career):
     """v0.4 (feature 2): the background F2 championship, drivers only
     (no F2 teams), sorted with the same rule as the F1 drivers'
-    championship — points, wins, best finish, earliest."""
-    f2 = [d for d in career["drivers"] if d["status"] == "f2"]
-    return sorted(f2, key=lambda d: _driver_sort_key(d, {}))
+    championship — points, wins, best finish, earliest.
+
+    v0.7.1: a driver promoted to F1 mid-season STAYS listed here,
+    with their points frozen at departure (f2_left + the frozen
+    tally — the F2 sim only races status == "f2" drivers, so they
+    score no more F2 points). They are NOT eligible to win the F2
+    title: end_of_season picks the champion among drivers still in
+    F2 only."""
+    f2 = [d for d in career["drivers"]
+          if d["status"] == "f2" or d.get("f2_left")]
+    return sorted(f2, key=lambda d: _f2_sort_key(d))
+
+
+def _f2_sort_key(d):
+    """Like _driver_sort_key but on the F2-effective values (frozen
+    for a driver who left for F1)."""
+    pts, wins, best, best_round = _f2_effective(d)
+    return (-pts, -wins,
+            best if best is not None else 99,
+            best_round if best_round is not None else 99,
+            -d["perf"], d["name"])
 
 
 def constructor_standings(career):

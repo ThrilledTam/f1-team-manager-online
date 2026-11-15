@@ -14,7 +14,11 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 11  # v0.7.0: hidden team reputation (team_rep on
+SAVE_VERSION = 12  # v0.7.1: random driver illness / injury (ill_*
+# fields on every driver — default: no driver ill) + F2 promoted
+# drivers keep a frozen F2 tally (f2_left + frozen values) + the slot
+# a driver last held on a team (last_slot, for the winter-break
+# re-sign offer). v0.7.0: hidden team reputation (team_rep on
 # every team, 50.0 for migrated saves) + season snapshots (one per
 # completed season, rebuilt from last_season / race_history for old
 # saves) for the clickable champion years. v0.6.6: team
@@ -181,6 +185,23 @@ def migrate_save(doc):
         if "team_points" not in d:
             d["team_points"] = d.get("points", 0) if d.get("status") == "f1" else 0
         d.setdefault("last_team_id", d.get("team_id"))
+        # v0.7.1: illness / injury state (default: no driver ill, no
+        # substitute), the frozen F2 tally for a driver who left F2
+        # for F1 mid-season (default: still in F2 / never left), and
+        # the slot the driver last held on a team (default: unknown —
+        # the winter-break re-sign offer defaults to Seat 1).
+        d.setdefault("ill_until_round", None)
+        d.setdefault("ill_label", None)
+        d.setdefault("ill_seat", None)
+        d.setdefault("ill_sub_id", None)
+        d.setdefault("ill_sub_for", None)
+        d.setdefault("ill_sub_from", None)
+        d.setdefault("f2_left", False)
+        d.setdefault("f2_points", 0)
+        d.setdefault("f2_wins", 0)
+        d.setdefault("f2_best_pos", None)
+        d.setdefault("f2_best_finish_round", None)
+        d.setdefault("last_slot", None)
     # v0.3: champion history. A save from before v0.3 has none, or only
     # in-game rows (v0.2 appended {year, driver, team, points} per
     # completed season). Either way it gains the real 2010–2025 table

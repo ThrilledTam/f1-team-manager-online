@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 from . import race as race_mod
+from . import rules as rules_mod
 from .data import (
     GRID_2026, CHAMPION_HISTORY_2010_2025, PREV_SEASON_DRIVER_ORDER,
     PREV_SEASON_TEAM_ORDER, TR_2026, ACADEMY_2026, CAREER_STATS,
@@ -29,7 +30,10 @@ from .models import make_driver, make_team, new_career_dict
 from .rules import SEASON_LENGTH, MAX_SEASONS
 from .rules import (
     ACADEMY_FINE_FREE_COUNT, ACADEMY_LOYALTY_BOOST, ACADEMY_MAX_JOIN_AGE,
-    REG_ADAPT_COST_PER_POINT, REG_OPENS_ROUND,
+    DRIVER_REP_CHAMPION_BONUS, DRIVER_REP_CHAMPION_BONUS_NON_TOP,
+    DRIVER_REP_F2_CHAMPION_BONUS, DRIVER_REP_SEASON_CAP,
+    DRIVER_REP_SEASON_RATE, ILLNESS_CHANCE, ILLNESS_MAX_ROUNDS,
+    ILLNESS_MIN_ROUNDS, REG_ADAPT_COST_PER_POINT, REG_OPENS_ROUND,
     REG_MAJOR_TARGET, REG_MINOR_TARGET, TR_FINE_FREE_COUNT,
     TR_RESEARCH_BONUS, WINTER_BREAK_ROUNDS, add_perf_gain, add_rel_gain,
     extra_driver_fine, finance_estimates, grow_rating, is_retiring,
@@ -322,9 +326,21 @@ def team_tr_drivers(career, team):
     standings, but they are paid their full salary and add +25% each
     to research gained. v0.4.2: there is NO hard cap any more — a
     team with more than 2 T&R drivers pays an exponential fine per
-    race instead (see tr_fine_per_race)."""
+    race instead (see tr_fine_per_race). v0.7.1: this includes an
+    ill main driver sitting in T&R while they recover — use
+    active_tr_drivers() where an ill driver should not count
+    (research bonus, T&R fine)."""
     return [d for d in career["drivers"]
             if d.get("status") == "tr" and d.get("team_id") == team["id"]]
+
+
+def active_tr_drivers(career, team):
+    """v0.7.1: the team's T&R drivers who are FIT — an ill main
+    driver sitting in T&R while they recover neither boosts research
+    nor counts toward the exponential T&R fine (they are not
+    available to test or train)."""
+    return [d for d in team_tr_drivers(career, team)
+            if not d.get("ill_until_round")]
 
 
 def team_academy_drivers(career, team):
@@ -342,7 +358,7 @@ def tr_fine_per_race(career, team):
     3rd T&R driver, $1.5M for 3rd+4th, $3.5M for 3rd+4th+5th
     (the first 2 are free). Charged after each race, on top of the
     T&R drivers' full salaries."""
-    return extra_driver_fine(len(team_tr_drivers(career, team)),
+    return extra_driver_fine(len(active_tr_drivers(career, team)),
                              TR_FINE_FREE_COUNT)
 
 
@@ -379,7 +395,7 @@ def research_multiplier(career, team):
     investment — 1 T&R -> x1.25, 2 T&R -> x1.50. Applies to the
     Performance / Reliability research pools (car-parts research);
     regulation research is a separate pool and is not boosted."""
-    return 1.0 + TR_RESEARCH_BONUS * len(team_tr_drivers(career, team))
+    return 1.0 + TR_RESEARCH_BONUS * len(active_tr_drivers(career, team))
 
 
 def driver_dev_contrib(driver):
@@ -820,15 +836,39 @@ def break_cost(career, team_id, driver_id, seat):
             "affordable": quote["affordable"]}
 
 
+def _freeze_f2_tally(d):
+    """v0.7.1: an F2 driver leaving the feeder series for F1 keeps
+    their F2 tally FROZEN at departure — points, wins and best
+    finish — so they stay listed in the F2 standings with an 'F1'
+    tag (see race.f2_standings). They score no more F2 points after
+    leaving. Only ever run for a driver still in F2."""
+    if d.get("status") != "f2" or d.get("f2_left"):
+        return
+    d["f2_left"] = True
+    d["f2_points"] = d.get("points", 0)
+    d["f2_wins"] = d.get("season_wins", 0)
+    d["f2_best_pos"] = d.get("best_pos")
+    d["f2_best_finish_round"] = d.get("best_finish_round")
+
+
 def _release_driver(career, driver, team):
     """A driver leaves a team (replaced mid-season or contract ended):
     the points they scored FOR this team stay with the team (banked
     into points_kept — real F1), their last team is recorded so the
     standings can still show it, and their per-team tally is cleared
     for wherever they go next. Championship points/wins/best finish
-    are NOT touched — they follow the driver (v0.2, revised)."""
+    are NOT touched — they follow the driver (v0.2, revised).
+    v0.7.1: the slot they held (\"seat1\" / \"seat2\" / \"tr\") is also
+    recorded, so the winter-break Drivers tab can offer the expired
+    driver for re-signing into the slot they held."""
     if team is not None:
         driver["last_team_id"] = team["id"]
+        if team.get("driver1_id") == driver["id"]:
+            driver["last_slot"] = "seat1"
+        elif team.get("driver2_id") == driver["id"]:
+            driver["last_slot"] = "seat2"
+        elif driver.get("status") == "tr":
+            driver["last_slot"] = "tr"
         team["points_kept"] = team.get("points_kept", 0) + driver.get("team_points", 0)
     driver["team_points"] = 0
     driver["team_id"] = None
@@ -841,6 +881,9 @@ def _sign_driver_common(career, team, d, contract_years):
     the driver; an F2 driver starts at 0 — their F2 points must not
     carry into F1)."""
     if d["status"] == "f2":
+        # v0.7.1: freeze the F2 tally FIRST — the driver stays in
+        # the F2 standings with their points frozen at departure.
+        _freeze_f2_tally(d)
         d["points"] = 0
         d["season_wins"] = 0
         d["season_podiums"] = 0
@@ -856,6 +899,10 @@ def _sign_driver_common(career, team, d, contract_years):
     # earlier stint; either way the per-team tally restarts at 0.
     d["team_points"] = 0
     d["last_team_id"] = None
+    # v0.7.1: a signing takes a fresh slot, so the slot they held
+    # on their old team no longer applies (an expiry sets it again
+    # when they leave).
+    d["last_slot"] = None
     d["contract_left"] = contract_years
     # v0.4.2: signing a main or T&R contract ends the academy
     # affiliation, wherever it was — a driver cannot be an academy
@@ -905,6 +952,11 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     d = get_driver(career, driver_id)
     if not d or d["status"] not in ("free", "f2", "f1", "tr"):
         return False, "That driver is not available to sign."
+    # v0.7.1: an ill driver is recovering, not available to sign —
+    # their seat is being kept for them at their own team.
+    if d.get("ill_until_round"):
+        return False, (f"{d['name']} is {d.get('ill_label') or 'ill'} and "
+                       f"cannot be signed while they recover.")
     if d.get("status") in ("f1", "tr") and d.get("team_id") == team["id"]:
         return False, "That driver already races for your team."
     slot = "driver1_id" if seat == 1 else "driver2_id"
@@ -980,6 +1032,11 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
     d = get_driver(career, driver_id)
     if not d or d["status"] not in ("free", "f2", "f1", "tr"):
         return False, "That driver is not available to sign."
+    # v0.7.1: an ill driver is recovering, not available to sign —
+    # their seat is being kept for them at their own team.
+    if d.get("ill_until_round"):
+        return False, (f"{d['name']} is {d.get('ill_label') or 'ill'} and "
+                       f"cannot be signed while they recover.")
     if d.get("status") in ("f1", "tr") and d.get("team_id") == team["id"]:
         return False, "That driver already races for your team."
     quote = sign_cost(career, team_id, driver_id, ("tr", None))
@@ -1899,6 +1956,11 @@ def release_driver(career, team_id, driver_id):
     if not d or d.get("team_id") != team["id"] \
             or d.get("status") not in ("f1", "tr"):
         return False, "That driver is not one of your main or T&R drivers."
+    # v0.7.1: an ill driver cannot be released while they recover —
+    # their seat is being kept for them (their substitute covers it).
+    if d.get("ill_until_round"):
+        return False, (f"{d['name']} is {d.get('ill_label') or 'ill'} and "
+                       f"cannot be released while they recover.")
     fee = break_fee_for_driver(career, d)
     if fee > team["money"]:
         return False, f"Need ${fee:.2f}M to release {d['name']}."
@@ -1940,6 +2002,11 @@ def swap_main_tr(career, team_id, seat, tr_driver_id):
     tr = get_driver(career, tr_driver_id)
     if not tr or tr.get("status") != "tr" or tr.get("team_id") != team["id"]:
         return False, "That driver is not one of your T&R drivers."
+    # v0.7.1: an ill driver sitting in T&R cannot be swapped into a
+    # race seat — they are recovering, not available to race.
+    if tr.get("ill_until_round"):
+        return False, (f"{tr['name']} is {tr.get('ill_label') or 'ill'} "
+                       f"and cannot race until Round {tr['ill_until_round'] + 1}.")
     # Outgoing main driver: bank their per-team points (real F1),
     # keep their contract and championship tally, become T&R.
     team["points_kept"] = team.get("points_kept", 0) + main.get("team_points", 0)
@@ -1951,6 +2018,19 @@ def swap_main_tr(career, team_id, seat, tr_driver_id):
     tr["last_team_id"] = None
     tr["status"] = "f1"
     team[slot] = tr["id"]
+    # v0.7.1: if the outgoing main driver was a substitute standing
+    # in for an ill driver, the stand-in role passes to the incoming
+    # driver — the ill driver still needs someone in their seat.
+    sub_for = main.get("ill_sub_for")
+    sub_from = main.get("ill_sub_from")
+    if sub_for:
+        main["ill_sub_for"] = None
+        main["ill_sub_from"] = None
+        tr["ill_sub_for"] = sub_for
+        tr["ill_sub_from"] = sub_from
+        ill = get_driver(career, sub_for)
+        if ill:
+            ill["ill_sub_id"] = tr["id"]
     _recompute_team_points(career, team)
     career["transfers"].append(
         f"{tr['name']} swapped with {main['name']} at {team['name']}")
@@ -1973,10 +2053,26 @@ def promote_tr_to_main(career, team_id, tr_driver_id, seat):
     tr = get_driver(career, tr_driver_id)
     if not tr or tr.get("status") != "tr" or tr.get("team_id") != team["id"]:
         return False, "That driver is not one of your T&R drivers."
+    # v0.7.1: an ill driver sitting in T&R cannot be promoted into
+    # a race seat — they are recovering, not available to race.
+    if tr.get("ill_until_round"):
+        return False, (f"{tr['name']} is {tr.get('ill_label') or 'ill'} "
+                       f"and cannot race until Round {tr['ill_until_round'] + 1}.")
     tr["team_points"] = 0
     tr["last_team_id"] = None
     tr["status"] = "f1"
     team[slot] = tr["id"]
+    # v0.7.1: if this empty seat belongs to an ill driver whose
+    # substitute is not yet recorded (an empty ill seat — e.g. their
+    # substitute was released), the promoted driver becomes the
+    # stand-in, so the ill driver's return still finds them.
+    for d in career["drivers"]:
+        if (d.get("team_id") == team["id"] and d.get("ill_until_round")
+                and d.get("ill_seat") == seat and not d.get("ill_sub_id")):
+            d["ill_sub_id"] = tr["id"]
+            tr["ill_sub_for"] = d["id"]
+            tr["ill_sub_from"] = "tr"
+            break
     _recompute_team_points(career, team)
     career["transfers"].append(
         f"{tr['name']} promoted to a race seat at {team['name']}")
@@ -2015,6 +2111,9 @@ def _detach_driver(career, d, team, slot):
         team["points_kept"] = team.get("points_kept", 0) + d.get("team_points", 0)
         d["team_points"] = 0
         d["last_team_id"] = team["id"]
+        # v0.7.1: record the slot they held, for the winter-break
+        # re-sign offer.
+        d["last_slot"] = "seat1" if team.get("driver1_id") == d["id"] else "seat2"
         if team.get("driver1_id") == d["id"]:
             team["driver1_id"] = None
         if team.get("driver2_id") == d["id"]:
@@ -2022,6 +2121,9 @@ def _detach_driver(career, d, team, slot):
     elif kind == "tr":
         d["team_points"] = 0
         d["last_team_id"] = team["id"]
+        # v0.7.1: record the slot they held, for the winter-break
+        # re-sign offer.
+        d["last_slot"] = "tr"
     elif kind == "academy":
         d["academy_team_id"] = None
     d["team_id"] = None
@@ -2035,12 +2137,19 @@ def _attach_driver(career, d, team, slot):
     signing length) on their existing salary. Signing a main or T&R
     contract ends the academy affiliation, wherever it was."""
     kind = slot[0]
+    if kind in ("seat", "tr"):
+        # v0.7.1: an F2 driver leaving for F1 keeps their F2 tally
+        # frozen at departure (they stay in the F2 standings).
+        _freeze_f2_tally(d)
     if kind == "seat":
         team["driver1_id" if slot[1] == 1 else "driver2_id"] = d["id"]
         d["status"] = "f1"
         d["team_id"] = team["id"]
         d["team_points"] = 0
         d["last_team_id"] = None
+        # v0.7.1: a fresh slot, so the slot they held on their old
+        # team no longer applies.
+        d["last_slot"] = None
         d["academy_team_id"] = None
         if not d.get("contract_left"):
             d["contract_left"] = 2
@@ -2049,6 +2158,9 @@ def _attach_driver(career, d, team, slot):
         d["team_id"] = team["id"]
         d["team_points"] = 0
         d["last_team_id"] = None
+        # v0.7.1: a fresh slot, so the slot they held on their old
+        # team no longer applies.
+        d["last_slot"] = None
         d["academy_team_id"] = None
         if not d.get("contract_left"):
             d["contract_left"] = 2
@@ -2096,6 +2208,11 @@ def promote_junior_driver(career, parent_team_id, junior_driver_id,
     d = get_driver(career, junior_driver_id)
     if not d:
         return False, "No such driver."
+    # v0.7.1: an ill driver is recovering, not available to be
+    # promoted — their seat is being kept for them at their own team.
+    if d.get("ill_until_round"):
+        return False, (f"{d['name']} is {d.get('ill_label') or 'ill'} and "
+                       f"cannot be promoted while they recover.")
     junior_slot = _driver_slot(career, junior, d)
     if junior_slot is None:
         return False, "That driver is not one of your junior team's drivers."
@@ -2414,6 +2531,11 @@ def bot_post_race(career, rng=None):
             d = get_driver(career, team[slot]) if team[slot] else None
             if not d:
                 continue
+            # v0.7.1: a substitute standing in for an ill driver is
+            # temporary cover — the bot never drops them for poor
+            # results (the ill driver's seat is being kept for them).
+            if d.get("ill_sub_for"):
+                continue
             count = d.get("finish_count", 0)
             if count == 0:
                 continue
@@ -2434,7 +2556,9 @@ def bot_post_race(career, rng=None):
             # driver was acted on.)
             bad_tr = None
             bad_tr_avg = 0.0
-            for tr in team_tr_drivers(career, team):
+            # v0.7.1: only FIT T&R drivers — an ill driver recovering
+            # in T&R is never released for poor results.
+            for tr in active_tr_drivers(career, team):
                 count = tr.get("finish_count", 0)
                 if count == 0:
                     continue
@@ -2456,7 +2580,9 @@ def bot_post_race(career, rng=None):
                 f"(poor results, ${fee:.2f}M break fee)")
             continue
         seat, d = worst
-        trs = team_tr_drivers(career, team)
+        # v0.7.1: only FIT T&R drivers — an ill driver recovering in
+        # T&R is never swapped into a race seat.
+        trs = active_tr_drivers(career, team)
         if trs:
             trs.sort(key=lambda x: (-x["rep"], x["name"]))
             # swap_main_tr logs the swap in the Transfers log.
@@ -2473,6 +2599,225 @@ def bot_post_race(career, rng=None):
         _recompute_team_points(career, team)
         career["transfers"].append(
             f"{d['name']} dropped by {team['name']} (poor results, ${fee:.2f}M break fee)")
+
+
+# ---------------------------------------------------------------------------
+# v0.7.1: random driver illness / injury
+# ---------------------------------------------------------------------------
+
+def _ill_driver_out_of_seat(career, team, ill):
+    """Move an ill driver out of their race seat: the points they
+    scored FOR this team stay banked with the team (real F1, like a
+    swap) and they become a Test & Reserve driver while they
+    recover — paid their full salary, still under contract. Only
+    runs when they actually hold the seat."""
+    seat = ill.get("ill_seat") or 1
+    slot = "driver1_id" if seat == 1 else "driver2_id"
+    if team.get(slot) != ill["id"]:
+        return
+    team["points_kept"] = team.get("points_kept", 0) + ill.get("team_points", 0)
+    ill["team_points"] = 0
+    team[slot] = None
+    ill["status"] = "tr"
+
+
+def _place_ill_substitute(career, team, ill, rng):
+    """Put a substitute in the ill driver's seat for the rounds they
+    miss, racing as a normal main driver. The stand-in comes from
+    the team's Test & Reserve drivers — the highest-reputation fit
+    one is the provisional pick (a human may swap them for another
+    T&R driver for free with the normal swap); with no T&R drivers,
+    the seat is filled the same way empty main seats are already
+    auto-filled (one of the five worst-reputation free agents, at
+    random, on a 1-year contract — see autofill_winter_break). The
+    ill driver keeps their seat: they return when they recover.
+    Returns True when a substitute was placed."""
+    seat = ill.get("ill_seat") or 1
+    slot = "driver1_id" if seat == 1 else "driver2_id"
+    occupant = get_driver(career, team[slot]) if team[slot] else None
+    if occupant is not None and occupant is not ill:
+        return False  # the seat is held by someone else — not ours to fill
+    trs = active_tr_drivers(career, team)
+    if trs:
+        trs.sort(key=lambda x: (-x["rep"], x["name"]))
+        sub = trs[0]
+        _ill_driver_out_of_seat(career, team, ill)
+        ok, _why = promote_tr_to_main(career, team["id"], sub["id"], seat)
+        if not ok:
+            return False
+        ill["ill_sub_id"] = sub["id"]
+        sub["ill_sub_for"] = ill["id"]
+        sub["ill_sub_from"] = "tr"
+        return True
+    free = [d for d in career["drivers"] if d["status"] == "free"]
+    if not free:
+        return False
+    free.sort(key=lambda d: (d["rep"], d["salary"], d["name"]))
+    pick = rng.choice(free[:5]) if len(free) > 1 else free[0]
+    _ill_driver_out_of_seat(career, team, ill)
+    _sign_driver_common(career, team, pick, 1)
+    pick["status"] = "f1"
+    pick["team_id"] = team["id"]
+    team[slot] = pick["id"]
+    _recompute_team_points(career, team)
+    ill["ill_sub_id"] = pick["id"]
+    pick["ill_sub_for"] = ill["id"]
+    pick["ill_sub_from"] = "free"
+    career["transfers"].append(
+        f"{pick['name']} signed for {team['name']} "
+        f"(standing in for {ill['name']})")
+    return True
+
+
+def roll_illness(career, rng=None):
+    """v0.7.1: at the start of a round, each fit F1 main driver has
+    a 0.5% chance of falling ill or injured (ILLNESS_CHANCE) — about
+    one incident a season across the whole 22-driver grid. The
+    driver misses 1-2 races (at random), the substitute fills the
+    seat, and the illness is announced in the Transfers log (the
+    dashboard shows the notice before qualifying). Both main
+    drivers can fall ill at once — both seats get substitutes by
+    the same rules. In-season rounds only."""
+    rng = rng or random
+    if career.get("phase") != "round":
+        return []
+    newly = []
+    for team in career["teams"]:
+        for seat in (1, 2):
+            slot = "driver1_id" if seat == 1 else "driver2_id"
+            d = get_driver(career, team[slot]) if team[slot] else None
+            if not d or d.get("ill_until_round") is not None:
+                continue
+            if rng.random() >= ILLNESS_CHANCE:
+                continue
+            duration = rng.randint(ILLNESS_MIN_ROUNDS, ILLNESS_MAX_ROUNDS)
+            last = min(career["round"] + duration - 1, SEASON_LENGTH)
+            d["ill_until_round"] = last
+            d["ill_label"] = rng.choice(["ill", "injured"])
+            d["ill_seat"] = seat
+            placed = _place_ill_substitute(career, team, d, rng)
+            missed = last - career["round"] + 1
+            sub = (get_driver(career, d.get("ill_sub_id"))
+                   if d.get("ill_sub_id") else None)
+            note = (f"{d['name']} is {d['ill_label']} and will miss "
+                    f"the next {missed} race{'s' if missed != 1 else ''}")
+            if placed and sub:
+                note += f" — {sub['name']} is standing in for them"
+            elif not placed:
+                note += " — no substitute available, the seat is empty"
+            career["transfers"].append(note)
+            newly.append(d)
+    return newly
+
+
+def restore_ill_driver(career, ill):
+    """The ill driver's absence is over: they go back in their race
+    seat and the substitute returns — to Test & Reserve if they came
+    from there, or back to the free-agent pool if they were a
+    free-agent fill. If the seat is now held by someone else (a
+    mid-season signing took it), the returning driver joins Test &
+    Reserve instead of displacing them. The contract is untouched
+    throughout."""
+    team = get_team(career, ill.get("team_id")) if ill.get("team_id") else None
+    sub = (get_driver(career, ill.get("ill_sub_id"))
+           if ill.get("ill_sub_id") else None)
+    seat = None
+    if team and sub:
+        if team.get("driver1_id") == sub["id"]:
+            seat = 1
+        elif team.get("driver2_id") == sub["id"]:
+            seat = 2
+    if team and seat is None:
+        # The substitute is gone (or was never in a seat): the first
+        # empty seat, if any.
+        for s in (1, 2):
+            if not team.get("driver1_id" if s == 1 else "driver2_id"):
+                seat = s
+                break
+    label = ill.get("ill_label") or "illness"
+    if team and seat is not None:
+        slot = "driver1_id" if seat == 1 else "driver2_id"
+        if sub and team.get(slot) == sub["id"]:
+            # Send the substitute back.
+            if sub.get("ill_sub_from") == "free":
+                _release_driver(career, sub, team)
+                sub["status"] = "free"
+                sub["contract_left"] = 0
+            else:
+                team["points_kept"] = (team.get("points_kept", 0)
+                                       + sub.get("team_points", 0))
+                sub["team_points"] = 0
+                sub["status"] = "tr"
+            sub["ill_sub_for"] = None
+            sub["ill_sub_from"] = None
+            team[slot] = None
+        elif sub:
+            # The substitute no longer holds the seat (poached or
+            # dropped in the meantime) — their stand-in markers are
+            # stale, so clear them.
+            sub["ill_sub_for"] = None
+            sub["ill_sub_from"] = None
+        team[slot] = ill["id"]
+        ill["status"] = "f1"
+        ill["team_points"] = 0
+        ill["last_team_id"] = None
+        _recompute_team_points(career, team)
+        career["transfers"].append(
+            f"{ill['name']} is back from {label} at {team['name']}")
+    elif team:
+        # No seat free — the returning driver joins Test & Reserve.
+        ill["status"] = "tr"
+        if sub:
+            sub["ill_sub_for"] = None
+            sub["ill_sub_from"] = None
+        career["transfers"].append(
+            f"{ill['name']} is back from {label} — no race seat free "
+            f"at {team['name']}, so they join Test & Reserve")
+    ill["ill_until_round"] = None
+    ill["ill_label"] = None
+    ill["ill_seat"] = None
+    ill["ill_sub_id"] = None
+    return team is not None
+
+
+def restore_ill_drivers(career, force=False):
+    """Bring back every driver whose absence has ended (the current
+    round is past their last missed round). At the season rollover
+    every ill driver comes back (force=True) — no illness carries
+    across a season."""
+    for d in [x for x in career["drivers"]
+              if x.get("ill_until_round") is not None]:
+        if force or career["round"] > d["ill_until_round"]:
+            restore_ill_driver(career, d)
+
+
+def ensure_ill_substitutes(career, rng=None):
+    """Safety net at the start of a race weekend: any ill driver
+    whose seat is not held by their substitute (the substitute was
+    released, dropped or poached away in the meantime) gets a fresh
+    one by the same rules. Guards (release/sign refuse ill drivers)
+    should prevent it, but the race must never run with an ill
+    driver's seat held by nobody."""
+    rng = rng or random
+    for team in career["teams"]:
+        for d in [x for x in career["drivers"]
+                  if x.get("team_id") == team["id"]
+                  and x.get("ill_until_round") is not None]:
+            seat = d.get("ill_seat") or 1
+            slot = "driver1_id" if seat == 1 else "driver2_id"
+            sub = (get_driver(career, d.get("ill_sub_id"))
+                   if d.get("ill_sub_id") else None)
+            if sub and team.get(slot) == sub["id"]:
+                continue
+            if not team.get(slot):
+                _place_ill_substitute(career, team, d, rng)
+
+
+def open_new_round(career, rng=None):
+    """A new round opens: bring back drivers whose illness has run
+    its course, then roll illness for the round about to be raced."""
+    restore_ill_drivers(career)
+    return roll_illness(career, rng=rng)
 
 
 # ---------------------------------------------------------------------------
@@ -2623,6 +2968,10 @@ def complete_race_weekend(career, rng=None):
         # at round 7 (before any round-7 research or development).
         if career["round"] == REG_OPENS_ROUND:
             init_reg_state(career)
+        # v0.7.1: a new round opens — bring back drivers whose
+        # illness has run its course, then roll illness for the
+        # round about to be raced.
+        open_new_round(career, rng=rng)
 
 
 def run_race_weekend(career, rng=None):
@@ -2630,6 +2979,13 @@ def run_race_weekend(career, rng=None):
     does NOT advance here — the room goes to the qualifying results page
     first (phase 'qual_results'), and only the NEXT votes move it on."""
     rng = rng or random
+    # v0.7.1: before anything acts, make sure every ill driver's
+    # seat is covered — a substitute released, dropped or poached
+    # away since the illness started gets a fresh one by the same
+    # rules. This must run BEFORE ai_act: a bot team with an empty
+    # ill seat would otherwise fill it with the best available
+    # driver, not the illness stand-in.
+    ensure_ill_substitutes(career, rng=rng)
     # v0.6.4: the bot AI acts ONLY for teams that are genuinely AI
     # (no human owner). A human-owned team is NEVER bot-driven just
     # because its player is temporarily disconnected — the bot used
@@ -2657,6 +3013,14 @@ def run_race_weekend(career, rng=None):
                 d1["season_qual_h2h"] = d1.get("season_qual_h2h", 0) + 1
             elif d2["qual_pos"] < d1["qual_pos"]:
                 d2["season_qual_h2h"] = d2.get("season_qual_h2h", 0) + 1
+            # v0.7.1 (a): the teammate comparison for QUALIFYING,
+            # Elo-style (K half the race weight). Both drivers
+            # qualified, so both have a qual_pos — no DNFs to skip
+            # here. The expectation uses the reps going into the
+            # weekend (no rep change has run yet).
+            race_mod.apply_teammate_elo(
+                d1, d2, d1["qual_pos"], d2["qual_pos"],
+                rules_mod.DRIVER_REP_K_QUALI)
     leader = qual[0][0]["qual_time"] if qual else 0
     career["last_qual"] = [
         result_row(d, t, i + 1,
@@ -2796,6 +3160,10 @@ def end_of_season(career, rng=None):
     init_reg_state at round 7.
     """
     rng = rng or random
+    # v0.7.1: no illness carries across a season — every ill driver
+    # comes back and their seat is theirs again, before any of the
+    # standings / retirements / contracts below read the lineups.
+    restore_ill_drivers(career, force=True)
     standings = race_mod.constructor_standings(career)
     # v0.2: driver_standings() also lists replaced drivers (free agents
     # with points), and v0.4.4: any driver who raced in F1 this season
@@ -2872,10 +3240,44 @@ def end_of_season(career, rng=None):
         if mains:
             avg_rep = sum(d.get("rep", 2.0) for d in mains) / len(mains)
             adjust_team_rep(team, (avg_rep - 2.5) * 0.5)
+    # v0.7.1 (c): driver reputation at the season rollover —
+    # standings vs team, plus the championship bonus. Positions are
+    # the FINAL standings: the full drivers' list (free agents with
+    # points sort in too, so a replaced driver's position counts)
+    # and the final constructors' order. A driver finishing well
+    # above their team's place gains; well below loses (capped at
+    # +/-0.15). The champion gains +0.5 — or +0.75 when their team
+    # did NOT win the constructors' championship. This runs once,
+    # here, on top of the per-race components (a) and (b) — no
+    # double-counting.
+    full_standings = race_mod.driver_standings(career)
+    dpos = {d["id"]: i + 1 for i, d in enumerate(full_standings)}
+    tpos = {t["id"]: i + 1 for i, t in enumerate(standings)}
+    for d in drivers:
+        tp = tpos.get(d.get("team_id"), len(standings))
+        dp = dpos.get(d["id"], len(full_standings))
+        delta = (tp - dp) * DRIVER_REP_SEASON_RATE
+        delta = max(-DRIVER_REP_SEASON_CAP,
+                    min(DRIVER_REP_SEASON_CAP, delta))
+        race_mod.adjust_driver_rep(d, delta)
+    if drivers:
+        champ = drivers[0]
+        champ_team = get_team(career, champ["team_id"])
+        won_constructors = bool(
+            standings and champ_team and standings[0]["id"] == champ_team["id"])
+        bonus = (DRIVER_REP_CHAMPION_BONUS if won_constructors
+                 else DRIVER_REP_CHAMPION_BONUS_NON_TOP)
+        race_mod.adjust_driver_rep(champ, bonus)
     # F2 champion is promoted to the free-agent pool.
-    f2_sorted = race_mod.f2_standings(career)
+    # v0.7.1: a driver who left F2 for F1 mid-season is NOT eligible
+    # for the title (they stopped scoring) — the champion is the best
+    # driver still in F2. The champion also gets a +0.5 rep boost,
+    # on top of the F2 race-result rep earned during the season.
+    f2_sorted = [d for d in race_mod.f2_standings(career)
+                 if d["status"] == "f2"]
     if f2_sorted:
         f2_champ = f2_sorted[0]
+        race_mod.adjust_driver_rep(f2_champ, DRIVER_REP_F2_CHAMPION_BONUS)
         f2_champ["status"] = "free"
         f2_champ["team_id"] = None
         f2_champ["points"] = 0
@@ -2986,6 +3388,17 @@ def end_of_season(career, rng=None):
         d["finish_sum"] = 0
         d["finish_count"] = 0
         d["f1_races"] = 0
+    # v0.7.1: a driver who left F2 for F1 mid-season stays in the F2
+    # standings only for the season they left in — the new season
+    # starts clean, so clear the frozen departure tally for every
+    # driver now.
+    for d in career["drivers"]:
+        if d.get("f2_left"):
+            d["f2_left"] = False
+            d["f2_points"] = 0
+            d["f2_wins"] = 0
+            d["f2_best_pos"] = None
+            d["f2_best_finish_round"] = None
     # v0.4: T&R drivers age and their contracts tick down too. An
     # expired T&R contract ends the affiliation — the driver becomes
     # a free agent (and is then available for winter-break offers).
@@ -3016,6 +3429,9 @@ def end_of_season(career, rng=None):
                 d["status"] = "free"
                 d["team_id"] = None
                 d["last_team_id"] = team["id"]
+                # v0.7.1: record the slot they held, for the
+                # winter-break re-sign offer.
+                d["last_slot"] = "tr"
                 career["transfers"].append(
                     f"{d['name']} left {team['name']} (T&R contract ended)")
     # Contracts that expired: the driver leaves the team and becomes a free agent.
@@ -3337,8 +3753,9 @@ def bot_winter_offers(career, team, rng=None):
     # cap any more — a bot may offer a 3rd (or further) T&R driver
     # only when it has plenty of cash: its bank, after paying a full
     # season of the fine the extra driver would add, must still be
-    # over $50M.
-    trs = team_tr_drivers(career, team)
+    # over $50M. v0.7.1: the fine counts FIT T&R drivers — an ill
+    # driver sitting in T&R while they recover does not count.
+    trs = active_tr_drivers(career, team)
     if pool:
         young = [d for d in pool if d["age"] <= 25]
         young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
@@ -3612,7 +4029,11 @@ def autofill_winter_break(career, rng=None):
     rng = rng or random
     for team in career["teams"]:
         for seat in empty_seats(career, team):
-            trs = team_tr_drivers(career, team)
+            # v0.7.1: only FIT T&R drivers — an ill driver recovering
+            # in T&R is never promoted (the guard in
+            # promote_tr_to_main would refuse them anyway, but that
+            # would leave the seat empty here).
+            trs = active_tr_drivers(career, team)
             if trs:
                 trs.sort(key=lambda x: (-x["rep"], x["name"]))
                 promote_tr_to_main(career, team["id"], trs[0]["id"], seat)
@@ -3722,6 +4143,10 @@ def start_next_season(career, rng=None):
     career["wb_ready"] = []
     career["wb_done"] = False
     set_circuit_for_round(career)
+    # v0.7.1: the new season's round 1 opens — roll illness for it
+    # (no driver carries an illness across the rollover: end_of_season
+    # restored every ill driver first).
+    open_new_round(career, rng=rng)
     return True, "ok"
 
 
@@ -3873,8 +4298,11 @@ def public_state(career, chart_on, viewer_team_id=None):
                        for seat in (1, 2)}
                 tr_quote = sign_cost(career, viewer["id"], d["id"], ("tr", None))
                 if tr_quote is not None:
+                    # v0.7.1: the fine counts FIT T&R drivers — an
+                    # ill driver sitting in T&R while they recover
+                    # does not count toward it.
                     tr_quote["fine_after"] = extra_driver_fine(
-                        len(team_tr_drivers(career, viewer)) + 1, TR_FINE_FREE_COUNT)
+                        len(active_tr_drivers(career, viewer)) + 1, TR_FINE_FREE_COUNT)
                 out["tr"] = tr_quote
                 return out
             state["market_costs"] = {
