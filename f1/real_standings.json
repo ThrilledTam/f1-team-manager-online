@@ -3463,19 +3463,19 @@
    },
    {
     "pos": 6,
-    "name": "Alpine F1 Team",
+    "name": "Alpine",
     "points": 65.0,
     "wins": 0
    },
    {
     "pos": 7,
-    "name": "Haas F1 Team",
+    "name": "Haas",
     "points": 58.0,
     "wins": 0
    },
    {
     "pos": 8,
-    "name": "RB F1 Team",
+    "name": "Racing Bulls",
     "points": 46.0,
     "wins": 0
    },
@@ -3676,7 +3676,7 @@
    },
    {
     "pos": 6,
-    "name": "RB F1 Team",
+    "name": "Racing Bulls",
     "points": 92.0,
     "wins": 0
    },
@@ -3688,7 +3688,7 @@
    },
    {
     "pos": 8,
-    "name": "Haas F1 Team",
+    "name": "Haas",
     "points": 79.0,
     "wins": 0
    },
@@ -3700,7 +3700,7 @@
    },
    {
     "pos": 10,
-    "name": "Alpine F1 Team",
+    "name": "Alpine",
     "points": 22.0,
     "wins": 0
    }
