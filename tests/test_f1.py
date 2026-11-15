@@ -26,6 +26,19 @@ def seeded(seed=1234):
     return random.Random(seed)
 
 
+class _FixedRng:
+    """Deterministic stand-in for random: random() always returns
+    `value`. Used for the v0.7.0 probability layers (bot donation
+    acceptance, proposal acceptance) so a test can force the accept
+    branch (0.0) or the decline branch (0.99) exactly."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def random(self):
+        return self.value
+
+
 def two_human_career():
     career = game.build_new_career("Test Career", "Matthew", chart_on=True)
     ok, _ = game.choose_team(career, career["teams"][0]["id"], "p-matthew")
@@ -383,7 +396,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 10  # v0.6.6 save format
+        assert loaded["version"] == 11  # v0.7.0 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -2320,7 +2333,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 10
+        assert loaded["version"] == 11
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2428,15 +2441,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v066():
-    """The live version string is v0.6.6 everywhere it is shown."""
+def test_health_reports_v070():
+    """The live version string is v0.7.0 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.6.6"
+    assert client.get("/api/health").json()["version"] == "v0.7.0"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.6.6</title>" in html
-    assert "Online · v0.6.6 beta" in html
+    assert "<title>F1 Team Manager Online — v0.7.0</title>" in html
+    assert "Online · v0.7.0 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -2526,11 +2539,22 @@ def test_popups_minimize_restore_close_escape():
                 # unaffordable (Piastri's $15.42M fee vs ~$12-14M in
                 # the bank after the $1.5M/race T&R fine) — open the
                 # picker from the first affordable seat instead.
-                seat = page.evaluate("""() => {
-                    const btns = [...document.querySelectorAll('#market-box button[data-sign][data-seat]')]
-                      .filter(b => (b.dataset.seat === '1' || b.dataset.seat === '2') && !b.disabled);
-                    return btns.length ? btns[0].dataset.seat : null;
-                }""")
+                # v0.7.0: a bad round 1 can leave the bank at ~$11.2M,
+                # below even Norris's $11.97M fee, so NO seat is
+                # affordable. The bank grows ~$2M+/round, so play
+                # another round and retry (up to 2 extra rounds).
+                seat = None
+                for _ in range(3):
+                    seat = page.evaluate("""() => {
+                        const btns = [...document.querySelectorAll('#market-box button[data-sign][data-seat]')]
+                          .filter(b => (b.dataset.seat === '1' || b.dataset.seat === '2') && !b.disabled);
+                        return btns.length ? btns[0].dataset.seat : null;
+                    }""")
+                    if seat:
+                        break
+                    _play_one_round(page)
+                    page.click("button[data-tab='market']")
+                    page.wait_for_selector("#market-box .market-table", timeout=15000)
                 assert seat in ("1", "2")
                 page.click(f"#market-box button[data-sign][data-seat='{seat}']")
                 page.wait_for_selector("[data-contract-years]", timeout=15000)
@@ -3035,7 +3059,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 10
+    assert SAVE_VERSION == 11
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -4745,14 +4769,14 @@ def test_research_cap_removed_v066():
         assert "research_spent_season" not in t
 
 
-def test_migration_v8_to_v10():
-    """v0.6.6 (save v10): an old v8 save backfills the 2026 relations
+def test_migration_v8_to_v11():
+    """v0.7.0 (save v11): an old v8 save backfills the 2026 relations
     (Mercedes -> McLaren/Williams/Alpine customer, Red Bull ->
     Racing Bulls junior, Ferrari -> Haas/Cadillac customer, 2 years)
     and the new fields default correctly (break_notice None, junior
     share 0, donation_requests []); a v9 save carrying the removed
     research-cap fields loads without them; a save round-trips at
-    version 10."""
+    version 11."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save, save_career
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
@@ -4806,7 +4830,7 @@ def test_migration_v8_to_v10():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 10
+    assert SAVE_VERSION == 11
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -5199,10 +5223,13 @@ def test_donation_requests_v066():
     ok, why = game.request_donation(career, mercedes["id"], ferrari["id"], 1.0)
     assert not ok and "no supply relation" in why
     # A bot target decides on the spot: rich accepts, poor declines.
+    # v0.7.0: acceptance is also a probability (0.75 at rep 50), so
+    # pass a deterministic rng that always accepts.
     career2 = game.build_new_career("Test", "Matthew")
     mercedes2 = team_by_name(career2, "Mercedes")
     mclaren2 = team_by_name(career2, "McLaren")
-    ok, why = game.request_donation(career2, mclaren2["id"], mercedes2["id"], 1.0)
+    ok, why = game.request_donation(career2, mclaren2["id"], mercedes2["id"], 1.0,
+                                    rng=_FixedRng(0.0))
     assert ok and "accepted" in why, why  # Mercedes has $7M, keeps $6M
     assert mclaren2["money"] == 11.0
     assert career2["donation_requests"] == []
@@ -6092,3 +6119,451 @@ def test_playwright_finances_shows_net_per_race_v064():
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+# ---------------------------------------------------------------------------
+# v0.7.0 — hidden team reputation, winter-break recap, season
+# snapshots + clickable champion years (real 2010–2025 standings).
+# ---------------------------------------------------------------------------
+
+def _load_s3_save():
+    """The real Season 3 save (v10, 2029 winter break), migrated —
+    or None when it is not present in this checkout."""
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
+    if not path.exists():
+        return None
+    return load_save(str(path.parent), "matthew-max-wugynr-s3-complete")
+
+
+def test_team_rep_starts_at_50_and_migrates():
+    """v0.7.0: every team starts at rep 50 in a fresh career; an
+    old save without the field backfills to the neutral 50; the
+    real Season 3 save (v10) migrates cleanly — and its file is
+    never modified by loading it."""
+    career = game.build_new_career("Test", "Matthew")
+    assert all(t["team_rep"] == 50.0 for t in career["teams"])
+    doc = json.loads(json.dumps(career))
+    for t in doc["teams"]:
+        t.pop("team_rep", None)
+    doc["version"] = 10
+    migrated = migrate_save(doc)
+    assert all(t["team_rep"] == 50.0 for t in migrated["teams"])
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    before = path.read_bytes()
+    loaded = _load_s3_save()
+    assert loaded is not None
+    assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
+    assert all(t["team_rep"] == 50.0 for t in loaded["teams"])
+    assert path.read_bytes() == before
+
+
+def test_team_rep_never_leaves_the_server():
+    """v0.7.0: hidden team reputation never reaches a client — not
+    in the broadcast state (chart on or off), and not in the
+    private my_team payload either."""
+    career = two_human_career()
+    viewer = career["teams"][0]["id"]
+    for chart_on in (True, False):
+        state = game.public_state(career, chart_on, viewer)
+        assert all("team_rep" not in t for t in state["teams"])
+    assert '"team_rep"' not in json.dumps(game.public_state(career, True))
+    import server as srv
+    room = srv.new_room("Matthew", "#e74c3c")
+    room["career"] = career
+    room["started"] = True
+    mt = srv.my_team_public(room, "p-matthew")
+    assert mt is not None
+    assert "team_rep" not in mt
+
+
+def test_team_rep_season_end_position_and_driver_quality():
+    """v0.7.0: at the season rollover rep moves by final
+    constructors' position — (6 - pos): P1 +5, P6 0, P11 -5 — and
+    by the average hidden rep of the two main drivers, centred on
+    2.5 and halved. A fresh career ends 2026 in 2025 order, so the
+    numbers are exact: McLaren P1 with a 3.95-average lineup gains
+    5 + 0.725; Cadillac P11 with a 2.8-average lineup loses
+    5 - 0.15; Racing Bulls P6 with a 2.3-average lineup loses 0.1.
+    The rollover also appends the 2026 season snapshot."""
+    career = game.build_new_career("Test", "Matthew")
+    game.end_of_season(career, rng=seeded(5))
+    assert career["phase"] == "winter_break"
+    rep = {t["name"]: t["team_rep"] for t in career["teams"]}
+    assert rep["McLaren"] == pytest.approx(55.725)
+    assert rep["Mercedes"] == pytest.approx(54.625)
+    assert rep["Red Bull"] == pytest.approx(53.6)
+    assert rep["Ferrari"] == pytest.approx(52.725)
+    assert rep["Williams"] == pytest.approx(51.475)
+    assert rep["Racing Bulls"] == pytest.approx(49.9)
+    assert rep["Aston Martin"] == pytest.approx(49.2)
+    assert rep["Haas"] == pytest.approx(48.1)
+    assert rep["Audi"] == pytest.approx(47.175)
+    assert rep["Alpine"] == pytest.approx(45.975)
+    assert rep["Cadillac"] == pytest.approx(45.15)
+    assert len(career["season_snapshots"]) == 1
+    snap = career["season_snapshots"][0]
+    assert snap["year"] == 2026
+    assert snap["drivers"][0]["name"] == "Lando Norris"  # champion at 0 pts
+    assert snap["teams"][0]["name"] == "McLaren"
+
+
+def test_team_rep_race_win_bonus():
+    """v0.7.0: a race win lifts the winning team's rep by +0.3, and
+    no other team moves — after one played round exactly one team
+    is at 50.3 and the rest are still at 50.0."""
+    career = two_human_career()
+    play_full_round(career, seeded(7))
+    reps = {t["name"]: t["team_rep"] for t in career["teams"]}
+    winners = [n for n, r in reps.items() if r == pytest.approx(50.3)]
+    assert len(winners) == 1
+    assert all(r == pytest.approx(50.0) for n, r in reps.items()
+               if n != winners[0])
+
+
+def test_team_rep_donation_flows():
+    """v0.7.0: giving helps your reputation (+0.2 per $M, capped at
+    +1.0 per transfer); receiving through a REQUEST costs the
+    requester 0.2 per $M. A voluntary donation costs the recipient
+    nothing — it is a gift, not a request — and declining a request
+    moves nobody's rep."""
+    career = game.build_new_career("Test", "Matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    mclaren = team_by_name(career, "McLaren")
+    # Voluntary $2M gift: donor +0.4, recipient unchanged.
+    ok, why = game.donate(career, mercedes["id"], mclaren["id"], 2.0)
+    assert ok, why
+    assert mercedes["money"] == 5.0 and mclaren["money"] == 12.0
+    assert mercedes["team_rep"] == pytest.approx(50.4)
+    assert mclaren["team_rep"] == pytest.approx(50.0)
+    # Voluntary $10M gift: the donor's gain caps at +1.0.
+    ok, why = game.donate(career, mclaren["id"], mercedes["id"], 10.0)
+    assert ok, why
+    assert mclaren["team_rep"] == pytest.approx(51.0)
+    # A granted request: donor +0.4, requester -0.4 on $2M. Both
+    # sides human here, so the request stays pending for the target
+    # to answer (a bot target would decide on the spot).
+    career2 = game.build_new_career("Test", "Matthew")
+    ok, _ = game.choose_team(career2, team_by_name(career2, "McLaren")["id"], "p-matthew")
+    assert ok
+    ok, _ = game.choose_team(career2, team_by_name(career2, "Mercedes")["id"], "p-cousin")
+    assert ok
+    mercedes2 = team_by_name(career2, "Mercedes")
+    mclaren2 = team_by_name(career2, "McLaren")
+    ok, why = game.request_donation(career2, mclaren2["id"], mercedes2["id"], 2.0)
+    assert ok, why
+    req = career2["donation_requests"][0]
+    ok, why = game.respond_donation(career2, mercedes2["id"], req["id"], True)
+    assert ok, why
+    assert mercedes2["team_rep"] == pytest.approx(50.4)
+    assert mclaren2["team_rep"] == pytest.approx(49.6)
+    # A declined request moves nothing.
+    career3 = game.build_new_career("Test", "Matthew")
+    ok, _ = game.choose_team(career3, team_by_name(career3, "McLaren")["id"], "p-matthew")
+    assert ok
+    ok, _ = game.choose_team(career3, team_by_name(career3, "Mercedes")["id"], "p-cousin")
+    assert ok
+    mercedes3 = team_by_name(career3, "Mercedes")
+    mclaren3 = team_by_name(career3, "McLaren")
+    ok, _ = game.request_donation(career3, mclaren3["id"], mercedes3["id"], 2.0)
+    req = career3["donation_requests"][0]
+    ok, why = game.respond_donation(career3, mercedes3["id"], req["id"], False)
+    assert ok, why
+    assert mercedes3["team_rep"] == pytest.approx(50.0)
+    assert mclaren3["team_rep"] == pytest.approx(50.0)
+
+
+def test_team_rep_donation_acceptance_and_amount():
+    """v0.7.0: the bot donor's acceptance probability is 0.25 at rep
+    0, 0.75 at rep 50, 0.95 at rep 100 (clamped to [0.10, 0.95]),
+    on top of the keep-$5M hard gate; the amount granted is the
+    full request at rep >= 50 and half at rep 0."""
+    assert game.donation_accept_probability(0) == pytest.approx(0.25)
+    assert game.donation_accept_probability(25) == pytest.approx(0.5)
+    assert game.donation_accept_probability(50) == pytest.approx(0.75)
+    assert game.donation_accept_probability(100) == pytest.approx(0.95)
+    assert game.donation_amount_factor(0) == pytest.approx(0.5)
+    assert game.donation_amount_factor(25) == pytest.approx(0.75)
+    assert game.donation_amount_factor(50) == pytest.approx(1.0)
+    assert game.donation_amount_factor(100) == pytest.approx(1.0)
+    # Full amount at rep 50 (rng 0.0 always accepts).
+    career = game.build_new_career("Test", "Matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    mclaren = team_by_name(career, "McLaren")
+    ok, why = game.request_donation(career, mclaren["id"], mercedes["id"], 2.0,
+                                    rng=_FixedRng(0.0))
+    assert ok and "accepted" in why, why
+    assert mclaren["money"] == 12.0 and mercedes["money"] == 5.0
+    # Half at rep 0 — the requester's rep also drops by 0.2 per $M
+    # actually received ($1M), and the donor gains +0.2.
+    career2 = game.build_new_career("Test", "Matthew")
+    mercedes2 = team_by_name(career2, "Mercedes")
+    mclaren2 = team_by_name(career2, "McLaren")
+    mclaren2["team_rep"] = 0.0
+    ok, why = game.request_donation(career2, mclaren2["id"], mercedes2["id"], 2.0,
+                                    rng=_FixedRng(0.0))
+    assert ok and "accepted" in why, why
+    assert mclaren2["money"] == 11.0 and mercedes2["money"] == 6.0
+    assert mclaren2["team_rep"] == pytest.approx(0.0)  # -0.2, clamped at 0
+    assert mercedes2["team_rep"] == pytest.approx(50.2)
+    # The probability roll itself: 0.99 declines at rep 50 (p 0.75).
+    career3 = game.build_new_career("Test", "Matthew")
+    mercedes3 = team_by_name(career3, "Mercedes")
+    mclaren3 = team_by_name(career3, "McLaren")
+    ok, why = game.request_donation(career3, mclaren3["id"], mercedes3["id"], 2.0,
+                                    rng=_FixedRng(0.99))
+    assert ok and "declined" in why, why
+    assert mclaren3["money"] == 10.0 and mercedes3["money"] == 7.0
+    assert mclaren3["team_rep"] == pytest.approx(50.0)
+    # The hard gate still rules: a bot that would drop below $5M
+    # declines even when the roll would accept.
+    career4 = game.build_new_career("Test", "Matthew")
+    mercedes4 = team_by_name(career4, "Mercedes")
+    mclaren4 = team_by_name(career4, "McLaren")
+    mercedes4["money"] = 5.5
+    ok, why = game.request_donation(career4, mclaren4["id"], mercedes4["id"], 1.0,
+                                    rng=_FixedRng(0.0))
+    assert ok and "declined" in why, why
+    assert mclaren4["money"] == 10.0
+
+
+def test_team_rep_quiet_drop():
+    """v0.7.0: the winter-break QUIET DROP — rep 50 -> 0, 35 -> 1,
+    20 -> 2, 5 -> 3, 80 -> 0 — and it actually flips an offer: in
+    the Season 3 career Red Bull (3rd) offering the same free agent
+    as Aston Martin (4th) loses the driver when Red Bull's rep is
+    5, and wins them when it is 50."""
+    assert game.wb_rep_drop(50) == 0
+    assert game.wb_rep_drop(80) == 0
+    assert game.wb_rep_drop(35) == 1
+    assert game.wb_rep_drop(20) == 2
+    assert game.wb_rep_drop(5) == 3
+    assert game.wb_rep_drop(0) == 3
+    assert game.wb_rep_drop(49) == 0
+    career = _load_s3_save()
+    if career is None:
+        pytest.skip("Season 3 save not present in this checkout")
+    verstappen = next(d for d in career["drivers"]
+                      if d["name"] == "Max Verstappen")
+    assert verstappen["status"] == "free"
+    redbull = team_by_name(career, "Red Bull")
+    aston = team_by_name(career, "Aston Martin")
+    offers = {
+        redbull["id"]: [{"driver_id": verstappen["id"], "target": "seat",
+                         "seat": 1, "years": 2}],
+        aston["id"]: [{"driver_id": verstappen["id"], "target": "seat",
+                       "seat": 1, "years": 2}],
+    }
+    # Low rep: Red Bull drops 3 (3rd -> effective 6th), Aston wins.
+    redbull["team_rep"] = 5.0
+    assert game._wb_offer_winners(career, offers) == {verstappen["id"]: aston["id"]}
+    # Neutral rep: no drop, the better-placed team wins.
+    redbull["team_rep"] = 50.0
+    assert game._wb_offer_winners(career, offers) == {verstappen["id"]: redbull["id"]}
+    # The stored constructors' order is never touched by the drop.
+    assert game.wb_constructors_order(career)[:4] == [
+        team_by_name(career, n)["id"]
+        for n in ("Ferrari", "Mercedes", "Red Bull", "Aston Martin")]
+
+
+def test_team_rep_proposal_factor():
+    """v0.7.0: the customer/junior proposal multiplier — 1.0 at rep
+    >= 25 (no extra rejection), 0.7 at rep 12.5, 0.4 at rep 0 (a 60%
+    cut) — and it bites in the bot's decision: a rep-0 proposer
+    whose proposal would otherwise be accepted is accepted on a
+    0.0 roll and declined on a 0.5 roll."""
+    assert game.proposal_rep_factor(25) == pytest.approx(1.0)
+    assert game.proposal_rep_factor(50) == pytest.approx(1.0)
+    assert game.proposal_rep_factor(12.5) == pytest.approx(0.7)
+    assert game.proposal_rep_factor(0) == pytest.approx(0.4)
+
+    def _winter_career():
+        """A fresh career moved into the winter break (relation
+        changes only happen there), with any bot proposals cleared."""
+        c = game.build_new_career("Test", "Matthew")
+        game.end_of_season(c, rng=seeded(5))
+        assert c["phase"] == "winter_break"
+        c["relation_proposals"] = []
+        return c
+
+    career = _winter_career()
+    redbull = team_by_name(career, "Red Bull")
+    aston = team_by_name(career, "Aston Martin")
+    redbull["team_rep"] = 0.0
+    # Red Bull (perf 175) proposing to supply Aston (perf 125):
+    # the base rule accepts (supplier is faster), so the roll decides.
+    ok, why = game.propose_relation(career, redbull["id"], aston["id"],
+                                    "customer", redbull["id"], 2,
+                                    rng=_FixedRng(0.0))
+    assert ok and "accepted" in why, why
+    assert aston["sup_stage"] == 1
+    career2 = _winter_career()
+    redbull2 = team_by_name(career2, "Red Bull")
+    aston2 = team_by_name(career2, "Aston Martin")
+    redbull2["team_rep"] = 0.0
+    ok, why = game.propose_relation(career2, redbull2["id"], aston2["id"],
+                                    "customer", redbull2["id"], 2,
+                                    rng=_FixedRng(0.5))
+    assert ok and "declined" in why, why
+    assert aston2["sup_stage"] == 0
+    # At rep 25 there is no roll at all — the base rule decides.
+    career3 = _winter_career()
+    redbull3 = team_by_name(career3, "Red Bull")
+    aston3 = team_by_name(career3, "Aston Martin")
+    redbull3["team_rep"] = 25.0
+    ok, why = game.propose_relation(career3, redbull3["id"], aston3["id"],
+                                    "customer", redbull3["id"], 2,
+                                    rng=_FixedRng(0.99))
+    assert ok and "accepted" in why, why
+
+
+def test_winter_break_recap_2028():
+    """v0.7.0: the winter-break recap for the Season 3 career —
+    Top 8 drivers (Hamilton 143 first), Top 5 constructors
+    (Ferrari 221 first), and 12 round winners starting with
+    Antonelli in Bahrain."""
+    career = _load_s3_save()
+    if career is None:
+        pytest.skip("Season 3 save not present in this checkout")
+    rc = game.winter_break_recap(career)
+    assert rc["year"] == 2028
+    assert len(rc["drivers"]) == 8
+    assert rc["drivers"][0]["name"] == "Lewis Hamilton"
+    assert rc["drivers"][0]["points"] == 143
+    assert rc["drivers"][1]["name"] == "Max Verstappen"
+    assert len(rc["teams"]) == 5
+    assert rc["teams"][0]["name"] == "Ferrari"
+    assert rc["teams"][0]["points"] == 221
+    assert rc["teams"][1]["name"] == "Mercedes"
+    assert len(rc["winners"]) == 12
+    assert rc["winners"][0] == {"round": 1, "circuit": "Bahrain Grand Prix",
+                                "driver": "Kimi Antonelli", "team": "Mercedes",
+                                "team_id": team_by_name(career, "Mercedes")["id"]}
+    assert [w["driver"] for w in rc["winners"]] == [
+        "Kimi Antonelli", "Fernando Alonso", "Fernando Alonso",
+        "Fernando Alonso", "Kimi Antonelli", "George Russell",
+        "Lewis Hamilton", "Oliver Bearman", "Oliver Bearman",
+        "Oliver Bearman", "Charles Leclerc", "Isack Hadjar"]
+    # The recap also rides along in the winter-break public state.
+    state = game.public_state(career, True, None)
+    assert state["wb_recap"]["year"] == 2028
+    assert state["wb_recap"]["drivers"][0]["points"] == 143
+
+
+def test_season_snapshots_reconstructed_from_history():
+    """v0.7.0: migrating the Season 3 save rebuilds one snapshot per
+    completed season — 2028 from last_season, 2026/2027 from
+    race_history: Verstappen 261 in 2026 (Red Bull 329) and 210 in
+    2027 (Red Bull 300), Hamilton 143 in 2028 (Ferrari 221)."""
+    career = _load_s3_save()
+    if career is None:
+        pytest.skip("Season 3 save not present in this checkout")
+    snaps = career["season_snapshots"]
+    assert [s["year"] for s in snaps] == [2026, 2027, 2028]
+    by_year = {s["year"]: s for s in snaps}
+    s26, s27, s28 = by_year[2026], by_year[2027], by_year[2028]
+    assert s26["drivers"][0]["name"] == "Max Verstappen"
+    assert s26["drivers"][0]["points"] == 261
+    assert s26["drivers"][0]["wins"] == 9
+    assert s26["teams"][0]["name"] == "Red Bull"
+    assert s26["teams"][0]["points"] == 329
+    assert s27["drivers"][0]["name"] == "Max Verstappen"
+    assert s27["drivers"][0]["points"] == 210
+    assert s27["teams"][0]["name"] == "Red Bull"
+    assert s27["teams"][0]["points"] == 300
+    assert s28["drivers"][0]["name"] == "Lewis Hamilton"
+    assert s28["drivers"][0]["points"] == 143
+    assert s28["teams"][0]["name"] == "Ferrari"
+    assert s28["teams"][0]["points"] == 221
+    # A migrated save round-trips: migrating twice changes nothing.
+    again = migrate_save(json.loads(json.dumps(career)))
+    assert again["season_snapshots"] == career["season_snapshots"]
+
+
+def test_real_standings_load_and_season_detail():
+    """v0.7.0: the baked-in real 2010–2025 standings — 16 seasons,
+    371 driver rows, 169 constructor rows. 2025 shows Norris 423
+    and McLaren 833; Lotterer's 2014 row has a null pos; 2021 shows
+    the .5 points (Verstappen 395.5). Unknown years and in-game
+    years with no snapshot return None."""
+    assert len(game.REAL_STANDINGS) == 16
+    assert sum(len(v["drivers"]) for v in game.REAL_STANDINGS.values()) == 371
+    assert sum(len(v["constructors"]) for v in game.REAL_STANDINGS.values()) == 169
+    career = game.build_new_career("Test", "Matthew")
+    d25 = game.get_season_detail(career, 2025)
+    assert d25["source"] == "real"
+    assert d25["drivers"][0] == {"pos": 1, "name": "Lando Norris",
+                                 "team": "McLaren", "team_id": None,
+                                 "points": 423.0, "wins": 7}
+    assert d25["constructors"][0] == {"pos": 1, "name": "McLaren",
+                                      "points": 833.0, "wins": 14}
+    d14 = game.get_season_detail(career, 2014)
+    lotterer = next(d for d in d14["drivers"] if d["name"] == "André Lotterer")
+    assert lotterer["pos"] is None and lotterer["points"] == 0.0
+    d21 = game.get_season_detail(career, 2021)
+    verstappen = next(d for d in d21["drivers"] if d["name"] == "Max Verstappen")
+    assert verstappen["points"] == 395.5
+    assert game.get_season_detail(career, 2009) is None
+    assert game.get_season_detail(career, 2026) is None  # no season played yet
+    assert game.get_season_detail(career, "not a year") is None
+
+
+def test_season_detail_in_game_after_rollover():
+    """v0.7.0: after a season ends, its snapshot is the season
+    detail — full drivers' and constructors' standings, in order."""
+    career = game.build_new_career("Test", "Matthew")
+    game.end_of_season(career, rng=seeded(5))
+    d26 = game.get_season_detail(career, 2026)
+    assert d26 is not None and d26["source"] == "game"
+    assert d26["drivers"][0]["name"] == "Lando Norris"
+    assert d26["drivers"][0]["pos"] == 1
+    assert d26["constructors"][0]["name"] == "McLaren"
+    assert d26["constructors"][0]["pos"] == 1
+    assert len(d26["drivers"]) == 22 and len(d26["constructors"]) == 11
+    assert game.get_season_detail(career, 2027) is None
+
+def test_ws_season_detail_and_no_team_rep_on_wire():
+    """v0.7.0: over the real WebSocket, a season_detail request for
+    a real year returns the full standings (2025: Norris 423,
+    McLaren 833); an in-game year with no snapshot yet errors; and
+    no room_state broadcast ever carries team_rep."""
+    from fastapi.testclient import TestClient
+    from server import app
+
+    client = TestClient(app)
+
+    def recv_until(ws, want, limit=40, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({"type": "create_room", "nickname": "Matthew",
+                           "colour": "#e74c3c"})
+        joined = recv_until(host_ws, "joined")
+        host_ws.send_json({"type": "new_career", "name": "WS Career"})
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"] is not None)
+        career = state["room"]["career"]
+        assert all("team_rep" not in t for t in career["teams"])
+        assert "team_rep" not in json.dumps(career)
+        team_id = career["teams"][0]["id"]
+        host_ws.send_json({"type": "choose_team", "team_id": team_id})
+        host_ws.send_json({"type": "start_career"})
+        recv_until(host_ws, "room_state",
+                   check=lambda m: m["room"]["started"] is True)
+        # A real year: full standings, on demand.
+        host_ws.send_json({"type": "season_detail", "year": 2025})
+        detail = recv_until(host_ws, "season_detail")
+        assert detail["detail"]["year"] == 2025
+        assert detail["detail"]["source"] == "real"
+        assert detail["detail"]["drivers"][0]["name"] == "Lando Norris"
+        assert detail["detail"]["drivers"][0]["points"] == 423.0
+        assert detail["detail"]["constructors"][0]["name"] == "McLaren"
+        assert detail["detail"]["constructors"][0]["points"] == 833.0
+        # An in-game year with no snapshot yet: a clean error.
+        host_ws.send_json({"type": "season_detail", "year": 2026})
+        err = recv_until(host_ws, "error")
+        assert "No standings recorded" in err["message"]
