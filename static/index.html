@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.7.1</title>
+<title>F1 Team Manager Online — v0.7.2</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -148,7 +148,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.1 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.2 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -510,8 +510,13 @@ function renderOverlayBody(p){
     if(!r){ closePopup("gp", {silent:true}); return; }
     key = `gp:${r.year}:${r.round}:${(r.qual || []).length}:${(r.race || []).length}`;
     if(p.bodyKey === key) return;
+    // v0.7.2: a past Grand Prix renders that YEAR's relationships
+    // from the season snapshot — never the current live relations.
+    // A race in the current season has no snapshot yet (snapMap is
+    // null), and the live table it then renders is correct.
+    const snapMap = snapshotTeamMap(r.year);
     const tables = (r.qual && r.race)
-      ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true })}`
+      ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {teams: snapMap})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true, teams: snapMap })}`
       : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
     html = `${tables}<p><button class="secondary" id="btn-gp-back">← Back to history</button></p>`;
   } else if(p.id === "sign"){
@@ -541,23 +546,37 @@ function renderOverlayBody(p){
     // overlay pop-up like the full-GP view. A pos of null means
     // unclassified ("NC"); real points can be .5 (shortened races)
     // and print without a trailing .0 when whole.
+    // v0.7.2: the relationships shown here come from the SNAPSHOT,
+    // never from the live teams — the supplier suffix and JUNIOR
+    // badge are taken from the season's own record (the 2026
+    // standings show Cadillac under Ferrari, as it was then, even
+    // though it is supplied by Aston Martin now). A snapshot built
+    // before v0.7.2 has no relationship data and renders plain team
+    // names — no live fallback. Only the team COLOUR is still read
+    // live (colours never change).
     const d = seasonDetail;
     if(!d || d.year !== viewingSeason){ closePopup("season", {silent:true}); return; }
-    key = `season:${d.year}:${d.source}:${d.drivers.length}:${d.constructors.length}`;
+    key = `season:${d.year}:${d.source}:${d.drivers.length}:${d.constructors.length}:${d.constructors.map(c => (c.supplier_name || "") + "/" + (c.sup_stage || 0)).join(",")}`;
     if(p.bodyKey === key) return;
+    const snapById = {}, snapByName = {};
+    d.constructors.forEach(c => { if(c.id) snapById[c.id] = c; snapByName[c.name] = c; });
+    const snapTeam = entry => historyTeamObj(entry);
     const drvRows = d.drivers.map(r => {
-      const tm = r.team_id ? teamById(r.team_id) : (room && room.career ? room.career.teams.find(t => t.name === r.team) : null);
+      const entry = (r.team_id && snapById[r.team_id]) || snapByName[r.team] || null;
+      const tm = entry ? snapTeam(entry) : null;
       const col = tm ? tm.colour : null;
       return `<tr><td>${r.pos === null || r.pos === undefined ? "NC" : r.pos}</td><td>${driverNameHtml(r.name, col, 0, !!col, col)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team || "")}</td><td>${fmtPts(r.points)}</td><td>${r.wins}</td></tr>`;
     }).join("");
     const teamRows = d.constructors.map(r => {
-      const tm = room && room.career ? room.career.teams.find(t => t.name === r.name) : null;
+      const tm = snapTeam(r);
       const col = tm ? tm.colour : null;
       return `<tr><td>${r.pos === null || r.pos === undefined ? "NC" : r.pos}</td><td>${col ? `<span class="team-bar" style="color:${col}">|</span> <span class="colour-dot" style="background:${col}"></span>` : ""}${tm ? teamNameHtml(tm) : esc(r.name)}</td><td>${fmtPts(r.points)}</td><td>${r.wins}</td></tr>`;
     }).join("");
+    const relNote = d.source === "game" && !d.has_relations
+      ? `<p class="note">Team relationships were not recorded for this season (snapshots from before v0.7.2 carry none) — so no supplier is shown, rather than today's.</p>` : "";
     const realTag = d.source === "real" ? " (real F1)" : "";
     html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
-      `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>`;
+      `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>${relNote}`;
   }
   p.bodyKey = key;
   body.innerHTML = html;
@@ -768,17 +787,64 @@ function teamNameHtml(team){
   }
   return out;
 }
+/* v0.7.2 — HISTORY TEAM RESOLUTION. Every view that shows a PAST
+   season or round must render the team relationships as of THAT
+   year, never the live teams: a 2028 Cadillac is "Cadillac-Ferrari"
+   even though in 2029 it is supplied by Aston Martin. The season
+   snapshot for the year (see game.season_snapshot) carries each
+   team's supplier_id / supplier_name / sup_stage / supplies for
+   that year; snapshots built before v0.7.2 (2027/2028) and real
+   years (2010-2025) have no relationship data, and those render
+   plain names. Only the team COLOUR is still read live — colours
+   never change. Live views (current standings, Relations tab,
+   dashboard) keep using the live teams directly. */
+function snapshotForYear(year){
+  if(!room || !room.career) return null;
+  return (room.career.season_snapshots || []).find(s => s.year === year) || null;
+}
+/* The team object a history view renders, built from one snapshot
+   team entry: name + supplier data from the SNAPSHOT, colour from
+   the live team. Returns null when the entry is missing. */
+function historyTeamObj(entry){
+  if(!entry) return null;
+  const live = entry.id ? teamById(entry.id)
+    : (room && room.career ? room.career.teams.find(t => t.name === entry.name) : null);
+  return { name: entry.name, colour: live ? live.colour : null,
+           supplier_name: entry.supplier_name || null,
+           supplier_id: entry.supplier_id || null,
+           sup_stage: entry.sup_stage || 0 };
+}
+function snapshotTeamMap(year){
+  const snap = snapshotForYear(year);
+  if(!snap) return null;
+  const byId = {}, byName = {};
+  (snap.teams || []).forEach(t => { if(t.id) byId[t.id] = t; byName[t.name] = t; });
+  return { byId, byName };
+}
 /* Classification table (qualifying or race), gaps only — never absolute
    times. Race rows also get a G/L column (positions gained/lost vs
    qualifying) and medals for P1-P3. Rows carry driver_id/team_id/cha so
-   names can be coloured even for a revisited Grand Prix. */
+   names can be coloured even for a revisited Grand Prix.
+   v0.7.2: opts.teams is an optional snapshot map ({byId, byName}, from
+   snapshotTeamMap(year)) for a HISTORY table — the full-GP view of a
+   past race renders that year's relationships, never the live team.
+   Without it this is a live table (the current season's results),
+   where the live team is correct. */
 function classificationTable(rows, opts){
   opts = opts || {};
   const showPts = rows.length && "points" in rows[0];
   const showGL = !!opts.showGL;
+  const snapMap = opts.teams || null;
   const head = `<tr><th>POS</th><th>DRIVER</th><th>CAR</th><th>GAP</th>${showGL ? "<th>G/L</th>" : ""}${showPts ? "<th>PTS</th>" : ""}</tr>`;
   const body = rows.map(r => {
-    const team = r.team_id ? teamById(r.team_id) : null;
+    let team = null;
+    if(snapMap){
+      const entry = (r.team_id && snapMap.byId[r.team_id])
+        || snapMap.byName[r.team] || null;
+      team = historyTeamObj(entry);
+    } else {
+      team = r.team_id ? teamById(r.team_id) : null;
+    }
     const colour = team ? team.colour : null;
     const medal = r.pos === 1 ? "🥇" : r.pos === 2 ? "🥈" : r.pos === 3 ? "🥉" : "";
     let gl = "";
@@ -1221,19 +1287,35 @@ function renderGame(){
     // styling as the Standings tab.
     const rc = c.wb_recap;
     if(rc && rc.year){
+      // v0.7.2: the recap covers the season just finished — its
+      // team relationships come from that season's snapshot, not the
+      // live teams (a relation can already have changed during the
+      // winter break). A snapshot without relationship data renders
+      // plain names. The team COLOUR is always safe to read live.
+      const snap = snapshotForYear(rc.year);
+      const rcEntry = (teamId, teamName) => snap
+        ? ((snap.teams || []).find(t => (teamId && t.id === teamId) || t.name === teamName) || null)
+        : null;
+      const rcTeam = (teamId, teamName) => {
+        const entry = rcEntry(teamId, teamName);
+        return entry ? historyTeamObj(entry) : null;
+      };
+      const rcColour = (teamId, teamName) => {
+        const live = teamId ? teamById(teamId) : c.teams.find(t => t.name === teamName);
+        return live ? live.colour : null;
+      };
       const rcDrivers = (rc.drivers || []).map((d, i) => {
-        const tm = d.team_id ? teamById(d.team_id) : c.teams.find(t => t.name === d.team);
-        const col = tm ? tm.colour : null;
+        const tm = rcTeam(d.team_id, d.team);
+        const col = rcColour(d.team_id, d.team);
         return `<tr><td>${i + 1}</td><td>${driverNameHtml(d.name, col, 0, !!col, col)}</td><td>${tm ? teamNameHtml(tm) : esc(d.team || "")}</td><td>${d.points}</td><td>${d.wins || 0}</td></tr>`;
       }).join("");
       const rcTeams = (rc.teams || []).map((t, i) => {
-        const tm = teamById(t.id) || c.teams.find(x => x.name === t.name);
-        const col = tm ? tm.colour : null;
+        const tm = rcTeam(t.id, t.name);
+        const col = rcColour(t.id, t.name);
         return `<tr><td>${i + 1}</td><td>${col ? `<span class="team-bar" style="color:${col}">|</span> <span class="colour-dot" style="background:${col}"></span>` : ""}${tm ? teamNameHtml(tm) : esc(t.name)}</td><td>${t.points}</td><td>${t.wins || 0}</td></tr>`;
       }).join("");
       const rcWinners = (rc.winners || []).map(w => {
-        const tm = w.team_id ? teamById(w.team_id) : c.teams.find(t => t.name === w.team);
-        const col = tm ? tm.colour : null;
+        const col = rcColour(w.team_id, w.team);
         return `<tr><td>R${w.round}</td><td>${esc(w.circuit || "")}</td><td>${driverNameHtml(w.driver, col, 0, !!col, col)}</td></tr>`;
       }).join("");
       $("winter-recap").innerHTML = `<h3>Season ${rc.year} in review</h3>` +
@@ -1450,9 +1532,27 @@ function renderDriversTab(){
   const expired = isWB && c ? c.drivers.filter(d => d.status === "free" && d.last_team_id === t.id) : [];
   const expiredHtml = expired.length
     ? `<h3>Expired — re-sign</h3>` + expired.map(d => {
-        const slot = d.last_slot || "seat1";
-        const slotLabel = slot === "tr" ? "T&R" : (slot === "seat2" ? "Seat 2" : "Seat 1");
-        return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(expired ${slotLabel}, ${d.age}, ${money(d.salary)}/yr)</span> <button data-resign="${d.id}" data-slot="${slot}">Re-sign</button></div>`;
+        // v0.7.2: the re-sign is a SEAT PICKER like a normal market
+        // offer — Seat 1 / Seat 2 / T&R — not one button locked onto
+        // a single seat (the v0.7.1 row only offered the driver's
+        // old slot, which for a migrated save defaulted to Seat 1).
+        // Empty seats are selectable, an occupied seat is disabled
+        // and names its driver, and the driver's old seat is the
+        // suggested (primary) button when it is empty — otherwise
+        // the first empty seat. T&R is always offered (the fine
+        // warning shows in the sign pop-up, as in the market).
+        const oldSlot = d.last_slot || null;
+        const oldSeat = oldSlot === "seat2" ? 2 : oldSlot === "seat1" ? 1 : null;
+        const empty = t.empty_seats || [];
+        const suggested = oldSeat && empty.includes(oldSeat) ? oldSeat : (empty.length ? empty[0] : null);
+        const occupant = s => { const id = s === 1 ? t.driver1_id : t.driver2_id; return id ? driverById(id) : null; };
+        const seatBtn = s => {
+          const occ = occupant(s);
+          if(occ) return `<button disabled title="Occupied by ${esc(occ.name)}">Re-sign Seat ${s} — occupied</button>`;
+          return `<button${suggested === s ? "" : ` class="secondary"`} data-resign="${d.id}" data-seat="${s}" title="${suggested === s ? "Their old seat — suggested" : ""}">Re-sign Seat ${s}</button>`;
+        };
+        const slotLabel = oldSlot === "tr" ? "T&R" : (oldSlot === "seat2" ? "Seat 2" : (oldSlot === "seat1" ? "Seat 1" : "seat unknown"));
+        return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(expired ${slotLabel}, ${d.age}, ${money(d.salary)}/yr)</span> ${seatBtn(1)} ${seatBtn(2)} <button class="secondary" data-resign="${d.id}" data-seat="tr">Re-sign T&R</button></div>`;
       }).join("")
     : "";
   box.innerHTML = `<p class="note">Your full roster — main drivers, Test &amp; Reserve, and academy juniors. Make lineup decisions here: swap or promote a T&R driver, drop a driver (break fee), or release an academy junior (free).</p>` +
@@ -1473,27 +1573,20 @@ function renderDriversTab(){
       () => send({type:"swap_driver", seat: parseInt(b.dataset.seat), tr_driver_id: b.dataset.swapTr})));
   box.querySelectorAll("[data-promote-tr]").forEach(b => b.onclick = () =>
     send({type:"promote_tr", tr_driver_id: b.dataset.promoteTr, seat: parseInt(b.dataset.seat)}));
-  // v0.7.1: "Re-sign" — a shortcut to a normal winter-break offer
-  // for an expired driver. It sets pendingSign the same way the
-  // market's Offer buttons do (the slot they held: seat 1 / seat 2
-  // / T&R), so the contract picker and the 3-offer limit apply
-  // exactly as they do for a market offer. The TARGET seat is the
-  // team's currently-empty seat: an expired Seat 1 driver is
-  // usually re-signed into the empty Seat 2, because the rollover
-  // shifts the remaining driver up into Seat 1 — and a winter-break
-  // offer to an occupied seat is silently skipped at resolution, so
-  // offering them into their old seat number would waste the offer.
+  // v0.7.2: "Re-sign" — a seat picker, like a normal market offer.
+  // Each button carries the seat it targets (Seat 1 / Seat 2 /
+  // T&R); the click just sets pendingSign with that seat, so the
+  // contract picker and the 3-offer limit apply exactly as they do
+  // for a market offer. Occupied seats are disabled in the row, so
+  // they never reach the picker.
   box.querySelectorAll("[data-resign]").forEach(b => b.onclick = () => {
     const d = driverById(b.dataset.resign);
     if(!d) return;
-    const slot = b.dataset.slot || "seat1";
-    if(slot === "tr"){
+    const seat = b.dataset.seat;
+    if(seat === "tr"){
       pendingSign = { driver_id: d.id, target: "tr", seat: null, wb: true };
     } else {
-      const oldSeat = slot === "seat2" ? 2 : 1;
-      const empty = t.empty_seats || [];
-      const seat = empty.includes(oldSeat) ? oldSeat : (empty.length ? empty[0] : oldSeat);
-      pendingSign = { driver_id: d.id, target: "seat", seat, wb: true };
+      pendingSign = { driver_id: d.id, target: "seat", seat: parseInt(seat), wb: true };
     }
     renderTabs();
   });
@@ -1632,7 +1725,23 @@ function renderRelationsTab(box){
       html += `<p class="note">Your team already has a supplier, so it can't offer supply contracts to other teams. (A customer or junior team can't be a supplier itself.)</p>`;
     } else {
       const others = c.teams.filter(x => x.id !== myTeamId);
-      html += `<p class="note">Propose a deal — the other team must accept. Nothing → Customer → Junior, one step at a time; a team has one supplier, and a supplier has at most one junior team. Pick 1–4 contract years.</p><select class="rel-propose-team">${others.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("")}</select> <select class="rel-propose-kind"><option value="customer">Customer</option><option value="junior">Junior</option></select> <select class="rel-propose-role"><option value="me">I supply them</option><option value="them">They supply me</option></select> <select class="rel-propose-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> yrs <button data-rel-propose>Propose</button>`;
+      const suppliesAny = id => c.teams.some(y => y.supplier_id === id);
+      const mySupplies = suppliesAny(myTeamId);
+      // v0.7.2: a team that already supplies other teams cannot be
+      // proposed as a customer or junior — a team is either a parent
+      // or a child, never both, no supply chains. Which side the
+      // rule bites depends on the role: with "I supply them" the
+      // TARGET would become a customer, so targets that already
+      // supply others are disabled (the role select re-enables them
+      // for "They supply me" — there the target is the supplier,
+      // and the rule bites MY team instead, so that role is disabled
+      // if my team already supplies others). The server rejects it
+      // too, and re-checks on accept.
+      const teamOptions = others.map(x => {
+        const s = suppliesAny(x.id);
+        return `<option value="${x.id}" data-supplies="${s ? 1 : 0}"${s ? ` title="${esc(x.name)} already supplies other teams — it can't become a customer or junior team"` : ""}>${esc(x.name)}${s ? " — already supplies teams" : ""}</option>`;
+      }).join("");
+      html += `<p class="note">Propose a deal — the other team must accept. Nothing → Customer → Junior, one step at a time; a team has one supplier, and a supplier has at most one junior team. A team that already supplies other teams can't become a customer or junior — and if your team supplies others, it can't be supplied itself. Pick 1–4 contract years.</p><select class="rel-propose-team">${teamOptions}</select> <select class="rel-propose-kind"><option value="customer">Customer</option><option value="junior">Junior</option></select> <select class="rel-propose-role"><option value="me">I supply them</option><option value="them"${mySupplies ? ` disabled title="Your team already supplies other teams — it can't be supplied itself"` : ""}>They supply me${mySupplies ? " — your team already supplies others" : ""}</option></select> <select class="rel-propose-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> yrs <button data-rel-propose>Propose</button>`;
     }
   } else {
     html += `<p class="note">New relations are proposed in the winter break.</p>`;
@@ -1711,6 +1820,28 @@ function renderRelationsTab(box){
     if(!sel || !sel.value || !amount || amount <= 0){ showErr("game-err", "Pick a team and an amount over $0M."); return; }
     send({type:"donate", recipient_team_id: sel.value, amount});
   };
+  // v0.7.2: the propose-target disabling depends on the role —
+  // with "I supply them" the target would become a customer, so a
+  // target that already supplies others is disabled; with "They
+  // supply me" the target is the supplier, so it is enabled.
+  const roleSel0 = box.querySelector(".rel-propose-role");
+  const teamSel0 = box.querySelector(".rel-propose-team");
+  if(roleSel0 && teamSel0){
+    const syncProposeTargets = () => {
+      const asCustomer = roleSel0.value === "me";
+      let selectedOk = false;
+      teamSel0.querySelectorAll("option").forEach(o => {
+        o.disabled = o.dataset.supplies === "1" && asCustomer;
+        if(!o.disabled && o.selected) selectedOk = true;
+      });
+      if(!selectedOk){
+        const first = teamSel0.querySelector("option:not([disabled])");
+        if(first) first.selected = true;
+      }
+    };
+    roleSel0.onchange = syncProposeTargets;
+    syncProposeTargets();
+  }
   const proposeBtn = box.querySelector("[data-rel-propose]");
   if(proposeBtn) proposeBtn.onclick = () => {
     const teamSel = box.querySelector(".rel-propose-team");
@@ -1718,6 +1849,17 @@ function renderRelationsTab(box){
     const roleSel = box.querySelector(".rel-propose-role");
     const yearsSel = box.querySelector(".rel-propose-years");
     if(!teamSel || !teamSel.value){ showErr("game-err", "Pick a team to propose to."); return; }
+    const target = teamById(teamSel.value);
+    // v0.7.2: client-side mirror of the server rule (no supply
+    // chains — a team is either a parent or a child).
+    if(roleSel.value === "me" && c.teams.some(y => y.supplier_id === teamSel.value)){
+      showErr("game-err", `${target ? target.name : "That team"} already supplies other teams — it can't become a customer or junior team.`);
+      return;
+    }
+    if(roleSel.value === "them" && c.teams.some(y => y.supplier_id === myTeamId)){
+      showErr("game-err", "Your team already supplies other teams — it can't be supplied itself.");
+      return;
+    }
     send({type:"propose_relation", target_team_id: teamSel.value, kind: kindSel.value,
           supplier_team_id: roleSel.value === "me" ? myTeamId : teamSel.value,
           years: yearsSel ? parseInt(yearsSel.value) : 2});
@@ -2018,8 +2160,22 @@ function renderTabs(){
   const champs = (c.champion_history || []).length
     ? `<div class="table-scroll"><table><tr><th>Year</th><th>Driver</th><th>Age</th><th>Car</th><th>Pts</th><th>Trophies</th><th>Winning team</th></tr>` +
       (c.champion_history || []).map(h => {
-        const tm = c.teams.find(t => t.name === h.team);
-        const wt = c.teams.find(t => t.name === h.winning_team);
+        // v0.7.2: the Car and Winning-team columns render that YEAR's
+        // relationships from its season snapshot — a 2028 Cadillac
+        // shows Ferrari (as it was then), not today's supplier, and
+        // a real year (2010-2025) shows a plain name in the live
+        // colour only, never today's supply suffix either.
+        const snap = h.year >= 2026 ? snapshotForYear(h.year) : null;
+        const teamDisplay = name => {
+          if(snap){
+            const entry = (snap.teams || []).find(t => t.name === name);
+            return entry ? historyTeamObj(entry) : null;
+          }
+          const live = c.teams.find(t => t.name === name);
+          return live ? { name: live.name, colour: live.colour } : null;
+        };
+        const tm = teamDisplay(h.team);
+        const wt = teamDisplay(h.winning_team);
         const age = (h.age === null || h.age === undefined) ? "—" : h.age;
         const trophies = (h.trophies === null || h.trophies === undefined) ? "—" : `🏆 x${h.trophies}`;
         const yearCell = yearClickable(h.year)
@@ -2031,7 +2187,7 @@ function renderTabs(){
   // (The full-GP view is an overlay pop-up now — clicking a cell
   // sets viewingGP and syncOverlays opens the panel; the "Back to
   // history" button inside it is wired by the #ov-root delegation.)
-  $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance is based on age, titles, and how much of the team's points each driver scored — the same formula as the original game.</p></div>`;
+  $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance starts at age 30 and rises gently with age — but a driver in a better position is less likely to go: performing well, scoring a big share of the team's points, in a frontrunning car, with a high reputation, or in a team on the way up. There is no maximum retirement age — a driver still performing at 50+ stays.</p></div>`;
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
   // v0.7.0: clicking a champion year asks the server for that
   // season's full standings (see the season_detail message).
