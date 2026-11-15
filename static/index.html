@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.7.0</title>
+<title>F1 Team Manager Online — v0.7.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -58,11 +58,15 @@
   .gl-down { color:#f85149; font-weight:700; }
   .medal { font-size:16px; }
   /* v0.3 compact Driver Market: dense rows so 55+ drivers do not take
-     forever to scroll. Market buttons stay tappable (40px) but are
-     smaller than the global 44px action buttons, and the two seat
-     buttons sit side by side in one cell. */
-  .market-table td, .market-table th { padding:4px 6px; font-size:13px; }
-  .market-table button { min-height:40px; padding:6px 8px; font-size:12px; margin:2px 4px 2px 0; }
+     forever to scroll. v0.7.1: denser still (12px rows, 34px buttons)
+     and the list is grouped by source — F1 free agents / F2 /
+     other teams' drivers (poaching) — each with a small header, so
+     the whole list scans in one glance. Market buttons stay tappable
+     but are smaller than the global 44px action buttons, and the two
+     seat buttons sit side by side in one cell. */
+  .market-table td, .market-table th { padding:2px 6px; font-size:12px; }
+  .market-table button { min-height:34px; padding:4px 8px; font-size:12px; margin:2px 4px 2px 0; }
+  .market-group { margin:10px 0 3px; font-size:13px; color:#8b949e; text-transform:uppercase; letter-spacing:.5px; }
   .market-seats { display:flex; gap:6px; flex-wrap:wrap; }
   .market-seat { display:flex; flex-direction:column; align-items:flex-start; }
   .market-seat .note { font-size:12px; }
@@ -144,7 +148,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.0 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -1316,15 +1320,28 @@ function renderMyTeam(){
     ? `<br><span class="note">🤝 ${relSupplier ? `Supplier: ${esc(relSupplier.name)} (${t.sup_stage === 2 ? "Junior" : "Customer"}, ${t.relation_years} yr${t.relation_years === 1 ? "" : "s"} left)` : "No supplier"}${relSuppliedCount ? ` · Supplies ${relSuppliedCount} team${relSuppliedCount === 1 ? "" : "s"}` : ""} — see the Relationships tab.</span>`
     : "";
   const trs = t.tr_drivers || [];
+  // v0.7.1: illness / injury notice — shown on the dashboard BEFORE
+  // qualifying, naming the driver, whether they are ill or injured,
+  // and how many races they will miss, plus who is standing in for
+  // them (the substitute races as a normal main driver). The ill
+  // driver sits in T&R while they recover.
+  const illNotice = trs.filter(d => d.ill_until_round).map(d => {
+    const sub = (t.drivers || []).find(x => x.ill_sub_for === d.id);
+    // The swap hint only shows when a fit T&R driver exists to swap
+    // in — with exactly one T&R driver that one is already the sub.
+    const swapHint = trs.some(x => !x.ill_until_round)
+      ? " Pick a different T&R driver in the Drivers tab if you prefer (free swap)." : "";
+    return `<br><span class="note">🤒 <b>${esc(d.name)}</b> is ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}${sub ? ` — ${esc(sub.name)} is standing in for them.` : " — no substitute available."}${swapHint}</span>`;
+  }).join("");
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
-    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}${reliabilityLine}<br>${drivers}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
+    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}${reliabilityLine}<br>${drivers}${illNotice}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
   // v0.5: driver development factor (main 2 + T&R) — the same
   // helpers do_develop uses, so the number shown is the number
   // Develop Parts applies. Per-driver breakdown, compact.
   const devDrivers = [...(t.drivers || []), ...trs].filter(Boolean);
   const devLine = (t.dev_factor !== undefined && t.dev_factor !== null)
     ? `<p class="note">Driver development: <b>×${Number(t.dev_factor).toFixed(2)}</b> — ${devDrivers.map(d => `${splitName(d.name).last.toUpperCase()} +${Number(d.dev_contrib || 0).toFixed(3)}`).join(", ")}</p>` : "";
-  $("my-pools").innerHTML = `<p class="note">Banked research: Performance ${Number(t.perf_res || 0).toFixed(2)} · Reliability ${Number(t.reli_res || 0).toFixed(2)} · Reg research ${Number(t.reg_research || 0).toFixed(2)} $M${trs.length ? ` · T&R research bonus ×${(1 + 0.25 * trs.length).toFixed(2)}` : ""}</p>${devLine}`;
+  $("my-pools").innerHTML = `<p class="note">Banked research: Performance ${Number(t.perf_res || 0).toFixed(2)} · Reliability ${Number(t.reli_res || 0).toFixed(2)} · Reg research ${Number(t.reg_research || 0).toFixed(2)} $M${trs.filter(d => !d.ill_until_round).length ? ` · T&R research bonus ×${(1 + 0.25 * trs.filter(d => !d.ill_until_round).length).toFixed(2)}` : ""}</p>${devLine}`;
   if(t.finances){
     const f = t.finances;
     // v0.4.2: the per-race extra charges (T&R fine, academy
@@ -1376,6 +1393,8 @@ function renderDriversTab(){
   if(!box) return;
   if(!myTeam){ box.innerHTML = "<p class='note'>You have no team yet — take over an AI team from the lobby.</p>"; return; }
   const t = myTeam;
+  const c = room.career;
+  const isWB = c && c.phase === "winter_break";
   const col = t.colour;
   const emptySeats = t.empty_seats || [];
   const trs = t.tr_drivers || [];
@@ -1396,20 +1415,48 @@ function renderDriversTab(){
     const did = t["driver" + seat + "_id"];
     const d = did ? (t.drivers || []).find(x => x.id === did) : null;
     if(!d) return `<div class="bar-row"><b>Seat ${seat}</b> — <span class="note">empty — sign a driver from the Driver Market, or promote a T&R driver below.</span></div>`;
-    return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span> ${dropBtn(d)}</div>`;
+    // v0.7.1: a substitute standing in for an ill driver is marked
+    // as such — the seat belongs to the ill driver, who returns when
+    // they recover.
+    const subNote = d.ill_sub_for ? ` <span class="note">(standing in for ${esc((driverById(d.ill_sub_for) || {}).name || "an ill driver")})</span>` : "";
+    return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>${subNote} ${dropBtn(d)}</div>`;
   }).join("");
   const trHtml = trs.length ? trs.map(d =>
+    // v0.7.1: an ill driver recovering in T&R is shown with the
+    // illness and the round they return — with NO Swap/Promote or
+    // Drop buttons (they cannot race, and cannot be released, until
+    // they recover; the server refuses both).
     `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>` +
-    (emptySeats.length
-      ? emptySeats.map(s => ` <button data-promote-tr="${d.id}" data-seat="${s}">Promote to Seat ${s}</button>`).join("")
-      : [1, 2].map(s => ` <button data-swap-tr="${d.id}" data-seat="${s}">Swap with Seat ${s}</button>`).join("")) +
-    ` ${dropBtn(d)}</div>`
+    (d.ill_until_round
+      ? ` <span class="note">🤒 ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}</span>`
+      : (emptySeats.length
+        ? emptySeats.map(s => ` <button data-promote-tr="${d.id}" data-seat="${s}">Promote to Seat ${s}</button>`).join("")
+        : [1, 2].map(s => ` <button data-swap-tr="${d.id}" data-seat="${s}">Swap with Seat ${s}</button>`).join("")) +
+      ` ${dropBtn(d)}`) + `</div>`
   ).join("") : `<p class="note">No T&R drivers — sign one from the Driver Market (paid in full, +25% research each).</p>`;
   const acHtml = acs.length ? acs.map(d =>
     `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span> <button class="secondary" data-release-academy="${d.id}">Release</button></div>`
   ).join("") : `<p class="note">No academy drivers yet — add a free-agent or F2 driver aged 25 or under from the Driver Market (🎓 Academy button).</p>`;
+  // v0.7.1: expired drivers, winter break only — a team's main +
+  // T&R drivers whose contracts ended stay listed under their old
+  // team (last_team_id) with a "Re-sign" button. It is a shortcut to
+  // a normal winter-break offer, NOT a lock-in: it opens the same
+  // 1–4 year contract picker as the market (at the driver's salary),
+  // counts toward the 3-offers-per-round limit, and other teams can
+  // still offer the driver — they sign with the best-placed
+  // constructors' team that offered them. A driver who signed
+  // elsewhere in the meantime is free no longer, so they leave
+  // this list.
+  const expired = isWB && c ? c.drivers.filter(d => d.status === "free" && d.last_team_id === t.id) : [];
+  const expiredHtml = expired.length
+    ? `<h3>Expired — re-sign</h3>` + expired.map(d => {
+        const slot = d.last_slot || "seat1";
+        const slotLabel = slot === "tr" ? "T&R" : (slot === "seat2" ? "Seat 2" : "Seat 1");
+        return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(expired ${slotLabel}, ${d.age}, ${money(d.salary)}/yr)</span> <button data-resign="${d.id}" data-slot="${slot}">Re-sign</button></div>`;
+      }).join("")
+    : "";
   box.innerHTML = `<p class="note">Your full roster — main drivers, Test &amp; Reserve, and academy juniors. Make lineup decisions here: swap or promote a T&R driver, drop a driver (break fee), or release an academy junior (free).</p>` +
-    `<h3>Main drivers</h3>${mainHtml}<h3>Test &amp; Reserve</h3>${trHtml}<h3>🎓 Driver Academy</h3>${acHtml}`;
+    `<h3>Main drivers</h3>${mainHtml}<h3>Test &amp; Reserve</h3>${trHtml}<h3>🎓 Driver Academy</h3>${acHtml}${expiredHtml}`;
   // Drop a main or T&R driver: confirm with the exact break fee.
   box.querySelectorAll("[data-drop-driver]").forEach(b => b.onclick = () => {
     const d = (t.drivers || []).concat(trs).find(x => x.id === b.dataset.dropDriver);
@@ -1426,6 +1473,30 @@ function renderDriversTab(){
       () => send({type:"swap_driver", seat: parseInt(b.dataset.seat), tr_driver_id: b.dataset.swapTr})));
   box.querySelectorAll("[data-promote-tr]").forEach(b => b.onclick = () =>
     send({type:"promote_tr", tr_driver_id: b.dataset.promoteTr, seat: parseInt(b.dataset.seat)}));
+  // v0.7.1: "Re-sign" — a shortcut to a normal winter-break offer
+  // for an expired driver. It sets pendingSign the same way the
+  // market's Offer buttons do (the slot they held: seat 1 / seat 2
+  // / T&R), so the contract picker and the 3-offer limit apply
+  // exactly as they do for a market offer. The TARGET seat is the
+  // team's currently-empty seat: an expired Seat 1 driver is
+  // usually re-signed into the empty Seat 2, because the rollover
+  // shifts the remaining driver up into Seat 1 — and a winter-break
+  // offer to an occupied seat is silently skipped at resolution, so
+  // offering them into their old seat number would waste the offer.
+  box.querySelectorAll("[data-resign]").forEach(b => b.onclick = () => {
+    const d = driverById(b.dataset.resign);
+    if(!d) return;
+    const slot = b.dataset.slot || "seat1";
+    if(slot === "tr"){
+      pendingSign = { driver_id: d.id, target: "tr", seat: null, wb: true };
+    } else {
+      const oldSeat = slot === "seat2" ? 2 : 1;
+      const empty = t.empty_seats || [];
+      const seat = empty.includes(oldSeat) ? oldSeat : (empty.length ? empty[0] : oldSeat);
+      pendingSign = { driver_id: d.id, target: "seat", seat, wb: true };
+    }
+    renderTabs();
+  });
   box.querySelectorAll("[data-release-academy]").forEach(b => b.onclick = () => {
     const d = driverById(b.dataset.releaseAcademy);
     openConfirm("Release from the academy?",
@@ -1733,7 +1804,12 @@ function renderTabs(){
   // team's driver (main or T&R) by paying that driver's break fee —
   // the poaching section lists them with their team. In the winter
   // break the same buttons make OFFERS instead (max 3 per round).
-  const market = [...c.drivers.filter(d => d.status === "free"), ...c.drivers.filter(d => d.status === "f2")];
+  // v0.7.1: the market is grouped by source — F1 free agents, then
+  // F2 drivers, then other teams' drivers (poaching) — each group
+  // its own small table with a group header. The rows are unchanged
+  // (same columns, same buttons), only the layout is denser.
+  const freeAgents = c.drivers.filter(d => d.status === "free");
+  const f2List = c.drivers.filter(d => d.status === "f2");
   const poachable = c.drivers.filter(d => (d.status === "f1" || d.status === "tr") && d.team_id && d.team_id !== myTeamId);
   const marketCosts = c.market_costs || {};
   const costCell = (d, key, label) => {
@@ -1799,6 +1875,10 @@ function renderTabs(){
     }
     return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}${wantedBadge}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
   };
+  // v0.7.1: an ill driver sitting in T&R while they recover does not
+  // count toward the fine the market warns about (the server counts
+  // FIT T&R drivers only).
+  const activeTrCount = myTeam && myTeam.tr_drivers ? myTeam.tr_drivers.filter(d => !d.ill_until_round).length : 0;
   $("market-box").innerHTML =
     `<p class="note">${isWB
       ? "Winter break: tap a button to add an OFFER for this round (max 3 offers, max 2 main seats, max 1 T&R). Submit them from the winter-break card, then hit NEXT. A driver signs with the best-placed constructors' team that offered them."
@@ -1806,11 +1886,13 @@ function renderTabs(){
     // v0.4.2: the T&R fine warning, as one line above the table
     // (not in every row — the rows must stay compact): what signing
     // one more T&R driver would cost this team per race.
-    (myTeam && (myTeam.tr_drivers || []).length >= 2
-      ? `<p class="note">⚠ Your team already has ${(myTeam.tr_drivers || []).length} T&R drivers — signing another would add a ${money(0.5 * (Math.pow(2, (myTeam.tr_drivers || []).length + 1 - 2) - 1))}/race T&R fine (exponential beyond the first 2).</p>` : "") +
-    `<h3>Free agents &amp; F2</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
-    market.map(marketRow).join("") + `</table></div>` +
-    (isWB ? "" : `<h3>Other teams' drivers — poaching</h3><p class="note">Signing one of these costs their break fee (shown), on top of any seat break fee.</p><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Team</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    (myTeam && activeTrCount >= 2
+      ? `<p class="note">⚠ Your team already has ${activeTrCount} T&R drivers — signing another would add a ${money(0.5 * (Math.pow(2, activeTrCount + 1 - 2) - 1))}/race T&R fine (exponential beyond the first 2).</p>` : "") +
+    `<h3 class="market-group">F1 free agents (${freeAgents.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    freeAgents.map(marketRow).join("") + `</table></div>` +
+    `<h3 class="market-group">F2 (${f2List.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    f2List.map(marketRow).join("") + `</table></div>` +
+    (isWB ? "" : `<h3 class="market-group">Other teams' drivers — poaching</h3><p class="note">Signing one of these costs their break fee (shown), on top of any seat break fee.</p><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Team</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
     poachable.map(marketRow).join("") + `</table></div>`);
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => {
     pendingSign = { driver_id: b.dataset.sign, target: b.dataset.target, seat: b.dataset.seat ? parseInt(b.dataset.seat) : null, wb: isWB };
@@ -1859,7 +1941,20 @@ function renderTabs(){
     || (a.best_pos || 99) - (b.best_pos || 99)
     || (a.best_finish_round || 99) - (b.best_finish_round || 99)
     || prevTeamRank(a) - prevTeamRank(b) || a.name.localeCompare(b.name));
-  const f2 = [...c.drivers.filter(d => d.status === "f2")].sort(drvSort);
+  // v0.7.1: an F2 driver promoted to F1 mid-season STAYS listed in
+  // the F2 standings with their points frozen at departure (f2_left
+  // + the frozen tally) and an "↑ F1" tag. The F2 sim only races
+  // status == "f2" drivers, so they score no more F2 points. Sorted
+  // by the effective values — live for drivers still in F2, frozen
+  // for those who left — mirroring the server's f2_standings.
+  const f2Val = d => d.f2_left
+    ? { pts: d.f2_points || 0, wins: d.f2_wins || 0, best: d.f2_best_pos, round: d.f2_best_finish_round }
+    : { pts: d.points, wins: d.season_wins || 0, best: d.best_pos, round: d.best_finish_round };
+  const f2 = [...c.drivers.filter(d => d.status === "f2" || d.f2_left)].sort((a, b) => {
+    const av = f2Val(a), bv = f2Val(b);
+    return bv.pts - av.pts || bv.wins - av.wins || (av.best || 99) - (bv.best || 99)
+      || (av.round || 99) - (bv.round || 99) || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name);
+  });
   // v0.5: F2 drivers are coloured by their academy F1 team
   // (academy_team_id); juniors with no academy team stay neutral,
   // like free agents in the F1 table. Same sort and listing as before.
@@ -1868,7 +1963,7 @@ function renderTabs(){
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td><td>${t.season_wins || 0}</td></tr>`).join("") + "</table></div>" +
     `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const nameColour = atm ? atm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!atm, atm ? atm.colour : null)}</td><td>${atm ? teamNameHtml(atm) : "—"}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
+    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const nameColour = atm ? atm.colour : null; const v = f2Val(d); const f1Tag = d.f2_left ? ` <span class="pill adv">↑ F1</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!atm, atm ? atm.colour : null)}${f1Tag}</td><td>${atm ? teamNameHtml(atm) : "—"}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
   // Chart
   if(room.chart_on){
     const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
