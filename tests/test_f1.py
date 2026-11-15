@@ -396,7 +396,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 11  # v0.7.0 save format
+        assert loaded["version"] == 12  # v0.7.1 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -2333,7 +2333,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 11
+        assert loaded["version"] == 12
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2441,15 +2441,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v070():
-    """The live version string is v0.7.0 everywhere it is shown."""
+def test_health_reports_v071():
+    """The live version string is v0.7.1 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.7.0"
+    assert client.get("/api/health").json()["version"] == "v0.7.1"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.7.0</title>" in html
-    assert "Online · v0.7.0 beta" in html
+    assert "<title>F1 Team Manager Online — v0.7.1</title>" in html
+    assert "Online · v0.7.1 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3059,7 +3059,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 11
+    assert SAVE_VERSION == 12
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -4769,14 +4769,14 @@ def test_research_cap_removed_v066():
         assert "research_spent_season" not in t
 
 
-def test_migration_v8_to_v11():
-    """v0.7.0 (save v11): an old v8 save backfills the 2026 relations
+def test_migration_v8_to_v12():
+    """v0.7.1 (save v12): an old v8 save backfills the 2026 relations
     (Mercedes -> McLaren/Williams/Alpine customer, Red Bull ->
     Racing Bulls junior, Ferrari -> Haas/Cadillac customer, 2 years)
     and the new fields default correctly (break_notice None, junior
     share 0, donation_requests []); a v9 save carrying the removed
     research-cap fields loads without them; a save round-trips at
-    version 11."""
+    version 12."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save, save_career
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
@@ -4830,7 +4830,7 @@ def test_migration_v8_to_v11():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 11
+    assert SAVE_VERSION == 12
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -5501,7 +5501,11 @@ def test_relationships_tab_renders():
             page.click('[data-tab="market"]')
             page.wait_for_selector("#tab-market:not(.hidden)", timeout=15000)
             market = page.inner_text("#tab-market")
-            assert "Free agents" in market, market
+            # v0.7.1: the market is grouped by source — the headers
+            # are uppercased by CSS, so inner_text (rendered text)
+            # shows them in caps.
+            assert "F1 FREE AGENTS" in market, market
+            assert "F2 (" in market, market
             browser.close()
         assert not errors, errors
     finally:
@@ -6567,3 +6571,705 @@ def test_ws_season_detail_and_no_team_rep_on_wire():
         host_ws.send_json({"type": "season_detail", "year": 2026})
         err = recv_until(host_ws, "error")
         assert "No standings recorded" in err["message"]
+
+
+# ---------------------------------------------------------------------------
+# v0.7.1 — random driver illness / injury, the driver-reputation
+# redesign, the F2 champion boost, F2 drivers promoted mid-season
+# staying in the F2 standings, re-signing an expired driver from the
+# Drivers tab, and the compact driver market.
+# ---------------------------------------------------------------------------
+
+class _ScriptedIllnessRng:
+    """Feeds roll_illness a scripted random() sequence (one value per
+    main driver, in the order roll_illness visits them), a fixed
+    duration for randint, and the first option for choice — so an
+    illness can be forced on exactly one driver, deterministically
+    (the 0.5% roll itself is covered by the statistical test below)."""
+
+    def __init__(self, rolls, duration=1):
+        self.rolls = list(rolls)
+        self.duration = duration
+
+    def random(self):
+        return self.rolls.pop(0) if self.rolls else 0.99
+
+    def randint(self, a, b):
+        return self.duration
+
+    def choice(self, seq):
+        return seq[0]
+
+
+def _illness_rolls_for(career, ill_driver_id):
+    """A rolls list for _ScriptedIllnessRng that falls ill only on
+    ill_driver_id (0.0 there, 0.99 everywhere else), in the order
+    roll_illness visits the main drivers (teams in order, seat 1
+    then seat 2)."""
+    rolls = []
+    for team in career["teams"]:
+        for seat in (1, 2):
+            did = team["driver1_id"] if seat == 1 else team["driver2_id"]
+            rolls.append(0.0 if did == ill_driver_id else 0.99)
+    return rolls
+
+
+def _raced_ids(career):
+    return [r["driver_id"] for r in career.get("last_race") or []]
+
+
+def test_illness_probability_about_half_percent():
+    """v0.7.1: each F1 main driver has a 0.5% chance per race round —
+    about one incident a season across the whole 22-driver grid.
+    Over 200 seeded careers (4,400 driver-rounds) the count should
+    sit near the expected 22, well inside 5–40."""
+    total = 0
+    for seed in range(200):
+        career = game.build_new_career("Test", "Matthew")
+        total += len(game.roll_illness(career, rng=random.Random(seed)))
+    assert 5 <= total <= 40, total
+
+
+def test_illness_blocks_driver_substitute_races_then_returns():
+    """v0.7.1: a forced 2-race illness (McLaren's Norris, round 1)
+    takes the driver out of the seat — 0 points, no f1_races, no rep
+    change — while the best T&R driver stands in and races as a
+    normal main driver; when the illness ends the driver is back in
+    the seat and the substitute is back in T&R."""
+    from f1.rules import ILLNESS_CHANCE
+    assert ILLNESS_CHANCE == 0.005
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    assert norris["name"] == "Lando Norris"
+    trs_before = game.team_tr_drivers(career, mclaren)
+    assert len(trs_before) >= 2
+    # The provisional stand-in is the highest-reputation fit T&R
+    # driver (same order as the code: rep desc, then name).
+    best_tr = sorted(trs_before, key=lambda d: (-d["rep"], d["name"]))[0]
+    rep_before = norris["rep"]
+    newly = game.roll_illness(
+        career, rng=_ScriptedIllnessRng(
+            _illness_rolls_for(career, norris["id"]), duration=2))
+    assert newly == [norris]
+    # The ill driver is out of the seat, in T&R, with the illness
+    # recorded — and the announcement names them and the length.
+    assert norris["status"] == "tr"
+    assert norris["ill_until_round"] == 2
+    assert norris["ill_label"] == "ill"
+    assert norris["ill_seat"] == 1
+    assert mclaren["driver1_id"] == best_tr["id"]
+    assert best_tr["status"] == "f1"
+    assert best_tr["ill_sub_for"] == norris["id"]
+    assert best_tr["ill_sub_from"] == "tr"
+    assert norris["ill_sub_id"] == best_tr["id"]
+    assert any("Lando Norris is ill and will miss the next 2 races"
+               in line for line in career["transfers"])
+    assert any(best_tr["name"] in line and "standing in" in line
+               for line in career["transfers"])
+    # Round 1: the substitute races (finisher or DNF row), the ill
+    # driver does not — no f1_races, no rep change for them.
+    game.run_race_weekend(career, rng=seeded(11))
+    assert best_tr["id"] in _raced_ids(career)
+    assert norris["id"] not in _raced_ids(career)
+    assert norris["f1_races"] == 0
+    assert best_tr["f1_races"] == 1
+    assert norris["rep"] == rep_before
+    game.complete_race_weekend(career, rng=seeded(12))
+    assert career["round"] == 2
+    # Round 2: still out.
+    assert norris["status"] == "tr" and norris["ill_until_round"] == 2
+    game.run_race_weekend(career, rng=seeded(13))
+    assert norris["id"] not in _raced_ids(career)
+    assert best_tr["id"] in _raced_ids(career)
+    assert norris["f1_races"] == 0
+    assert best_tr["f1_races"] == 2
+    game.complete_race_weekend(career, rng=seeded(14))
+    # Round 3: back in the seat, the substitute back in T&R, and
+    # every illness field cleared on both drivers.
+    assert career["round"] == 3
+    assert norris["status"] == "f1"
+    # Either seat: after each race the two seats re-sort by
+    # team_points, so the substitute (and the returning driver) may
+    # sit in seat 2.
+    assert norris["id"] in (mclaren["driver1_id"], mclaren["driver2_id"])
+    assert norris["ill_until_round"] is None
+    assert norris["ill_label"] is None
+    assert norris["ill_seat"] is None
+    assert norris["ill_sub_id"] is None
+    assert best_tr["status"] == "tr"
+    assert best_tr["ill_sub_for"] is None
+    assert best_tr["ill_sub_from"] is None
+    assert norris["contract_left"] > 0  # the contract was untouched
+
+
+def test_illness_no_tr_auto_fills_from_worst_free_agents():
+    """v0.7.1: a team with no T&R drivers fills an ill driver's seat
+    with one of the five worst-reputation free agents (the same rule
+    as the empty-seat auto-fill), on a 1-year contract — and when the
+    driver returns, the fill goes back to the free-agent pool."""
+    career = game.build_new_career("Test", "Matthew")
+    aston = team_by_name(career, "Aston Martin")
+    alonso = game.get_driver(career, aston["driver1_id"])
+    # Strip Aston's T&R drivers (they leave the team entirely).
+    for tr in game.team_tr_drivers(career, aston):
+        tr["status"] = "free"
+        tr["team_id"] = None
+        tr["last_team_id"] = None
+        tr["contract_left"] = 0
+    assert not game.team_tr_drivers(career, aston)
+    worst_rep = min(d["rep"] for d in game.free_agents(career))
+    newly = game.roll_illness(
+        career, rng=_ScriptedIllnessRng(
+            _illness_rolls_for(career, alonso["id"]), duration=1))
+    assert newly == [alonso]
+    assert alonso["status"] == "tr" and alonso["ill_until_round"] == 1
+    sub = game.get_driver(career, aston["driver1_id"])
+    assert sub is not None and sub["id"] != alonso["id"]
+    assert sub["status"] == "f1"
+    assert sub["ill_sub_for"] == alonso["id"]
+    assert sub["ill_sub_from"] == "free"
+    # The scripted choice takes the first of the five worst-rep free
+    # agents — the lowest-rep free agent of all.
+    assert sub["rep"] == worst_rep
+    assert sub["contract_left"] == 1
+    # The fill races, then the driver returns and the fill is
+    # released back to the free-agent pool.
+    game.run_race_weekend(career, rng=seeded(21))
+    assert sub["id"] in _raced_ids(career)
+    assert alonso["id"] not in _raced_ids(career)
+    game.complete_race_weekend(career, rng=seeded(22))
+    assert career["round"] == 2
+    assert alonso["status"] == "f1"
+    assert aston["driver1_id"] == alonso["id"]
+    assert sub["status"] == "free"
+    assert sub["team_id"] is None
+    assert sub["contract_left"] == 0
+    assert sub["ill_sub_for"] is None
+
+
+def test_illness_through_round_12_restored_at_season_end():
+    """v0.7.1: an illness running to the final round does not carry
+    across the season — the rollover brings the driver back into
+    their seat (force restore), with every illness field cleared."""
+    career = game.build_new_career("Test", "Matthew")
+    for _ in range(11):
+        game.run_race_weekend(career, rng=seeded(41))
+        game.complete_race_weekend(career, rng=seeded(42))
+    assert career["round"] == 12 and career["phase"] == "round"
+    mclaren = team_by_name(career, "McLaren")
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    sub = game.get_driver(career, mclaren["driver2_id"])
+    game.roll_illness(career, rng=_ScriptedIllnessRng(
+        _illness_rolls_for(career, norris["id"]), duration=1))
+    assert norris["ill_until_round"] == 12
+    assert norris["status"] == "tr"
+    for d in career["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(43))
+    assert career["phase"] == "winter_break"
+    assert norris["status"] == "f1"
+    assert norris["id"] in (mclaren["driver1_id"], mclaren["driver2_id"])
+    assert norris["ill_until_round"] is None
+    assert norris["ill_sub_id"] is None
+    # The substitute is back in T&R (or signed on elsewhere — never
+    # stranded in the wrong seat).
+    assert sub["status"] in ("tr", "f1", "free")
+
+
+def test_both_main_drivers_ill_at_once():
+    """v0.7.1: both main drivers can fall ill at once (very rare) —
+    both seats get substitutes by the same rules, and both drivers
+    return when their illnesses end."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    piastri = game.get_driver(career, mclaren["driver2_id"])
+    rolls = [0.0 if did in (norris["id"], piastri["id"]) else 0.99
+             for team in career["teams"] for did in
+             (team["driver1_id"], team["driver2_id"])]
+    newly = game.roll_illness(career, rng=_ScriptedIllnessRng(rolls, duration=1))
+    assert set(d["id"] for d in newly) == {norris["id"], piastri["id"]}
+    assert norris["ill_until_round"] == 1 and piastri["ill_until_round"] == 1
+    assert mclaren["driver1_id"] not in (norris["id"], piastri["id"])
+    assert mclaren["driver2_id"] not in (norris["id"], piastri["id"])
+    game.run_race_weekend(career, rng=seeded(51))
+    assert norris["id"] not in _raced_ids(career)
+    assert piastri["id"] not in _raced_ids(career)
+    game.complete_race_weekend(career, rng=seeded(52))
+    assert norris["status"] == "f1" and piastri["status"] == "f1"
+    assert norris["id"] in (mclaren["driver1_id"], mclaren["driver2_id"])
+    assert piastri["id"] in (mclaren["driver1_id"], mclaren["driver2_id"])
+
+
+def test_illness_guards_and_human_sub_swap():
+    """v0.7.1: an ill driver cannot be released, signed or swapped
+    back into a seat while they recover; a human swapping the
+    substitute for another T&R driver passes the stand-in role to
+    the new driver (the ill driver's seat stays covered)."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    trs_before = game.team_tr_drivers(career, mclaren)
+    best_tr = sorted(trs_before, key=lambda d: (-d["rep"], d["name"]))[0]
+    other_tr = sorted(trs_before, key=lambda d: (d["rep"], d["name"]))[0]
+    assert best_tr["id"] != other_tr["id"]
+    game.roll_illness(career, rng=_ScriptedIllnessRng(
+        _illness_rolls_for(career, norris["id"]), duration=1))
+    ok, why = game.release_driver(career, mclaren["id"], norris["id"])
+    assert not ok and "ill" in why
+    ok, why = game.sign_driver(career, mclaren["id"], norris["id"], 1)
+    assert not ok and "ill" in why
+    ok, why = game.swap_main_tr(career, mclaren["id"], 1, norris["id"])
+    assert not ok and "ill" in why
+    # The human swaps the substitute for another T&R driver (free,
+    # same mechanism as the normal T&R swap): the new driver becomes
+    # the stand-in, the old one goes back to T&R.
+    ok, why = game.swap_main_tr(career, mclaren["id"], 1, other_tr["id"])
+    assert ok, why
+    assert mclaren["driver1_id"] == other_tr["id"]
+    assert other_tr["status"] == "f1"
+    assert other_tr["ill_sub_for"] == norris["id"]
+    assert other_tr["ill_sub_from"] == "tr"
+    assert norris["ill_sub_id"] == other_tr["id"]
+    assert best_tr["status"] == "tr"
+    assert best_tr["ill_sub_for"] is None
+    # ...and the ill driver still returns to the seat afterwards.
+    game.run_race_weekend(career, rng=seeded(31))
+    game.complete_race_weekend(career, rng=seeded(32))
+    assert norris["id"] in (mclaren["driver1_id"], mclaren["driver2_id"])
+    assert norris["status"] == "f1"
+    assert other_tr["status"] == "tr"
+    assert other_tr["ill_sub_for"] is None
+
+
+def test_teammate_elo_matthew_example_zero_sum_and_quali():
+    """v0.7.1 (a): the teammate Elo — a 2.12 driver losing to a 4.41
+    teammate loses almost nothing (E ~ 0.995), but beating the 4.41
+    gains almost the full K; the change is zero-sum; qualifying K is
+    half the race K. And a pair where either teammate DNF'd moves
+    neither rep (a mechanical DNF is not the driver's fault)."""
+    from f1.rules import (
+        DRIVER_REP_K_QUALI, DRIVER_REP_K_RACE, elo_expected,
+        teammate_elo_delta,
+    )
+    from f1 import race as race_mod
+    # The expectation: 2.12 vs 4.41 expects ~0.005.
+    e = elo_expected(2.12, 4.41)
+    assert 0.004 < e < 0.006
+    # Losing to the 4.41 costs the 2.12 almost nothing.
+    loss = teammate_elo_delta(2.12, 4.41, 0.0, DRIVER_REP_K_RACE)
+    assert -0.002 < loss < 0.0
+    # Beating the 4.41 gains almost the full K.
+    win = teammate_elo_delta(2.12, 4.41, 1.0, DRIVER_REP_K_RACE)
+    assert 0.07 < win < 0.08
+    # Zero-sum: applied to two drivers, the gains cancel exactly.
+    from f1.models import make_driver
+    a = make_driver({"name": "A Driver", "age": 25, "perf": 90, "rep": 2.12,
+                     "cha": 0, "contract": 2, "mv": 2.0, "salary": 2.0})
+    b = make_driver({"name": "B Driver", "age": 25, "perf": 90, "rep": 4.41,
+                     "cha": 0, "contract": 2, "mv": 2.0, "salary": 2.0})
+    race_mod.apply_teammate_elo(a, b, 1, 2, DRIVER_REP_K_RACE)
+    assert abs((a["rep"] - 2.12) + (b["rep"] - 4.41)) < 1e-12
+    assert a["rep"] > 2.12 and b["rep"] < 4.41
+    # Qualifying K is half the race K for the same outcome.
+    a2 = make_driver({"name": "A Driver", "age": 25, "perf": 90, "rep": 2.12,
+                      "cha": 0, "contract": 2, "mv": 2.0, "salary": 2.0})
+    b2 = make_driver({"name": "B Driver", "age": 25, "perf": 90, "rep": 4.41,
+                      "cha": 0, "contract": 2, "mv": 2.0, "salary": 2.0})
+    race_mod.apply_teammate_elo(a2, b2, 1, 2, DRIVER_REP_K_QUALI)
+    assert abs((a2["rep"] - 2.12) - (a["rep"] - 2.12) / 2) < 1e-12
+    # Both teammates DNF: neither rep moves (through the real race
+    # path, with other finishers so the race is not empty).
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    piastri = game.get_driver(career, mclaren["driver2_id"])
+    norris["rep"] = piastri["rep"] = 3.0
+    others = [d for d in game.race_mod.driver_standings(career)
+              if d["id"] not in (norris["id"], piastri["id"])][:2]
+    entries = [(others[0], team_by_name(career, "Ferrari")),
+               (others[1], team_by_name(career, "Red Bull"))]
+    game.race_mod.apply_race_results(
+        career, entries, [25, 18], dnf_entries=[(norris, mclaren),
+                                                (piastri, mclaren)])
+    assert norris["rep"] == 3.0 and piastri["rep"] == 3.0
+
+
+def test_finish_rep_vs_team_context():
+    """v0.7.1 (b): the base gain by finish, multiplied by the team
+    factor — a win from a 5th-place team is worth 1.6x a win from
+    the 1st-place team, and the factor caps at 2.5x from an
+    11th-place team. The teammate Elo is skipped by making the
+    winner's teammate DNF, so the finish component is isolated."""
+    from f1 import race as race_mod
+
+    def _win_from(team_pos, rep=3.0):
+        career = game.build_new_career("Test", "Matthew")
+        teams = career["teams"]
+        # Constructors' order going into the race: P1 gets 200, P2
+        # 180, ... down to P11 with 0 — the winner's team sits at
+        # team_pos.
+        for i, t in enumerate(teams):
+            t["points"] = (11 - (i + 1)) * 20.0
+        winner_team = teams[team_pos - 1]
+        winner = game.get_driver(career, winner_team["driver1_id"])
+        team_mate = game.get_driver(career, winner_team["driver2_id"])
+        winner["rep"] = rep
+        others = [d for d in game.race_mod.driver_standings(career)
+                  if d["id"] not in (winner["id"], team_mate["id"])][:1]
+        other_team = game.get_team(career, others[0]["team_id"])
+        entries = [(winner, winner_team), (others[0], other_team)]
+        race_mod.apply_race_results(
+            career, entries, [25, 18],
+            dnf_entries=[(team_mate, winner_team)])
+        return winner["rep"] - rep
+
+    assert abs(_win_from(1) - 0.10) < 1e-9
+    assert abs(_win_from(5) - 0.16) < 1e-9  # 0.10 * 1.6
+    assert abs(_win_from(11) - 0.25) < 1e-9  # 0.10 * 2.5 (capped)
+    # A P6 finish from a P5 team: base 0.01 * 1.6 = 0.016.
+    career = game.build_new_career("Test", "Matthew")
+    for i, t in enumerate(career["teams"]):
+        t["points"] = (11 - (i + 1)) * 20.0
+    team5 = career["teams"][4]
+    d = game.get_driver(career, team5["driver1_id"])
+    d["rep"] = 3.0
+    mate = game.get_driver(career, team5["driver2_id"])
+    others = [x for x in game.race_mod.driver_standings(career)
+              if x["id"] not in (d["id"], mate["id"])][:5]
+    entries = [(x, game.get_team(career, x["team_id"])) for x in others]
+    entries.append((d, team5))
+    game.race_mod.apply_race_results(
+        career, entries, [25, 18, 15, 12, 10, 8],
+        dnf_entries=[(mate, team5)])
+    assert abs(d["rep"] - 3.0 - 0.016) < 1e-9
+
+
+def _season_end_career(champion_team_pos, champion_rep=3.0):
+    """A career ready for end_of_season with a known champion: the
+    drivers' leader sits on the team at champion_team_pos (1 = the
+    constructors' champions, 2 = a team that did not win them), all
+    other drivers are young (no retirements) and on 0 rep movement
+    from the F2 side. Returns (career, champion)."""
+    career = game.build_new_career("Test", "Matthew")
+    teams = career["teams"]
+    # Constructors' order: team 0 first, team 1 second, ...
+    for i, t in enumerate(teams):
+        t["points"] = (11 - (i + 1)) * 20.0
+    champ_team = teams[champion_team_pos - 1]
+    others_team = teams[1 if champion_team_pos == 1 else 0]
+    champ = game.get_driver(career, champ_team["driver1_id"])
+    runner = game.get_driver(career, others_team["driver1_id"])
+    champ["points"] = 100
+    runner["points"] = 80
+    for d in career["drivers"]:
+        d["rep"] = 3.0
+        d["age"] = 25
+        d["cha"] = 0
+    champ["rep"] = champion_rep
+    return career, champ
+
+
+def test_season_end_rep_standings_vs_team_and_champion_bonus():
+    """v0.7.1 (c): standings vs team — a driver above their team's
+    place gains, below loses, capped at +/-0.15 — and the champion
+    gains +0.5 when their team won the constructors', +0.75 when
+    they did not."""
+    # Champion's team won the constructors': +0.5, no standings
+    # term (P1 driver, P1 team).
+    career, champ = _season_end_career(1)
+    game.end_of_season(career, rng=seeded(7))
+    assert abs(champ["rep"] - 3.5) < 1e-9
+    # A driver P2 in a P5 team gains (5-2)*0.02 = +0.06; a driver
+    # P10 in a P2 team loses (2-10)*0.02 = -0.16, capped at -0.15.
+    career2 = game.build_new_career("Test", "Matthew")
+    teams = career2["teams"]
+    for i, t in enumerate(teams):
+        t["points"] = (11 - (i + 1)) * 20.0
+    drivers = [game.get_driver(career2, t["driver1_id"]) for t in teams]
+    drivers[0]["points"] = 100  # P1, team P1
+    # P2 driver on the P5 team, P10 driver on the P2 team.
+    drivers[4]["points"] = 90
+    drivers[1]["points"] = 10
+    for i, d in enumerate(drivers):
+        if i not in (0, 1, 4):
+            d["points"] = 50 - i
+    for d in career2["drivers"]:
+        d["rep"] = 3.0
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career2, rng=seeded(7))
+    assert abs(drivers[4]["rep"] - 3.06) < 1e-9
+    assert abs(drivers[1]["rep"] - 2.85) < 1e-9
+    # Champion's team did NOT win the constructors': +0.75, plus
+    # the standings term (P2 team, P1 driver) = +0.02.
+    career3, champ3 = _season_end_career(2)
+    game.end_of_season(career3, rng=seeded(7))
+    assert abs(champ3["rep"] - 3.77) < 1e-9
+
+
+def test_rep_clamp_one_to_five():
+    """v0.7.1: rep is clamped to [1.0, 5.0] after every change — a
+    champion at 4.99 does not pass 5.0, and a big season-end loss
+    from 1.01 does not go below 1.0."""
+    from f1 import race as race_mod
+    d = {"rep": 4.99}
+    race_mod.adjust_driver_rep(d, 0.75)
+    assert d["rep"] == 5.0
+    d = {"rep": 1.01}
+    race_mod.adjust_driver_rep(d, -0.15)
+    assert d["rep"] == 1.0
+    # Through the real season end: a 4.99 champion stays at 5.0.
+    career, champ = _season_end_career(1, champion_rep=4.99)
+    game.end_of_season(career, rng=seeded(7))
+    assert champ["rep"] == 5.0
+
+
+def test_f2_champion_rep_boost():
+    """v0.7.1: the F2 champion gets +0.5 rep at the rollover, on top
+    of the F2 race-result rep earned during the season — and joins
+    the free-agent pool."""
+    career = game.build_new_career("Test", "Matthew")
+    f2 = game.f2_drivers(career)
+    champ = f2[0]
+    champ["points"] = 100
+    champ["rep"] = 3.0
+    for d in f2[1:]:
+        d["points"] = 0
+    for d in career["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(9))
+    assert champ["rep"] == 3.5
+    assert champ["status"] == "free"
+
+
+def test_f2_promoted_driver_stays_in_standings_frozen_and_no_title():
+    """v0.7.1: an F2 driver promoted to F1 mid-season stays in the
+    F2 standings with their points frozen at departure (and an
+    '↑ F1' tag in the page), scores no more F2 points, and cannot
+    win the F2 title — the title goes to the best driver still in
+    F2 at the rollover."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    f2 = game.f2_drivers(career)
+    promoted = f2[0]
+    promoted["points"] = 100
+    promoted["season_wins"] = 3
+    promoted["best_pos"] = 1
+    promoted["best_finish_round"] = 1
+    runner = f2[1]
+    runner["points"] = 50
+    for d in f2[2:]:
+        d["points"] = 0
+    mclaren = team_by_name(career, "McLaren")
+    mclaren["money"] = 100.0
+    ok, why = game.sign_driver(career, mclaren["id"], promoted["id"], 1)
+    assert ok, why
+    # Frozen at departure, still listed, at the top.
+    assert promoted["f2_left"] is True
+    assert promoted["f2_points"] == 100
+    assert promoted["f2_wins"] == 3
+    standings = race_mod.f2_standings(career)
+    assert standings[0]["id"] == promoted["id"]
+    assert standings[1]["id"] == runner["id"]
+    # The F2 sim only races drivers still in F2 — the promoted
+    # driver scores no more F2 points.
+    game.run_race_weekend(career, rng=seeded(5))
+    assert promoted["f2_points"] == 100
+    assert promoted["points"] != 100 or promoted["status"] == "f1"
+    # At the rollover the title goes to the best driver STILL in
+    # F2, not to the promoted driver with the frozen 100 points.
+    for d in career["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    rep_before = runner["rep"]
+    game.end_of_season(career, rng=seeded(3))
+    assert any("won F2" in line and runner["name"] in line
+               for line in career["transfers"])
+    assert runner["rep"] == rep_before + 0.5
+    assert promoted["status"] == "f1"  # never the F2 champion
+    # The new season starts clean: the frozen tally is cleared for
+    # every driver at the rollover.
+    assert promoted["f2_left"] is False
+    assert promoted["f2_points"] == 0
+    # The UI tag is in the page.
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert "↑ F1" in html
+
+
+def test_resign_offer_counts_toward_limit_and_not_guaranteed():
+    """v0.7.1: re-signing an expired driver is a normal winter-break
+    offer — it counts toward the 3-offers-per-round limit (a 4th
+    offer is refused), and it does NOT guarantee the signing: a
+    better-placed constructors' team offering the same driver wins
+    them."""
+    career = game.build_new_career("Test", "Matthew")
+    teams = career["teams"]
+    # Constructors' order: McLaren P1, Aston Martin P5.
+    for i, t in enumerate(teams):
+        t["points"] = (11 - (i + 1)) * 20.0
+    aston = team_by_name(career, "Aston Martin")
+    mclaren = team_by_name(career, "McLaren")
+    alonso = game.get_driver(career, aston["driver1_id"])
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    alonso["age"] = 35  # no retirement at the rollover
+    alonso["contract_left"] = 1  # expires at the rollover
+    norris["contract_left"] = 1  # expires too, so McLaren has an
+    # empty seat to offer Alonso (a winter-break offer to an occupied
+    # seat is skipped at resolution — offers fill empty seats).
+    for d in career["drivers"]:
+        d["age"] = 25 if d is not alonso else 35
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(11))
+    assert career["phase"] == "winter_break"
+    # Alonso expired: a free agent, still tied to Aston Martin, in
+    # the seat he held. The rollover shifted Stroll up into Seat 1,
+    # so Aston's empty seat is Seat 2.
+    assert alonso["status"] == "free"
+    assert alonso["last_team_id"] == aston["id"]
+    assert alonso["last_slot"] == "seat1"
+    assert alonso["id"] not in (aston["driver1_id"], aston["driver2_id"])
+    assert aston["driver2_id"] is None
+    assert norris["status"] == "free"
+    assert mclaren["driver2_id"] is None
+    # Aston's re-sign offer (into the empty Seat 2 — the button
+    # targets the team's currently-empty seat, not the old seat
+    # number) + two more offers = the 3-offer limit. A 4th is refused.
+    free = game.free_agents(career)
+    other1 = next(d for d in free if d["id"] != alonso["id"])
+    other2 = next(d for d in free if d["id"] not in (alonso["id"], other1["id"]))
+    f2d = game.f2_drivers(career)[0]
+    offers = [
+        {"driver_id": alonso["id"], "target": "seat", "seat": 2, "years": 2},
+        {"driver_id": other1["id"], "target": "seat", "seat": 1, "years": 2},
+        {"driver_id": f2d["id"], "target": "tr", "seat": None, "years": 2},
+    ]
+    ok, why = game.submit_winter_offers(career, aston["id"], offers)
+    assert ok, why
+    ok, why = game.submit_winter_offers(
+        career, aston["id"], offers + [
+            {"driver_id": other2["id"], "target": "seat", "seat": 2, "years": 1}])
+    assert not ok and "3 offers" in why
+    # McLaren (P1) also offers Alonso for its empty Seat 2. The
+    # round resolves in constructors' order — McLaren first — so the
+    # re-sign does NOT keep Alonso at Aston Martin.
+    ok, why = game.submit_winter_offers(career, mclaren["id"], [
+        {"driver_id": alonso["id"], "target": "seat", "seat": 2, "years": 2}])
+    assert ok, why
+    game.resolve_winter_break_round(career, rng=seeded(1))
+    assert alonso["team_id"] == mclaren["id"]
+    assert alonso["status"] == "f1"
+    assert mclaren["driver2_id"] == alonso["id"]
+    assert aston["driver1_id"] != alonso["id"]
+    assert aston["driver2_id"] != alonso["id"]
+    # The Drivers tab offers the expired driver for re-signing (the
+    # button targets the team's currently-empty seat — see the
+    # handler in the page).
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert "Expired — re-sign" in html
+    assert "data-resign" in html
+    assert "currently-empty seat" in html
+
+
+def test_market_compact_grouped_headers():
+    """v0.7.1: the driver market renders grouped by source — F1
+    free agents, then F2, then other teams' drivers (poaching) —
+    one line per driver, with the same columns as before."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    import subprocess, time, urllib.request
+    port = 8795
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            page.click("#btn-new-career")
+            page.wait_for_selector("[data-team]", timeout=15000)
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.querySelector('b') && r.querySelector('b').textContent === 'Red Bull')
+                    .querySelector('[data-team]').click();
+            }""")
+            page.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            page.click("#btn-start-career")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            page.click('[data-tab="market"]')
+            page.wait_for_selector("#tab-market:not(.hidden)", timeout=15000)
+            market = page.inner_text("#tab-market")
+            # Group headers, uppercased by CSS (inner_text is the
+            # rendered text).
+            assert "F1 FREE AGENTS" in market, market
+            assert "F2 (" in market, market
+            assert "OTHER TEAMS' DRIVERS" in market, market
+            # One line per driver: the free-agent table has one row
+            # per free agent, and the columns are unchanged.
+            assert "Cost to sign" in market
+            assert "Salary/yr" in market
+            # Rows stay compact (the v0.3 row-height rule still
+            # holds under the denser v0.7.1 layout).
+            row_h = page.evaluate(
+                "document.querySelector('.market-table tr:nth-child(2)')"
+                ".getBoundingClientRect().height")
+            assert row_h < 90, row_h
+            browser.close()
+    finally:
+        proc.terminate()
+
+
+def test_v12_migration_adds_illness_f2_and_resign_fields():
+    """v0.7.1 (save v12): an old save without the new driver fields
+    backfills them — no driver ill, no frozen F2 tally, no last
+    slot — and the real Season 3 save loads with them (its file is
+    never modified by loading it)."""
+    from f1.saves import SAVE_VERSION, load_save, migrate_save
+    assert SAVE_VERSION == 12
+    career = game.build_new_career("Test", "Matthew")
+    doc = json.loads(json.dumps(career))
+    doc["version"] = 11
+    for d in doc["drivers"]:
+        for k in ("ill_until_round", "ill_label", "ill_seat", "ill_sub_id",
+                  "ill_sub_for", "ill_sub_from", "f2_left", "f2_points",
+                  "f2_wins", "f2_best_pos", "f2_best_finish_round",
+                  "last_slot"):
+            d.pop(k, None)
+    migrated = migrate_save(doc)
+    for d in migrated["drivers"]:
+        assert d["ill_until_round"] is None
+        assert d["ill_label"] is None
+        assert d["ill_seat"] is None
+        assert d["ill_sub_id"] is None
+        assert d["ill_sub_for"] is None
+        assert d["ill_sub_from"] is None
+        assert d["f2_left"] is False
+        assert d["f2_points"] == 0
+        assert d["f2_wins"] == 0
+        assert d["f2_best_pos"] is None
+        assert d["f2_best_finish_round"] is None
+        assert d["last_slot"] is None
+    path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
+    if not path.exists():
+        pytest.skip("Season 3 save not present in this checkout")
+    before = path.read_bytes()
+    loaded = _load_s3_save()
+    assert loaded is not None
+    assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
+    assert all(d["ill_until_round"] is None for d in loaded["drivers"])
+    assert all(d["f2_left"] is False for d in loaded["drivers"])
+    assert path.read_bytes() == before
