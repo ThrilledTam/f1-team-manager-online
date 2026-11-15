@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.7.0 (beta)
+F1 Team Manager Online — v0.7.1 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -159,7 +159,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.7.0", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.7.1", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -476,7 +476,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.0"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.1"}
 
 
 @app.get("/api/saves")
@@ -855,6 +855,17 @@ async def ws_endpoint(ws: WebSocket):
                         room["started"] = True
                         if career.get("phase") not in ("round", "winter_break"):
                             career["phase"] = "round"
+                        # v0.7.1: a fresh career opens its round 1 —
+                        # roll illness for it now (teams are picked, so
+                        # the dashboard can show the notice before
+                        # qualifying). A loaded save is NOT re-rolled:
+                        # its illness state (or lack of it) lives in
+                        # the save, and the roll at complete_race_weekend
+                        # / start_next_season covers later rounds.
+                        if (career.get("phase") == "round"
+                                and career.get("round") == 1
+                                and not career.get("race_history")):
+                            game.roll_illness(career, rng=rng)
                         # v0.4.1: open the winter-break round now that
                         # the humans have picked their teams — bot
                         # offers (and bot R&D) are generated only for
