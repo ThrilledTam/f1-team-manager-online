@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.6.6 (beta)
+F1 Team Manager Online — v0.7.0 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -106,6 +106,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     advance      {}
     start_next_season {}                  # winter break, when the 3 rounds
                                           # are done and seats are filled
+    rumours      {}                       # retirement rumours for your drivers
+    season_detail {year}                  # v0.7.0: full standings for one
+                                          # season (clickable champion year)
     ping         {}
   Server -> client:
     joined       {code, player_id, room}  # this player only
@@ -116,6 +119,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     saves_list   {saves}
     error        {message}
     kicked       {message}                # to the kicked player only
+    rumours      {rumours}                # retirement rumours (on request)
+    season_detail {detail}                # v0.7.0: full standings for one
+                                          # season, on request
     pong         {}
 """
 import asyncio
@@ -153,7 +159,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.6.6", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.7.0", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -304,6 +310,8 @@ def my_team_public(room, player_id):
     out = {k: v for k, v in team.items() if k != "perf"}
     # v0.4: raw regulation numbers never reach a client — only the
     # percentages + cost in reg_view. Strip the raw fields here too.
+    # v0.7.0: hidden team reputation NEVER reaches a client either.
+    out.pop("team_rep", None)
     out.pop("reg_total", None)
     out.pop("reg_adapted", None)
     out.pop("reg_unadapted", None)
@@ -468,7 +476,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.6.6"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.0"}
 
 
 @app.get("/api/saves")
@@ -677,6 +685,21 @@ async def ws_endpoint(ws: WebSocket):
                 else:
                     await ws.send_json({"type": "rumours",
                                         "rumours": game.retirement_rumours(career)})
+
+            elif mtype == "season_detail":
+                # v0.7.0: clickable champion years — the full standings
+                # for one season (in-game snapshots, or the baked-in
+                # real 2010-2025 table). Sent on demand, not with
+                # every broadcast: the real table alone is ~58KB.
+                if not career:
+                    await send_error(ws, "No career running.")
+                else:
+                    detail = game.get_season_detail(career, msg.get("year"))
+                    if detail is None:
+                        await send_error(ws, "No standings recorded for that season.")
+                    else:
+                        await ws.send_json({"type": "season_detail",
+                                            "detail": detail})
 
             elif mtype == "save_career":
                 if not is_host:
@@ -938,7 +961,7 @@ async def ws_endpoint(ws: WebSocket):
                         ok, why = game.propose_relation(
                             career, team["id"], msg.get("target_team_id"),
                             msg.get("kind"), msg.get("supplier_team_id"),
-                            msg.get("years", 2))
+                            msg.get("years", 2), rng=rng)
                     elif mtype == "respond_relation":
                         ok, why = game.respond_relation(
                             career, team["id"], msg.get("proposal_id"),
@@ -965,7 +988,7 @@ async def ws_endpoint(ws: WebSocket):
                     elif mtype == "request_donation":
                         ok, why = game.request_donation(
                             career, team["id"], msg.get("target_team_id"),
-                            msg.get("amount"))
+                            msg.get("amount"), rng=rng)
                     elif mtype == "respond_donation":
                         ok, why = game.respond_donation(
                             career, team["id"], msg.get("request_id"),
