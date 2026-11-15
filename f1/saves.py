@@ -14,14 +14,18 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 10  # v0.6.6: team relationships, second pass — the
-# research cap is REMOVED entirely (setting, enforcement, bot cap);
-# WANTED works for customer teams too; the junior income share
-# (15% of race prize to the parent) + parent promotion/swap of
-# junior drivers + two-way donation requests + the 3-round
-# contract-break notice (break_notice on teams, donation_requests
-# on the career). v9 saves load fine: the removed cap fields are
-# dropped on load and the new fields backfill to their defaults.
+SAVE_VERSION = 11  # v0.7.0: hidden team reputation (team_rep on
+# every team, 50.0 for migrated saves) + season snapshots (one per
+# completed season, rebuilt from last_season / race_history for old
+# saves) for the clickable champion years. v0.6.6: team
+# relationships, second pass — the research cap is REMOVED entirely
+# (setting, enforcement, bot cap); WANTED works for customer teams
+# too; the junior income share (15% of race prize to the parent) +
+# parent promotion/swap of junior drivers + two-way donation
+# requests + the 3-round contract-break notice (break_notice on
+# teams, donation_requests on the career). v9 saves load fine: the
+# removed cap fields are dropped on load and the new fields backfill
+# to their defaults.
 # v0.6: team relationships (supplier / customer / junior contracts,
 # WANTED drivers) — new fields on teams (relation_years, wanted)
 # + career-level relation_proposals; old saves backfill the 2026
@@ -41,15 +45,17 @@ SAVE_VERSION = 10  # v0.6.6: team relationships, second pass — the
 # circuit per round, full GP history.
 
 
-def _reconstruct_last_season(doc):
-    """Best-effort last-season snapshot for a v5 winter-break save,
-    rebuilt from race_history (the season just finished is year - 1).
-    The v0.3 end_of_season already reset every driver's points to 0,
-    so the race tables are the only record of the final standings.
-    Qual head-to-head is rebuilt from the qual tables too. Returns
-    {year, drivers, teams} in final order, or None when there is no
-    race history for that year."""
-    year = (doc.get("year") or 1) - 1
+def _season_from_history(doc, year):
+    """Best-effort rebuild of one season's final standings from
+    race_history (the race tables are the only record once the
+    season's points have been reset). Qual head-to-head is rebuilt
+    from the qual tables too. Returns {year, drivers, teams} in
+    final order, or None when there is no race history for that
+    year. v0.7.0: a race pos can be the string 'DNF' — only numeric
+    positions count toward wins / podiums / best finish / finish
+    sums (a DNF still banks its 0 points for driver and team).
+    Without that guard the rebuild crashes on any season with a DNF
+    (TypeError comparing 'DNF' to an int)."""
     entries = [e for e in doc.get("race_history") or []
                if e.get("year") == year and e.get("race")]
     if not entries:
@@ -79,22 +85,24 @@ def _reconstruct_last_season(doc):
                     s["team_id"] = tid
                 if pos == 1:
                     s["wins"] += 1
-                if pos <= 3:
-                    s["podiums"] += 1
-                if s["best_pos"] is None or pos < s["best_pos"]:
-                    s["best_pos"] = pos
-                    s["best_round"] = rnd
-                s["finish_sum"] += pos
-                s["finish_count"] += 1
+                if isinstance(pos, int):
+                    if pos <= 3:
+                        s["podiums"] += 1
+                    if s["best_pos"] is None or pos < s["best_pos"]:
+                        s["best_pos"] = pos
+                        s["best_round"] = rnd
+                    s["finish_sum"] += pos
+                    s["finish_count"] += 1
             if tid and tid in teams and pos is not None:
                 s = tstat.setdefault(tid, {"points": 0, "wins": 0,
                                            "best_pos": None, "best_round": None})
                 s["points"] += pts
                 if pos == 1:
                     s["wins"] += 1
-                if s["best_pos"] is None or pos < s["best_pos"]:
-                    s["best_pos"] = pos
-                    s["best_round"] = rnd
+                if isinstance(pos, int):
+                    if s["best_pos"] is None or pos < s["best_pos"]:
+                        s["best_pos"] = pos
+                        s["best_round"] = rnd
         # Qualifying head-to-head, from the qual table of this round.
         by_team = {}
         for row in e.get("qual") or []:
@@ -140,6 +148,15 @@ def _reconstruct_last_season(doc):
                   "best_pos": s["best_pos"]}
                  for tid, s in sorted(tstat.items(), key=tkey)]
     return {"year": year, "drivers": drv_list, "teams": team_list}
+
+
+def _reconstruct_last_season(doc):
+    """Best-effort last-season snapshot for a v5 winter-break save,
+    rebuilt from race_history (the season just finished is year - 1).
+    The v0.3 end_of_season already reset every driver's points to 0,
+    so the race tables are the only record of the final standings.
+    See _season_from_history."""
+    return _season_from_history(doc, (doc.get("year") or 1) - 1)
 
 
 def migrate_save(doc):
@@ -261,6 +278,10 @@ def migrate_save(doc):
         team.pop("research_cap", None)
         team.pop("research_spent_season", None)
         team.setdefault("wanted", [])
+        # v0.7.0: hidden team reputation — every team starts at 50
+        # in a fresh career; older saves backfill to the neutral 50
+        # (there is no history to learn it from).
+        team.setdefault("team_rep", 50.0)
         # v0.6.6: the junior income share (last race / this season,
         # paid and received) and the pending contract-break notice.
         team.setdefault("break_notice", None)
@@ -304,6 +325,28 @@ def migrate_save(doc):
         doc.setdefault("wb_ready", [])
         if not doc.get("prev_team_order") and doc.get("last_season"):
             doc["prev_team_order"] = [t["id"] for t in doc["last_season"]["teams"]]
+    # v0.7.0: season snapshots — one per completed season, for the
+    # clickable champion years. A save that already has them is left
+    # alone; an older save rebuilds them from the data it has: the
+    # season just finished from last_season, earlier seasons from
+    # race_history (reconstructed, DNF rows included). Seasons are
+    # appended in year order, so the champion table can index them.
+    if "season_snapshots" not in doc:
+        from .game import season_snapshot
+        snaps = []
+        ls = doc.get("last_season")
+        if ls:
+            snaps.append(season_snapshot(ls))
+        done_years = {s["year"] for s in snaps}
+        for y in sorted({e.get("year") for e in doc.get("race_history") or []
+                         if e.get("year") is not None}):
+            if y in done_years:
+                continue
+            rec = _season_from_history(doc, y)
+            if rec:
+                snaps.append(season_snapshot(rec))
+        snaps.sort(key=lambda s: s.get("year") or 0)
+        doc["season_snapshots"] = snaps
     # A career saved mid-results under v0 never existed (v0 had no results
     # stages), but guard anyway: drop back to the dashboard round.
     if doc.get("phase") == "race_results":

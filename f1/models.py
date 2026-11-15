@@ -124,6 +124,13 @@ def make_team(data, team_id=None):
         # / _season), and a parent receives it from its junior
         # (junior_share_received_last_race / _season).
         "relation_years": 2 if int(data.get("sup_stage") or 0) > 0 else 0,
+        # v0.7.0: hidden team reputation (0-100, starts at 50) — the
+        # team's standing with the paddock. It moves with results,
+        # wins, driver quality and donations, and quietly bends how
+        # bots treat the team (donations, offers, proposals). It is
+        # NEVER sent to a client (see game.public_state) — players
+        # only ever see the outcomes.
+        "team_rep": 50.0,
         "wanted": [],               # [{driver_id, reward}] — max 3,
                                     # set by the parent of a supplied team
         "break_notice": None,
@@ -226,6 +233,12 @@ def new_career_dict(name, host_nickname, chart_on=True):
         # Requests expire when the next season starts.
         "donation_requests": [],
         "last_season": None,
+        # v0.7.0: one snapshot per completed season, for the clickable
+        # champion years (see game.get_season_detail) — {year,
+        # drivers: [{name, team, team_id, points, wins, podiums,
+        # best_pos}], teams: [{id, name, points, wins, best_pos}]},
+        # in the same shape as last_season (which stays as-is).
+        "season_snapshots": [],
         "transfers": [],           # ["Driver from X to Y"] this season
         "retired_this_season": [],
         "last_qual": None,         # v0.1: [{pos, driver, driver_id, team,

@@ -14,8 +14,10 @@ Sources (verified against ~/workspace/f1-manager/Main.py, Race.py, Rules.py):
   promoted, reg change, winter break to refill empty seats.
 """
 import copy
+import json
 import random
 import uuid
+from pathlib import Path
 
 from . import race as race_mod
 from .data import (
@@ -55,6 +57,98 @@ BOT_POOR_MONEY = 5.0  # below this a bot team counts as "poor" (it wants
 # a supplier, and suppliers want to help it)
 BOT_RICH_MONEY = 20.0  # above this a bot supplier donates to a poor team
 BOT_PERF_WINDOW = 60.0  # "close" in performance for junior / renewal rules
+
+# v0.7.0: hidden team reputation (0-100, starts at 50 for every team).
+# It bends how bot teams treat a team — donation requests, winter-break
+# offers, relation proposals — never by a hard refusal, only by a quiet
+# probability / ranking drop (Matthew's rule: no hard caps). The number
+# itself NEVER leaves the server (see public_state / my_team_public).
+TEAM_REP_START = 50.0
+TEAM_REP_MIN = 0.0
+TEAM_REP_MAX = 100.0
+TEAM_REP_WIN_BONUS = 0.3       # per race win, at race time
+TEAM_REP_DONATION_RATE = 0.2   # rep points per $M given / received
+TEAM_REP_DONATION_CAP = 1.0    # max rep gain per single donation
+TEAM_REP_ACCEPT_BASE = 0.25    # bot donation acceptance at rep 0
+TEAM_REP_ACCEPT_PER_POINT = 0.01  # acceptance grows this much per rep point
+TEAM_REP_PROPOSAL_FLOOR = 25.0    # below this, bots cool on proposals
+TEAM_REP_PROPOSAL_MAX_CUT = 0.6   # at rep 0 a bot's acceptance is x0.4
+TEAM_REP_QUIET_DROP_STEP = 15.0   # rep points below 50 per +1 offer drop
+TEAM_REP_QUIET_DROP_MAX = 3
+
+
+def _load_real_standings():
+    """v0.7.0: the real 2010-2025 drivers' + constructors' standings
+    (Jolpica/Ergast API data, baked in as static data — no live
+    fetching at runtime), so the real champion years are clickable
+    too. Returns {} when the file is missing — the game still runs,
+    the real years just have no detail."""
+    try:
+        with open(Path(__file__).with_name("real_standings.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+# {year: {drivers: [{pos, name, team, points, wins}], constructors:
+# [{pos, name, points, wins}]}} — pos may be null (unclassified),
+# points may be .5 (shortened races).
+REAL_STANDINGS = _load_real_standings()
+
+
+def team_rep_of(team):
+    """A team's hidden reputation (0-100); 50 when the field is
+    missing (an old career that has not been migrated)."""
+    if not team:
+        return TEAM_REP_START
+    try:
+        return float(team.get("team_rep", TEAM_REP_START))
+    except (TypeError, ValueError):
+        return TEAM_REP_START
+
+
+def adjust_team_rep(team, delta):
+    """Move a team's hidden reputation, clamped to [0, 100]."""
+    if not team:
+        return
+    team["team_rep"] = min(TEAM_REP_MAX,
+                           max(TEAM_REP_MIN, team_rep_of(team) + delta))
+
+
+def donation_accept_probability(requester_rep):
+    """v0.7.0: a bot donor's chance of accepting a donation request,
+    layered on top of the keep-$5M hard gate: 0.25 at rep 0, 0.75 at
+    rep 50, 0.95 at rep 100 (clamped to [0.10, 0.95])."""
+    return min(0.95, max(0.10, TEAM_REP_ACCEPT_BASE
+                         + TEAM_REP_ACCEPT_PER_POINT * requester_rep))
+
+
+def donation_amount_factor(requester_rep):
+    """v0.7.0: how much of the requested amount a bot donor actually
+    gives — the full amount at rep >= 50, half at rep 0."""
+    return min(1.0, max(0.5, 0.5 + requester_rep / 100.0))
+
+
+def wb_rep_drop(team_rep):
+    """v0.7.0: the QUIET DROP for winter-break offer resolution — a
+    low-rep team counts as this many constructors' places lower when
+    a driver picks between offers. Rep 50+ -> 0, 35 -> 1, 20 -> 2,
+    5 -> 3 (capped at +3)."""
+    if team_rep >= TEAM_REP_START:
+        return 0
+    return min(TEAM_REP_QUIET_DROP_MAX,
+               int((TEAM_REP_START - team_rep) // TEAM_REP_QUIET_DROP_STEP))
+
+
+def proposal_rep_factor(proposer_rep):
+    """v0.7.0: the multiplier on a bot's acceptance of a
+    customer/junior proposal — 1.0 at rep >= 25, sliding to 0.4 at
+    rep 0 (a 60% cut)."""
+    if proposer_rep >= TEAM_REP_PROPOSAL_FLOOR:
+        return 1.0
+    return 1.0 - ((TEAM_REP_PROPOSAL_FLOOR - proposer_rep)
+                  / TEAM_REP_PROPOSAL_FLOOR * TEAM_REP_PROPOSAL_MAX_CUT)
 
 
 def driver_initials(name):
@@ -997,12 +1091,18 @@ def donate(career, donor_team_id, recipient_team_id, amount):
                        f"supplier.")
     donor["money"] = round(donor["money"] - amount, 2)
     recipient["money"] = round(recipient["money"] + amount, 2)
+    # v0.7.0: giving helps your reputation — +0.2 per $M, capped at
+    # +1.0 per transfer. (The recipient loses nothing here: this is
+    # a gift, not a request — only a donation RECEIVED through a
+    # request costs the requester reputation, see respond_donation.)
+    adjust_team_rep(donor, min(TEAM_REP_DONATION_RATE * amount,
+                                TEAM_REP_DONATION_CAP))
     career["transfers"].append(
         f"{donor['name']} donated ${amount:.2f}M to {recipient['name']}")
     return True, f"Donated ${amount:.2f}M to {recipient['name']} ✓"
 
 
-def request_donation(career, requester_team_id, target_team_id, amount):
+def request_donation(career, requester_team_id, target_team_id, amount, rng=None):
     """v0.6.6: ask a team on your supply tie for a donation of a set
     amount, any time. The other side accepts or declines (see
     respond_donation) — a bot target decides on the spot: it accepts
@@ -1041,11 +1141,26 @@ def request_donation(career, requester_team_id, target_team_id, amount):
     if target.get("is_ai"):
         # A bot target decides on the spot (mirror relation
         # proposals) — the requester hears the answer, not the
-        # responder's wording.
+        # responder's wording. v0.7.0: the keep-$5M rule is still
+        # the HARD gate, but a low-reputation requester may still
+        # be refused on probability alone — and when accepted, the
+        # bot gives only a rep-scaled share of what was asked
+        # (full at rep >= 50, half at rep 0). The granted amount is
+        # stored on the request, so respond_donation moves — and
+        # logs — exactly that.
+        rng = rng or random
         accept = target["money"] - amount >= BOT_POOR_MONEY
+        if accept:
+            accept = rng.random() < donation_accept_probability(
+                team_rep_of(requester))
+        if accept:
+            granted = round(amount * donation_amount_factor(
+                team_rep_of(requester)), 2)
+            req["amount"] = granted
         ok, _why = respond_donation(career, target["id"], req["id"], accept)
         if ok and accept:
-            return True, f"{target['name']} accepted — ${amount:.2f}M received ✓"
+            return True, (f"{target['name']} accepted — "
+                          f"${req['amount']:.2f}M received ✓")
         return True, f"{target['name']} declined the donation request."
     return True, f"Donation request sent to {target['name']} — waiting for their answer."
 
@@ -1082,6 +1197,17 @@ def respond_donation(career, responder_team_id, request_id, accept):
     responder["money"] = round(responder["money"] - amount, 2)
     if requester:
         requester["money"] = round(requester["money"] + amount, 2)
+    # v0.7.0: reputation on a granted request — the donor gains
+    # +0.2 per $M (capped at +1.0), and the REQUESTER loses 0.2
+    # per $M received. Repeatedly farming donations from a supplied
+    # team is exactly what this taxes: each grant quietly spends
+    # the requester's standing, until bots start refusing and give
+    # less. The amounts are the actual money moved (a bot donor
+    # may grant less than was asked — see request_donation).
+    adjust_team_rep(responder, min(TEAM_REP_DONATION_RATE * amount,
+                                    TEAM_REP_DONATION_CAP))
+    if requester:
+        adjust_team_rep(requester, -TEAM_REP_DONATION_RATE * amount)
     career["transfers"].append(
         f"{responder['name']} donated ${amount:.2f}M to "
         f"{requester['name'] if requester else 'that team'} "
@@ -1196,7 +1322,7 @@ def _proposal_still_valid(career, proposal):
 
 
 def propose_relation(career, proposer_team_id, target_team_id, kind,
-                     supplier_team_id=None, years=2):
+                     supplier_team_id=None, years=2, rng=None):
     """v0.6: propose a relation change in the winter break. Either
     team may propose; the other side must accept (see
     respond_relation). Roles, as approved: for a FORMATION
@@ -1292,7 +1418,7 @@ def propose_relation(career, proposer_team_id, target_team_id, kind,
     career.setdefault("relation_proposals", []).append(proposal)
     # A bot target decides on the spot; a human target answers in the UI.
     if target.get("is_ai"):
-        if bot_accepts_proposal(career, proposal):
+        if bot_accepts_proposal(career, proposal, rng=rng):
             line = _apply_relation_change(career, proposal)
             career["relation_proposals"] = [
                 p for p in career.get("relation_proposals") or []
@@ -1554,7 +1680,7 @@ def _wanted_pick(career, team, candidates):
     return fits[0]
 
 
-def bot_accepts_proposal(career, proposal):
+def bot_accepts_proposal(career, proposal, rng=None):
     """v0.6: a bot target's decision on a pending relation proposal.
     The spec's bot rule, with the roles made explicit (see
     propose_relation): for a formation the proposer is the would-be
@@ -1570,7 +1696,12 @@ def bot_accepts_proposal(career, proposal):
       left) or the other side is much weaker (60+ perf behind you).
     - renew: as the customer, accept when the supplier is not much
       weaker than you (within 60 perf) or you are poor; as the
-      supplier, accept when the customer is within 60 perf of you."""
+      supplier, accept when the customer is within 60 perf of you.
+    v0.7.0: for a customer/junior FORMATION the bot's acceptance is
+    a probability, not a certainty — when the PROPOSER's reputation
+    is below 25 the base decision is rolled against
+    proposal_rep_factor (1.0 at rep 25, 0.4 at rep 0). At rep >= 25
+    nothing changes: the base rule decides, as before."""
     target = get_team(career, proposal["target_team_id"])
     supplier = get_team(career, proposal["supplier_team_id"])
     customer = get_team(career, proposal["customer_team_id"])
@@ -1582,21 +1713,33 @@ def bot_accepts_proposal(career, proposal):
     much_weaker = lambda other, me: other["perf"] < me["perf"] - BOT_PERF_WINDOW
     if kind == "customer":
         if target["id"] == customer["id"]:
-            return supplier["perf"] > target["perf"] or poor(target)
-        return poor(customer) or within(customer, supplier)
-    if kind == "junior":
+            base = supplier["perf"] > target["perf"] or poor(target)
+        else:
+            base = poor(customer) or within(customer, supplier)
+    elif kind == "junior":
         if junior_team_of(career, supplier) is not None:
             return False
-        return within(customer, supplier)
-    if kind in ("end", "downgrade"):
+        base = within(customer, supplier)
+    elif kind in ("end", "downgrade"):
         expired = (customer.get("relation_years") or 0) <= 0
         other = supplier if target["id"] == customer["id"] else customer
-        return expired or much_weaker(other, target)
-    if kind == "renew":
+        base = expired or much_weaker(other, target)
+    elif kind == "renew":
         if target["id"] == customer["id"]:
-            return within(supplier, target) or poor(target)
-        return within(customer, supplier)
-    return False
+            base = within(supplier, target) or poor(target)
+        else:
+            base = within(customer, supplier)
+    else:
+        return False
+    if not base:
+        return False
+    if kind in ("customer", "junior"):
+        proposer = get_team(career, proposal["proposer_team_id"])
+        factor = proposal_rep_factor(team_rep_of(proposer))
+        if factor < 1.0:
+            rng = rng or random
+            return rng.random() < factor
+    return True
 
 
 def bot_winter_relations(career, team, rng=None):
@@ -1633,7 +1776,8 @@ def bot_winter_relations(career, team, rng=None):
             if keep:
                 other = supplier if team["id"] == customer["id"] else customer
                 propose_relation(career, team["id"], other["id"], "renew",
-                                 supplier_team_id=supplier["id"], years=2)
+                                 supplier_team_id=supplier["id"], years=2,
+                                 rng=rng)
                 break
     # A poor bot with no supplier asks the fastest team to supply it.
     if team.get("sup_stage", 0) == 0 and team["money"] < BOT_POOR_MONEY:
@@ -1641,7 +1785,7 @@ def bot_winter_relations(career, team, rng=None):
         if others:
             best = max(others, key=lambda t: (t["perf"], t["name"]))
             propose_relation(career, team["id"], best["id"], "customer",
-                             supplier_team_id=best["id"], years=2)
+                             supplier_team_id=best["id"], years=2, rng=rng)
     # A bot supplier upgrades a close customer to junior (one junior max).
     if junior_team_of(career, team) is None:
         close = [t for t in supplied_teams(career, team)
@@ -1650,7 +1794,7 @@ def bot_winter_relations(career, team, rng=None):
         if close:
             close.sort(key=lambda t: (-t["perf"], t["name"]))
             propose_relation(career, team["id"], close[0]["id"], "junior",
-                             supplier_team_id=team["id"], years=2)
+                             supplier_team_id=team["id"], years=2, rng=rng)
     # Parent duties: a WANTED mark for the junior team — or for a
     # customer when there is no junior (v0.6.6: WANTED works for
     # customers too, same rules).
@@ -2520,6 +2664,12 @@ def run_race_weekend(career, rng=None):
         for i, (d, t) in enumerate(qual)]
     race_entries, dnf_entries = race_mod.simulate_race(career, laps=gp["laps"], rng=rng)
     race_mod.apply_race_results(career, race_entries, points_dist, dnf_entries)
+    # v0.7.0: a race win lifts the winning team's hidden reputation
+    # (+0.3) — the paddock notices winners, and it is the only
+    # in-race rep movement (the season-end updates happen in
+    # end_of_season).
+    if race_entries:
+        adjust_team_rep(race_entries[0][1], TEAM_REP_WIN_BONUS)
     # v0.6.6: the junior income share — after each race a junior
     # team pays 15% of its RACE PRIZE money (per-car prize only:
     # 1.95 - 0.025*pos per finishing car — not EPRG, not the
@@ -2702,6 +2852,26 @@ def end_of_season(career, rng=None):
         })
         if champ_team:
             champ_team["c_wins"] += 1
+    # v0.7.0: append the season snapshot for the clickable champion
+    # years (season_snapshots, same shape as last_season minus the
+    # per-driver stats the detail view does not need) — before the
+    # points reset below, so it records the real final numbers.
+    career.setdefault("season_snapshots", []).append(
+        season_snapshot(career["last_season"]))
+    # v0.7.0: hidden team reputation moves at the season rollover.
+    # Constructors' position: P1 +5, P6 0, P11 -5. Driver quality:
+    # the average hidden rep of the team's two main drivers, centred
+    # on 2.5 and halved (a 4.4-average lineup gains +0.95, a
+    # 1.5-average one loses -0.5). One empty seat uses the filled
+    # driver's rep; two empty seats skip the quality term. Teams
+    # are read from the final standings order, before retirements
+    # change the lineups below.
+    for pos, team in enumerate(standings, start=1):
+        adjust_team_rep(team, (6 - pos) * 1.0)
+        mains = [d for d in team_drivers(career, team) if d]
+        if mains:
+            avg_rep = sum(d.get("rep", 2.0) for d in mains) / len(mains)
+            adjust_team_rep(team, (avg_rep - 2.5) * 0.5)
     # F2 champion is promoted to the free-agent pool.
     f2_sorted = race_mod.f2_standings(career)
     if f2_sorted:
@@ -2993,6 +3163,109 @@ def winter_break_review(career, team_id=None):
     }
 
 
+def season_snapshot(season):
+    """v0.7.0: strip a last_season-shaped dict down to the season
+    snapshot stored in career['season_snapshots'] (and used by the
+    clickable champion years) — the standings only, no per-driver
+    head-to-head / average-finish stats."""
+    return {
+        "year": season.get("year"),
+        "drivers": [{
+            "name": d["name"], "team": d.get("team", ""),
+            "team_id": d.get("team_id"), "points": d["points"],
+            "wins": d.get("wins", 0), "podiums": d.get("podiums", 0),
+            "best_pos": d.get("best_pos"),
+        } for d in (season.get("drivers") or [])],
+        "teams": [{
+            "id": t["id"], "name": t["name"], "points": t["points"],
+            "wins": t.get("wins", 0), "best_pos": t.get("best_pos"),
+        } for t in (season.get("teams") or [])],
+    }
+
+
+def winter_break_recap(career):
+    """v0.7.0: the 'Season {year} in review' panel for the top of
+    the winter-break screen — Top 8 drivers and Top 5 constructors
+    from the last_season snapshot, plus the 12 round winners from
+    race_history for the season just finished (winner = race pos 1;
+    a 'DNF' pos is a string and can never equal 1, so it is simply
+    never the winner). Returns empty lists when there is no
+    snapshot yet (a season has never completed)."""
+    snap = career.get("last_season") or {}
+    year = snap.get("year")
+    winners = []
+    if year is not None:
+        entries = sorted(
+            (e for e in career.get("race_history") or []
+             if e.get("year") == year and e.get("race")),
+            key=lambda e: e.get("round") or 0)
+        for e in entries:
+            win = next((r for r in (e.get("race") or [])
+                        if r.get("pos") == 1), None)
+            if win:
+                winners.append({
+                    "round": e.get("round"), "circuit": e.get("circuit"),
+                    "driver": win.get("driver"), "team": win.get("team"),
+                    "team_id": win.get("team_id"),
+                })
+    return {
+        "year": year,
+        "drivers": list(snap.get("drivers") or [])[:8],
+        "teams": list(snap.get("teams") or [])[:5],
+        "winners": winners,
+    }
+
+
+def get_season_detail(career, year):
+    """v0.7.0: the full standings for one season, for the clickable
+    champion years. In-game years (2026+) come from
+    season_snapshots (falling back to last_season for the season
+    just finished, in case the snapshot was never written); real
+    years 2010-2025 come from the baked-in REAL_STANDINGS. Returns
+    {year, source, drivers, constructors} — drivers carry pos, name,
+    team, team_id (in-game only), points, wins; constructors carry
+    pos, name, points, wins — or None when the year has no recorded
+    standings. Team reputation is never part of a season detail."""
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        return None
+    if year >= 2026:
+        snap = next((s for s in career.get("season_snapshots") or []
+                     if s.get("year") == year), None)
+        if snap is None and (career.get("last_season") or {}).get("year") == year:
+            snap = season_snapshot(career["last_season"])
+        if snap is None:
+            return None
+        return {
+            "year": year, "source": "game",
+            "drivers": [{
+                "pos": i + 1, "name": d["name"],
+                "team": d.get("team", ""), "team_id": d.get("team_id"),
+                "points": d["points"], "wins": d.get("wins", 0),
+            } for i, d in enumerate(snap.get("drivers") or [])],
+            "constructors": [{
+                "pos": i + 1, "name": t["name"],
+                "points": t["points"], "wins": t.get("wins", 0),
+            } for i, t in enumerate(snap.get("teams") or [])],
+        }
+    real = REAL_STANDINGS.get(str(year))
+    if not real:
+        return None
+    return {
+        "year": year, "source": "real",
+        "drivers": [{
+            "pos": d.get("pos"), "name": d["name"],
+            "team": d.get("team", ""), "team_id": None,
+            "points": d["points"], "wins": d.get("wins", 0),
+        } for d in (real.get("drivers") or [])],
+        "constructors": [{
+            "pos": c.get("pos"), "name": c["name"],
+            "points": c["points"], "wins": c.get("wins", 0),
+        } for c in (real.get("constructors") or [])],
+    }
+
+
 def start_winter_break_round(career, rng=None):
     """Open a winter-break round: bot teams make their offers for
     this round (one round at a time, like humans — no more
@@ -3225,10 +3498,17 @@ def _wb_offer_winners(career, offers_by_team):
             if not d:
                 continue
             real = pos.get(team_id, fallback)
-            eff = real
+            # v0.7.0: the QUIET DROP — a team with a low hidden
+            # reputation counts as a few constructors' places lower
+            # when a driver picks between offers (rep 50+ drops 0,
+            # 35 drops 1, 20 drops 2, 5 drops 3). The drop bends only
+            # this ranking: the stored constructors' order is never
+            # touched, and the academy loyalty boost still applies
+            # on top of the dropped position.
+            eff = real + wb_rep_drop(team_rep_of(get_team(career, team_id)))
             is_academy_team = d.get("academy_team_id") == team_id
             if is_academy_team:
-                eff = max(1, real - ACADEMY_LOYALTY_BOOST)
+                eff = max(1, eff - ACADEMY_LOYALTY_BOOST)
             key = (eff, 0 if is_academy_team else 1, real)
             if did not in winners or key < winners[did][0]:
                 winners[did] = (key, team_id)
@@ -3568,6 +3848,10 @@ def public_state(career, chart_on, viewer_team_id=None):
         team.pop("reg_total", None)
         team.pop("reg_adapted", None)
         team.pop("reg_unadapted", None)
+        # v0.7.0: hidden team reputation NEVER leaves the server —
+        # no number, no hint. Players only ever see the outcomes
+        # (donations, offers, proposals), never the value.
+        team.pop("team_rep", None)
     # v0.4: replacement / signing costs for the viewer's team,
     # computed server-side from the exact formula the signing
     # functions charge, so the Driver Market always shows the number
@@ -3615,6 +3899,10 @@ def public_state(career, chart_on, viewer_team_id=None):
     # last_season snapshot, so it is there for a migrated save too.
     if career.get("phase") == "winter_break":
         state["wb_review"] = winter_break_review(career, viewer_team_id)
+        # v0.7.0: the season recap panel at the top of the winter
+        # break — top 8 drivers, top 5 constructors, 12 round
+        # winners of the season just finished.
+        state["wb_recap"] = winter_break_recap(career)
     if chart_on:
         return state
     for team in state["teams"]:
