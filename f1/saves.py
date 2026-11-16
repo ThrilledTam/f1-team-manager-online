@@ -14,26 +14,30 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 13  # v0.7.2: season snapshots carry relationship data
-# (supplier / supplied teams per year, captured at the rollover);
-# the retirement formula is reworked (chance from age 30, gentler
-# ramp, position-based decreases, NO maximum age). v0.7.1: random
-# driver illness / injury (ill_* fields on every driver — default:
-# no driver ill) + F2 promoted drivers keep a frozen F2 tally
-# (f2_left + frozen values) + the slot a driver last held on a team
-# (last_slot, for the winter-break re-sign offer). v0.7.0: hidden
-# team reputation (team_rep on every team, 50.0 for migrated saves)
-# + season snapshots (one per completed season, rebuilt from
-# last_season / race_history for old saves) for the clickable
-# champion years. v0.6.6: team relationships, second pass — the
-# research cap is REMOVED entirely (setting, enforcement, bot cap);
-# WANTED works for customer teams too; the junior income share (15%
-# of race prize to the parent) + parent promotion/swap of junior
-# drivers + two-way donation requests + the 3-round contract-break
-# notice (break_notice on teams, donation_requests on the career).
-# v9 saves load fine: the
-# removed cap fields are dropped on load and the new fields backfill
-# to their defaults.
+SAVE_VERSION = 14  # v0.7.3: F2 promotions reworked (a T&R driver
+# still racing in F2 keeps their F2 tally in the plain fields and
+# their F1 results in f1_* fields — f2_tr + f1_points / f1_wins /
+# f1_podiums / f1_best_pos / f1_best_finish_round; the v0.7.1
+# frozen-departure tally (f2_left + frozen values) is DROPPED on
+# load) + gender ("M" / "F", backfilled from the five real female
+# drivers, everyone else "M"). v0.7.2: season snapshots carry
+# relationship data (supplier / supplied teams per year, captured
+# at the rollover); the retirement formula is reworked (chance
+# from age 30, gentler ramp, position-based decreases, NO maximum
+# age). v0.7.1: random driver illness / injury (ill_* fields on
+# every driver — default: no driver ill) + the slot a driver last
+# held on a team (last_slot, for the winter-break re-sign offer).
+# v0.7.0: hidden team reputation (team_rep on every team, 50.0 for
+# migrated saves) + season snapshots (one per completed season,
+# rebuilt from last_season / race_history for old saves) for the
+# clickable champion years. v0.6.6: team relationships, second pass
+# — the research cap is REMOVED entirely (setting, enforcement,
+# bot cap); WANTED works for customer teams too; the junior income
+# share (15% of race prize to the parent) + parent promotion/swap
+# of junior drivers + two-way donation requests + the 3-round
+# contract-break notice (break_notice on teams, donation_requests
+# on the career). v9 saves load fine: the removed cap fields are
+# dropped on load and the new fields backfill to their defaults.
 # v0.6: team relationships (supplier / customer / junior contracts,
 # WANTED drivers) — new fields on teams (relation_years, wanted)
 # + career-level relation_proposals; old saves backfill the 2026
@@ -190,22 +194,38 @@ def migrate_save(doc):
             d["team_points"] = d.get("points", 0) if d.get("status") == "f1" else 0
         d.setdefault("last_team_id", d.get("team_id"))
         # v0.7.1: illness / injury state (default: no driver ill, no
-        # substitute), the frozen F2 tally for a driver who left F2
-        # for F1 mid-season (default: still in F2 / never left), and
-        # the slot the driver last held on a team (default: unknown —
-        # the winter-break re-sign offer defaults to Seat 1).
+        # substitute) and the slot the driver last held on a team
+        # (default: unknown — the winter-break re-sign offer
+        # defaults to Seat 1).
         d.setdefault("ill_until_round", None)
         d.setdefault("ill_label", None)
         d.setdefault("ill_seat", None)
         d.setdefault("ill_sub_id", None)
         d.setdefault("ill_sub_for", None)
         d.setdefault("ill_sub_from", None)
-        d.setdefault("f2_left", False)
-        d.setdefault("f2_points", 0)
-        d.setdefault("f2_wins", 0)
-        d.setdefault("f2_best_pos", None)
-        d.setdefault("f2_best_finish_round", None)
         d.setdefault("last_slot", None)
+        # v0.7.3: the F2 rework — a driver still racing in F2 while
+        # holding an F1 T&R contract (f2_tr) and their separate F1
+        # tally (f1_* fields, default 0 / None), plus gender ("M" /
+        # "F" — the five real female drivers, everyone else "M").
+        # The v0.7.1 frozen-departure tally (f2_left + frozen
+        # values) is DROPPED: a driver who left F2 for F1 under the
+        # old rule keeps their plain fields as their F1 tally and
+        # is simply no longer in F2 (f2_tr stays False).
+        d.pop("f2_left", None)
+        d.pop("f2_points", None)
+        d.pop("f2_wins", None)
+        d.pop("f2_best_pos", None)
+        d.pop("f2_best_finish_round", None)
+        d.setdefault("f2_tr", False)
+        d.setdefault("f1_points", 0)
+        d.setdefault("f1_wins", 0)
+        d.setdefault("f1_podiums", 0)
+        d.setdefault("f1_best_pos", None)
+        d.setdefault("f1_best_finish_round", None)
+        from .models import FEMALE_DRIVERS
+        d.setdefault("gender",
+                     "F" if d.get("name") in FEMALE_DRIVERS else "M")
     # v0.3: champion history. A save from before v0.3 has none, or only
     # in-game rows (v0.2 appended {year, driver, team, points} per
     # completed season). Either way it gains the real 2010–2025 table

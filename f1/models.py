@@ -8,9 +8,17 @@ import copy
 import uuid
 
 CUSTOM_COLOURS = [
-    "#e74c3c", "#e67e22", "#f39c12", "#2ecc71", "#1abc9c",
-    "#3498db", "#9b59b6", "#fd79a8", "#00cec9", "#6c5ce7",
+    "#e67e22", "#f39c12", "#9b59b6", "#fd79a8", "#8B4513",
+    "#2D3436", "#7CB342", "#C3B091", "#AD1457", "#827717",
 ]
+# v0.7.3: the real female drivers (verified 2026-11-15 — Westcott
+# via F1 Academy, the others from the 2026 grid data). Mari Boya
+# is MALE (verified via Wikipedia / FIA F2) — do NOT mark him F.
+# Everyone else, including all fictional/generated drivers, is "M".
+FEMALE_DRIVERS = frozenset({
+    "Mathilda Paatz", "Marta García", "Abbi Pulling", "Doriane Pin",
+    "Payton Westcott",
+})
 
 
 def new_driver_id():
@@ -101,17 +109,23 @@ def make_driver(data, status="free", team_id=None):
         "ill_sub_id": None,
         "ill_sub_for": None,
         "ill_sub_from": None,
-        # v0.7.1: an F2 driver promoted to F1 mid-season STAYS in
-        # the F2 standings with their points frozen at departure
-        # (f2_left + the frozen tally) — they score no more F2
-        # points, and they cannot win the F2 title (see
-        # end_of_season, which picks the champion among drivers
-        # still in F2). Cleared for all drivers at the rollover.
-        "f2_left": False,
-        "f2_points": 0,
-        "f2_wins": 0,
-        "f2_best_pos": None,
-        "f2_best_finish_round": None,
+        # v0.7.3: an F2 driver holding an F1 T&R contract (f2_tr)
+        # KEEPS racing in F2 — their F2 tally stays in the plain
+        # fields (points / season_wins / season_podiums / best_pos)
+        # and their F1 results (illness-substitute races only) go
+        # in the f1_* fields. Replaces the v0.7.1 freeze (f2_left /
+        # f2_points): a promoted driver no longer has their F2
+        # points frozen, and they stay eligible for the F2 title.
+        "f2_tr": False,
+        "f1_points": 0,
+        "f1_wins": 0,
+        "f1_podiums": 0,
+        "f1_best_pos": None,
+        "f1_best_finish_round": None,
+        # v0.7.3: gender ("M" / "F") — a small indicator next to the
+        # driver's name everywhere in the UI. The five real female
+        # drivers are in FEMALE_DRIVERS above; everyone else is "M".
+        "gender": "F" if data["name"] in FEMALE_DRIVERS else "M",
         # v0.7.1: the slot the driver last held on a team ("seat1" /
         # "seat2" / "tr") — set when they leave a team slot so the
         # winter-break Drivers tab can offer expired drivers for

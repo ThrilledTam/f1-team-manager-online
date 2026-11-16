@@ -92,6 +92,29 @@ def lap_sim(driver_perf, team_perf, max_perf, min_perf, session, error_multiplie
     return lap_time
 
 
+def f1_tally(d):
+    """v0.7.3: the F1-championship tally for a driver. A driver still
+    racing in F2 while holding an F1 T&R contract (f2_tr) keeps their
+    F2 points in the plain fields — their F1 points, wins, podiums
+    and best finish live in the f1_* fields instead, so the two
+    championships never mix. Everyone else reads the plain fields."""
+    if d.get("f2_tr"):
+        return {
+            "points": d.get("f1_points", 0),
+            "wins": d.get("f1_wins", 0),
+            "podiums": d.get("f1_podiums", 0),
+            "best_pos": d.get("f1_best_pos"),
+            "best_finish_round": d.get("f1_best_finish_round"),
+        }
+    return {
+        "points": d.get("points", 0),
+        "wins": d.get("season_wins", 0),
+        "podiums": d.get("season_podiums", 0),
+        "best_pos": d.get("best_pos"),
+        "best_finish_round": d.get("best_finish_round"),
+    }
+
+
 def _driver_sort_key(d, prev):
     """v0.4 standings sort (feature 1): points desc, wins desc, best
     finish (lower is better), then whoever achieved that best finish
@@ -99,13 +122,17 @@ def _driver_sort_key(d, prev):
     best finish, then earliest. prev is the {driver_id: rank} map of
     last season's finishing order — the final tie-break, so a new
     season opens in last season's order (all on 0). Drivers with no
-    previous order go after the carried-over drivers, by perf, name."""
+    previous order go after the carried-over drivers, by perf, name.
+    v0.7.3: the sort reads the F1 tally (f1_tally) — a driver still
+    racing in F2 (f2_tr) sorts on their F1 points, never their F2
+    points."""
     n_prev = len(prev)
+    t = f1_tally(d)
     return (
-        -d["points"],
-        -d.get("season_wins", 0),
-        d["best_pos"] if d["best_pos"] is not None else 99,
-        d.get("best_finish_round") if d.get("best_finish_round") is not None else 99,
+        -t["points"],
+        -t["wins"],
+        t["best_pos"] if t["best_pos"] is not None else 99,
+        t["best_finish_round"] if t["best_finish_round"] is not None else 99,
         prev.get(d["id"], n_prev),
         -d["perf"],
         d["name"],
@@ -228,7 +255,12 @@ def simulate_f2(career, rng=None):
     perf alone. Returns ordered F2 drivers; points are awarded by the caller
     (F2 uses the same top-10 points in the original)."""
     rng = rng or random
-    f2 = [d for d in career["drivers"] if d["status"] == "f2"]
+    # v0.7.3: a driver still racing F2 while holding an F1 T&R
+    # contract (f2_tr) keeps racing — they stay in the F2
+    # standings, keep their F2 points, and stay eligible for the
+    # F2 title (their F1 results go in the f1_* fields instead).
+    f2 = [d for d in career["drivers"]
+          if d["status"] == "f2" or d.get("f2_tr")]
     for d in f2:
         total = 0.0
         for _ in range(30):
@@ -304,11 +336,23 @@ def apply_race_results(career, race_entries, points_dist, dnf_entries=None):
         # v0.4: best finish + the round it was achieved (standings
         # tie-break "whoever got there first"), podiums, and the
         # finishing-position sum/count (bot drop rule uses the average).
-        if d.get("best_pos") is None or pos < d["best_pos"]:
-            d["best_pos"] = pos
-            d["best_finish_round"] = career["round"]
-        if pos <= 3:
-            d["season_podiums"] = d.get("season_podiums", 0) + 1
+        # v0.7.3: a driver still racing in F2 while holding an F1 T&R
+        # contract (f2_tr) writes their F1 result into the f1_* fields
+        # — their plain fields are their F2 tally and must not be
+        # touched. team_points (points scored FOR this team) still
+        # goes to the plain field: the points count for the team.
+        if d.get("f2_tr"):
+            if d.get("f1_best_pos") is None or pos < d["f1_best_pos"]:
+                d["f1_best_pos"] = pos
+                d["f1_best_finish_round"] = career["round"]
+            if pos <= 3:
+                d["f1_podiums"] = d.get("f1_podiums", 0) + 1
+        else:
+            if d.get("best_pos") is None or pos < d["best_pos"]:
+                d["best_pos"] = pos
+                d["best_finish_round"] = career["round"]
+            if pos <= 3:
+                d["season_podiums"] = d.get("season_podiums", 0) + 1
         d["finish_sum"] = d.get("finish_sum", 0) + pos
         d["finish_count"] = d.get("finish_count", 0) + 1
         # v0.4.4: F1 starts this season — the standings rule (a driver
@@ -323,10 +367,16 @@ def apply_race_results(career, race_entries, points_dist, dnf_entries=None):
             # Championship points follow the driver; team_points are
             # the points scored FOR this team (v0.2.1) — only these
             # count toward the constructor total.
-            d["points"] += points_dist[pos - 1]
+            if d.get("f2_tr"):
+                d["f1_points"] = d.get("f1_points", 0) + points_dist[pos - 1]
+            else:
+                d["points"] += points_dist[pos - 1]
             d["team_points"] = d.get("team_points", 0) + points_dist[pos - 1]
         if pos == 1:
-            d["season_wins"] += 1
+            if d.get("f2_tr"):
+                d["f1_wins"] = d.get("f1_wins", 0) + 1
+            else:
+                d["season_wins"] += 1
             d["gp_wins"] = d.get("gp_wins", 0) + 1  # v0.5: career win
             # v0.4: a constructor win is a race win by either driver.
             team["season_wins"] = team.get("season_wins", 0) + 1
@@ -425,13 +475,12 @@ def driver_standings(career):
 
 
 def _f2_effective(d):
-    """v0.7.1: the F2 standings values for a driver — live for a
-    driver still in F2, the frozen departure tally for a driver who
-    left F2 for F1 (their points, wins and best finish froze the
-    moment they were promoted)."""
-    if d.get("f2_left"):
-        return (d.get("f2_points", 0), d.get("f2_wins", 0),
-                d.get("f2_best_pos"), d.get("f2_best_finish_round"))
+    """v0.7.3: the F2 standings values for a driver — the plain
+    fields, which ARE the F2 tally for a driver still in F2 (an
+    f2_tr driver keeps their F2 points/wins/best in the plain fields
+    and their F1 results in the f1_* fields). Replaces the v0.7.1
+    frozen-departure tally (f2_left / f2_points): a promoted driver
+    keeps racing F2 and their tally keeps moving."""
     return (d["points"], d.get("season_wins", 0), d.get("best_pos"),
             d.get("best_finish_round"))
 
@@ -441,20 +490,18 @@ def f2_standings(career):
     (no F2 teams), sorted with the same rule as the F1 drivers'
     championship — points, wins, best finish, earliest.
 
-    v0.7.1: a driver promoted to F1 mid-season STAYS listed here,
-    with their points frozen at departure (f2_left + the frozen
-    tally — the F2 sim only races status == "f2" drivers, so they
-    score no more F2 points). They are NOT eligible to win the F2
-    title: end_of_season picks the champion among drivers still in
-    F2 only."""
+    v0.7.3: a driver signed to an F1 T&R contract mid-season KEEPS
+    racing F2 and stays in this table with a live tally — they stay
+    eligible for the F2 title and can win it while holding the T&R
+    contract. (Replaces the v0.7.1 freeze: no f2_left any more.)"""
     f2 = [d for d in career["drivers"]
-          if d["status"] == "f2" or d.get("f2_left")]
+          if d["status"] == "f2" or d.get("f2_tr")]
     return sorted(f2, key=lambda d: _f2_sort_key(d))
 
 
 def _f2_sort_key(d):
-    """Like _driver_sort_key but on the F2-effective values (frozen
-    for a driver who left for F1)."""
+    """Like _driver_sort_key but on the F2-effective values (the
+    plain fields — the F2 tally for a driver still in F2)."""
     pts, wins, best, best_round = _f2_effective(d)
     return (-pts, -wins,
             best if best is not None else 99,
