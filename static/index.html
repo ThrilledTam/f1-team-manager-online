@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.7.2</title>
+<title>F1 Team Manager Online — v0.7.3</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -54,6 +54,11 @@
   .surname { font-weight:700; text-transform:uppercase; }
   .team-bar { font-weight:900; margin-right:4px; }
   .trophy { font-size:13px; white-space:nowrap; }
+  /* v0.7.3: the gender indicator — a tiny muted M/F letter after
+     the surname, everywhere a driver's name is rendered. */
+  .gender-badge { font-size:10px; font-weight:600; color:#8b949e;
+    border:1px solid #30363d; border-radius:3px; padding:0 2px;
+    margin-left:3px; vertical-align:middle; white-space:nowrap; }
   .gl-up { color:#3fb950; font-weight:700; }
   .gl-down { color:#f85149; font-weight:700; }
   .medal { font-size:16px; }
@@ -148,7 +153,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.2 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.3 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -535,7 +540,7 @@ function renderOverlayBody(p){
     const wbNote = pendingSign.wb
       ? `<br><span class="note">Winter break: this ADDS an offer for this round — the driver signs with the best-placed team that offered them when everyone hits NEXT.</span>`
       : `<br><span class="note">T&R drivers are paid their full salary and add +25% to research gained.</span>`;
-    html = `<b>Sign ${esc(pd.name)} ${where}?</b>
+    html = `<b>Sign ${esc(pd.name)}${genderBadge(pd.name, pd.gender)} ${where}?</b>
       <span class="note">Cost: ${costTxt} · Salary ${money(pd.salary)}/season (paid ${money(pd.salary / 12)} after each race).</span>${fineTxt}${wbNote}<br>
       <span class="note">Pick the contract length:</span>
       ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
@@ -759,13 +764,25 @@ function driverInitials(name){
   const first = f.first ? f.first[0].toUpperCase() : "?";
   return first + "." + f.last.slice(0, 3).toUpperCase();
 }
-function driverNameHtml(name, teamColour, cha, withBar, barColour){
+/* v0.7.3: gender ("M" / "F") for a driver name — looked up in the
+   career drivers by name when the caller does not pass it. A name
+   not in the career (a real 2010–2025 driver) is male, so the
+   fallback is "M". */
+function genderOf(name){
+  const d = room && room.career ? (room.career.drivers || []).find(x => x.name === name) : null;
+  return (d && d.gender) || "M";
+}
+function genderBadge(name, gender){
+  const g = gender || genderOf(name);
+  return ` <span class="gender-badge" title="${g === "F" ? "Female" : "Male"}">${g}</span>`;
+}
+function driverNameHtml(name, teamColour, cha, withBar, barColour, gender){
   const f = splitName(name);
   const barCol = barColour || teamColour;
   const bar = (withBar && barCol) ? `<span class="team-bar" style="color:${barCol}">|</span> ` : "";
   const style = teamColour ? ` style="color:${teamColour}"` : "";
   const trophy = cha ? ` <span class="trophy" title="${cha} world title${cha > 1 ? "s" : ""}">🏆${cha}</span>` : "";
-  return `${bar}<span>${esc(f.first)}</span> <span class="surname"${style}>${esc(f.last.toUpperCase())}</span>${trophy}`;
+  return `${bar}<span>${esc(f.first)}</span> <span class="surname"${style}>${esc(f.last.toUpperCase())}</span>${genderBadge(name, gender)}${trophy}`;
 }
 /* Team name in team colour, supplier suffix in the supplier's colour
    (e.g. McLaren-Mercedes). The supplier is a constructor team, resolved
@@ -940,7 +957,7 @@ function connect(){
       // behind (e.g. "Your empty seats: 2" after a signing). Re-render
       // the current screen now that myTeam is fresh.
       renderAll();
-    } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box) box.innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>` + m.rumours.map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; return `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join("") + "</table></div>";
+    } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box){ let lastCat = null; const rows = (m.rumours || []).map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; const head = (r.category && r.category !== lastCat) ? `<tr><th colspan="4" style="text-align:left">${esc(r.category)}</th></tr>` : ""; lastCat = r.category || lastCat; return head + `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false, null, r.gender)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join(""); box.innerHTML = rows ? `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>${rows}</table></div>` : `<p class="note">No driver is likely to retire — every driver is under 30 or in a good position.</p>`; }
     } else if(m.type === "season_detail"){ seasonDetail = m.detail; viewingSeason = m.detail.year; syncOverlays();
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
     } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
@@ -1272,7 +1289,7 @@ function renderGame(){
     const offerLine = o => {
       const d = driverById(o.driver_id);
       const where = o.target === "tr" ? "Test & Reserve" : `Seat ${o.seat}`;
-      return `${d ? esc(d.name) : "?"} → ${where} (${o.years} yr${o.years > 1 ? "s" : ""})`;
+      return `${d ? esc(d.name) + genderBadge(d.name, d.gender) : "?"} → ${where} (${o.years} yr${o.years > 1 ? "s" : ""})`;
     };
     $("winter-offers-box").innerHTML =
       (submitted.length ? `<p><b>Submitted this round:</b> ${submitted.map(offerLine).join(" · ")}</p>` : "") +
@@ -1334,10 +1351,10 @@ function renderGame(){
     const wr = c.wb_review;
     const ls = c.last_season;
     const h2hLine = pair => pair.length === 2
-      ? `<p><b>Your drivers last season:</b> ${pair.map(d => `${esc(d.name)} — ${d.points} pts, ${d.wins} win${d.wins === 1 ? "" : "s"}, ${d.podiums} podium${d.podiums === 1 ? "" : "s"}, best P${d.best_pos === null || d.best_pos === undefined ? "—" : d.best_pos}, out-qualified teammate ${d.qual_h2h === null || d.qual_h2h === undefined ? "—" : d.qual_h2h}x`).join(" · ")}</p>`
+      ? `<p><b>Your drivers last season:</b> ${pair.map(d => `${esc(d.name)}${genderBadge(d.name, d.gender)} — ${d.points} pts, ${d.wins} win${d.wins === 1 ? "" : "s"}, ${d.podiums} podium${d.podiums === 1 ? "" : "s"}, best P${d.best_pos === null || d.best_pos === undefined ? "—" : d.best_pos}, out-qualified teammate ${d.qual_h2h === null || d.qual_h2h === undefined ? "—" : d.qual_h2h}x`).join(" · ")}</p>`
       : "";
     if(wr && (wr.drivers || wr.teams)){
-      const top5 = (wr.drivers || []).slice(0, 5).map((d, i) => `${i + 1}. ${esc(d.name)} (${esc(d.team || "")}) ${d.points} pts${d.wins ? `, ${d.wins} win${d.wins === 1 ? "" : "s"}` : ""}`).join(" · ");
+      const top5 = (wr.drivers || []).slice(0, 5).map((d, i) => `${i + 1}. ${esc(d.name)}${genderBadge(d.name, d.gender)} (${esc(d.team || "")}) ${d.points} pts${d.wins ? `, ${d.wins} win${d.wins === 1 ? "" : "s"}` : ""}`).join(" · ");
       const top3 = (wr.teams || []).slice(0, 3).map((t, i) => `${i + 1}. ${esc(t.name)} ${t.points} pts`).join(" · ");
       $("winter-review").innerHTML = `<h3>Last season (${wr.year}) — final standings</h3>` +
         `<p class="note">Drivers: ${top5}.</p>` +
@@ -1413,7 +1430,7 @@ function renderMyTeam(){
     // in — with exactly one T&R driver that one is already the sub.
     const swapHint = trs.some(x => !x.ill_until_round)
       ? " Pick a different T&R driver in the Drivers tab if you prefer (free swap)." : "";
-    return `<br><span class="note">🤒 <b>${esc(d.name)}</b> is ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}${sub ? ` — ${esc(sub.name)} is standing in for them.` : " — no substitute available."}${swapHint}</span>`;
+    return `<br><span class="note">🤒 <b>${esc(d.name)}${genderBadge(d.name, d.gender)}</b> is ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}${sub ? ` — ${esc(sub.name)}${genderBadge(sub.name, sub.gender)} is standing in for them.` : " — no substitute available."}${swapHint}</span>`;
   }).join("");
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
     · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}${reliabilityLine}<br>${drivers}${illNotice}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
@@ -1483,7 +1500,7 @@ function renderDriversTab(){
   const acs = t.academy_drivers || [];
   // Drop (release) — the break fee comes from the server (the same
   // formula as a main-driver replacement: rounds remaining ×
-  // salary/12 + $2.0M); shown upfront, charged on confirm.
+  // salary/12 + $3.0M); shown upfront, charged on confirm.
   // Unaffordable drops are disabled with the amount in the title,
   // like the market's unaffordable seats.
   const dropBtn = d => {
@@ -1500,7 +1517,8 @@ function renderDriversTab(){
     // v0.7.1: a substitute standing in for an ill driver is marked
     // as such — the seat belongs to the ill driver, who returns when
     // they recover.
-    const subNote = d.ill_sub_for ? ` <span class="note">(standing in for ${esc((driverById(d.ill_sub_for) || {}).name || "an ill driver")})</span>` : "";
+    const illDriver = d.ill_sub_for ? (driverById(d.ill_sub_for) || {}) : null;
+    const subNote = illDriver ? ` <span class="note">(standing in for ${esc(illDriver.name || "an ill driver")}${genderBadge(illDriver.name || "", illDriver.gender)})</span>` : "";
     return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>${subNote} ${dropBtn(d)}</div>`;
   }).join("");
   const trHtml = trs.length ? trs.map(d =>
@@ -1562,7 +1580,7 @@ function renderDriversTab(){
     const d = (t.drivers || []).concat(trs).find(x => x.id === b.dataset.dropDriver);
     const fee = b.dataset.fee ? parseFloat(b.dataset.fee) : (d && d.break_fee);
     openConfirm("Release this driver?",
-      `Release ${d ? d.name : "this driver"} from your team? Breaking their contract costs ${fee === null || fee === undefined || isNaN(fee) ? "the break fee" : money(fee)} (rounds remaining × salary/12 + $2.0M). They become a free agent and keep their championship points; the points they scored for the team stay with the team.`,
+      `Release ${d ? d.name : "this driver"} from your team? Breaking their contract costs ${fee === null || fee === undefined || isNaN(fee) ? "the break fee" : money(fee)} (rounds remaining × salary/12 + $3.0M). They become a free agent and keep their championship points; the points they scored for the team stay with the team.`,
       () => send({type:"release_driver", driver_id: b.dataset.dropDriver}));
   });
   // Swap / Promote (same actions as the My Team card — wired here
@@ -1604,12 +1622,13 @@ function renderDriversTab(){
 // to accept/decline, outgoing waiting), WANTED marks for every team
 // you supply, and — if you parent a junior team — its 15% race-prize
 // share and promotions. Relation changes happen in the winter break
-// only (breaking a deal works any time, with a 3-round notice —
-// v0.6.6); donations, WANTED marks, promotions and donation requests
-// work any time. v0.6.6: the research cap is gone entirely. The same
-// render fills the tab AND the winter-break card's Relationships
-// section (renderGame calls it for the winter box), so both stay in
-// sync.
+// only (v0.7.3: offering, accepting, breaking or ending a deal — a
+// break started in the winter break runs its 3-round notice into
+// the season); donations, WANTED marks, promotions and donation
+// requests work any time. v0.6.6: the research cap is gone entirely.
+// The same render fills the tab AND the winter-break card's
+// Relationships section (renderGame calls it for the winter box), so
+// both stay in sync.
 function renderRelationsTab(box){
   if(!box) return;
   const c = room.career; if(!c) return;
@@ -1627,10 +1646,12 @@ function renderRelationsTab(box){
   // Per-relation actions: step down (junior only), renew (expired
   // deals only, with a years picker), propose ending it (free — the
   // other side must agree) — all winter-break only — and break it
-  // now (unilateral, any time, $2.0M per remaining year, paid when
-  // the break starts; the deal ends after a 3-round notice and stays
-  // fully active meanwhile — v0.6.6). A deal with a pending break
-  // notice shows the notice instead of the buttons.
+  // now (unilateral, $2.0M per remaining year, paid when the break
+  // starts; the deal ends after a 3-round notice and stays fully
+  // active meanwhile — v0.6.6). v0.7.3: breaking a deal is
+  // winter-break-only too (a notice started in the winter break
+  // runs into the season). A deal with a pending break notice shows
+  // the notice instead of the buttons.
   const noticeText = (t2) => {
     const n = t2.break_notice;
     if(!n) return "";
@@ -1645,10 +1666,10 @@ function renderRelationsTab(box){
       if(stage === 2) h += ` <button class="secondary" data-rel-action="downgrade" data-other="${other.id}" title="Step down to Customer — the other side must agree">Propose step-down to Customer</button>`;
       if((years || 0) <= 0) h += ` <select class="rel-renew-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> <button class="secondary" data-rel-action="renew" data-other="${other.id}" title="Renew the deal — the other side must agree">Propose renewal</button>`;
       h += ` <button class="secondary" data-rel-action="end" data-other="${other.id}" title="Free — the other side must agree">Propose ending it</button>`;
+      h += ` <button class="danger" data-rel-action="break" data-other="${other.id}" data-fee="${fee}" title="Breaks the deal after a 3-round notice — you pay the fee now, no agreement needed">${fee > 0 ? `Break now — ${money(fee)}` : "Break now — Free"}</button>`;
     } else {
-      h += ` <span class="note">Relation changes are winter-break only — except breaking a deal, which works any time.</span>`;
+      h += ` <span class="note">Relation contracts — offering, accepting, breaking or ending a deal — are winter-break only.</span>`;
     }
-    h += ` <button class="danger" data-rel-action="break" data-other="${other.id}" data-fee="${fee}" title="Breaks the deal after a 3-round notice — you pay the fee now, no agreement needed">${fee > 0 ? `Break now — ${money(fee)}` : "Break now — Free"}</button>`;
     return h;
   };
   const proposalText = p => {
@@ -1662,7 +1683,7 @@ function renderRelationsTab(box){
     if(p.kind === "renew") return `Renew the ${sn}–${cn} deal for ${p.years} more years`;
     return p.kind;
   };
-  let html = `<p class="note">Supplier deals, donations, WANTED drivers, junior promotions and donation requests — team relationships change over time. Relation changes happen in the winter break (breaking a deal works any time, with a 3-round notice); donations, WANTED marks, promotions and donation requests work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
+  let html = `<p class="note">Supplier deals, donations, WANTED drivers, junior promotions and donation requests — team relationships change over time. Relation contracts — offering, accepting, breaking or ending a deal — happen in the winter break only (a break started in the winter break runs its 3-round notice into the season); donations, WANTED marks, promotions and donation requests work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
   // Your relation.
   html += `<h3>Your relation</h3>`;
   if(supplier){
@@ -1735,11 +1756,18 @@ function renderRelationsTab(box){
       // supply others are disabled (the role select re-enables them
       // for "They supply me" — there the target is the supplier,
       // and the rule bites MY team instead, so that role is disabled
-      // if my team already supplies others). The server rejects it
-      // too, and re-checks on accept.
+      // if my team already supplies others). v0.7.3: a team that
+      // already HAS a supplier (sup_stage > 0) cannot be proposed
+      // to in EITHER role — it can only break its contract — so
+      // supplied targets are disabled for both roles (the server
+      // rejects it too, and re-checks on accept).
       const teamOptions = others.map(x => {
         const s = suppliesAny(x.id);
-        return `<option value="${x.id}" data-supplies="${s ? 1 : 0}"${s ? ` title="${esc(x.name)} already supplies other teams — it can't become a customer or junior team"` : ""}>${esc(x.name)}${s ? " — already supplies teams" : ""}</option>`;
+        const supplied = (x.sup_stage || 0) > 0;
+        const note = s ? " — already supplies teams" : supplied ? " — already has a supplier" : "";
+        const title = s ? `${esc(x.name)} already supplies other teams — it can't become a customer or junior team`
+          : supplied ? `${esc(x.name)} already has a supplier — it can't be proposed to, it can only break its contract` : "";
+        return `<option value="${x.id}" data-supplies="${s ? 1 : 0}" data-supplied="${supplied ? 1 : 0}"${title ? ` title="${title}"` : ""}>${esc(x.name)}${note}</option>`;
       }).join("");
       html += `<p class="note">Propose a deal — the other team must accept. Nothing → Customer → Junior, one step at a time; a team has one supplier, and a supplier has at most one junior team. A team that already supplies other teams can't become a customer or junior — and if your team supplies others, it can't be supplied itself. Pick 1–4 contract years.</p><select class="rel-propose-team">${teamOptions}</select> <select class="rel-propose-kind"><option value="customer">Customer</option><option value="junior">Junior</option></select> <select class="rel-propose-role"><option value="me">I supply them</option><option value="them"${mySupplies ? ` disabled title="Your team already supplies other teams — it can't be supplied itself"` : ""}>They supply me${mySupplies ? " — your team already supplies others" : ""}</option></select> <select class="rel-propose-years"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> yrs <button data-rel-propose>Propose</button>`;
     }
@@ -1769,7 +1797,7 @@ function renderRelationsTab(box){
     html += `<p class="note">Mark a free-agent or F2 driver and ${esc(sup.name)} gets the reward if they sign them (main or T&amp;R). The reward is a cash bounty — it never changes the driver's reputation or rating. Max 3 at a time.</p>`;
     html += marks.length ? marks.map(w => {
       const d = driverById(w.driver_id);
-      return `<div class="bar-row">⭐ <b>${d ? esc(d.name) : "?"}</b> — ${money(w.reward)} reward <button class="secondary" data-rel-wanted-remove data-driver-id="${w.driver_id}" data-target-team="${sup.id}">Remove</button></div>`;
+      return `<div class="bar-row">⭐ <b>${d ? esc(d.name) + genderBadge(d.name, d.gender) : "?"}</b> — ${money(w.reward)} reward <button class="secondary" data-rel-wanted-remove data-driver-id="${w.driver_id}" data-target-team="${sup.id}">Remove</button></div>`;
     }).join("") : `<p class="note">No WANTED drivers marked yet.</p>`;
     const market = c.drivers.filter(d => d.status === "free" || d.status === "f2");
     html += `<select class="rel-wanted-driver" data-target-team="${sup.id}">${market.map(d => `<option value="${d.id}">${esc(d.name)} (${d.age}, ${money(d.salary)}/yr)</option>`).join("")}</select> <input class="rel-wanted-reward" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M reward <button data-rel-wanted-add data-target-team="${sup.id}">Mark WANTED</button>`;
@@ -1831,7 +1859,11 @@ function renderRelationsTab(box){
       const asCustomer = roleSel0.value === "me";
       let selectedOk = false;
       teamSel0.querySelectorAll("option").forEach(o => {
-        o.disabled = o.dataset.supplies === "1" && asCustomer;
+        // v0.7.3: a supplied target is disabled in BOTH roles (it
+        // can only break its contract); a target that supplies
+        // others is disabled only when it would become a customer.
+        o.disabled = o.dataset.supplied === "1"
+          || (o.dataset.supplies === "1" && asCustomer);
         if(!o.disabled && o.selected) selectedOk = true;
       });
       if(!selectedOk){
@@ -1851,7 +1883,12 @@ function renderRelationsTab(box){
     if(!teamSel || !teamSel.value){ showErr("game-err", "Pick a team to propose to."); return; }
     const target = teamById(teamSel.value);
     // v0.7.2: client-side mirror of the server rule (no supply
-    // chains — a team is either a parent or a child).
+    // chains — a team is either a parent or a child). v0.7.3: a
+    // supplied team cannot be proposed to in either role.
+    if(target && (target.sup_stage || 0) > 0){
+      showErr("game-err", `${target.name} already has a supplier — it can't be proposed to, it can only break its contract.`);
+      return;
+    }
     if(roleSel.value === "me" && c.teams.some(y => y.supplier_id === teamSel.value)){
       showErr("game-err", `${target ? target.name : "That team"} already supplies other teams — it can't become a customer or junior team.`);
       return;
@@ -1934,7 +1971,7 @@ function renderTabs(){
   // Market — v0.3: signing is FREE (no upfront cost — a driver's MV
   // is their salary per season, paid salary/12 after each race). The
   // only charge is breaking the current driver's contract when the
-  // seat is occupied: (rounds left × salary ÷ 12) + $2.0M. An empty
+  // seat is occupied: (rounds left × salary ÷ 12) + $3.0M. An empty
   // seat shows "Seat N — Free". The cost shown is computed
   // server-side from the exact formula the signing functions charge.
   // Unaffordable seats are disabled and show the amount needed.
@@ -1984,7 +2021,16 @@ function renderTabs(){
     // exponential academy fine.
     const academyBtn = (myTeam && (d.status === "free" || d.status === "f2") && d.age <= 25 && !d.academy_team_id)
       ? `<button class="secondary" data-academy="${d.id}" title="Add to your Driver Academy — costs ${money(d.salary / 3)}M/season (1/3 of salary)">🎓 Academy</button>` : "";
-    return `<div class="market-seats">${[1, 2].map(s => costCell(d, String(s), `${verb} ${s}`)).join("")}${costCell(d, "tr", trVerb)}${academyBtn}</div>`;
+    // v0.7.3: mid-season, an F2 driver can only join as Test &
+    // Reserve — they keep racing F2, and a main seat only opens to
+    // them once the F2 season is over (the winter break). The same
+    // for a T&R driver still racing in F2 (f2_tr) in the poaching
+    // list. In the winter break the main-seat buttons are offered.
+    const f2OnlyTr = !isWB && (d.status === "f2" || d.f2_tr);
+    const seatBtns = f2OnlyTr
+      ? `<span class="note" title="Still racing in F2 — main seats open in the winter break">F2 — T&R only</span>`
+      : [1, 2].map(s => costCell(d, String(s), `${verb} ${s}`)).join("");
+    return `<div class="market-seats">${seatBtns}${costCell(d, "tr", trVerb)}${academyBtn}</div>`;
   };
   const marketRow = d => {
     const tm = d.team_id ? teamById(d.team_id) : null;
@@ -2024,7 +2070,7 @@ function renderTabs(){
   $("market-box").innerHTML =
     `<p class="note">${isWB
       ? "Winter break: tap a button to add an OFFER for this round (max 3 offers, max 2 main seats, max 1 T&R). Submit them from the winter-break card, then hit NEXT. A driver signs with the best-placed constructors' team that offered them."
-      : "Signing is free — no upfront cost. If a seat is occupied, breaking that driver's contract costs (rounds left × salary ÷ 12) + $2.0M; an empty seat is free. A driver's MV is their salary per season, paid after each race. Pick 1–4 contract years when you sign. T&R drivers are paid in full and add +25% to research each. There is no cap on T&R drivers — but every driver beyond the first 2 costs an exponential fine per race ($0.5M for the 3rd, $1.5M/race for the 3rd+4th), shown in the sign pop-up before you commit. 🎓 Academy: add a free-agent or F2 driver aged 25 or under to your Driver Academy — the team pays 1/3 of their salary, they weigh your offers more heavily, and their rating grows faster; the first 3 academy drivers are free of the academy fine. Poaching another team's driver costs that driver's break fee. Driver perf is hidden when the chart is off."}</p>` +
+      : "Signing is free — no upfront cost. If a seat is occupied, breaking that driver's contract costs (rounds left × salary ÷ 12) + $3.0M; an empty seat is free. A driver's MV is their salary per season, paid after each race. Pick 1–4 contract years when you sign. T&R drivers are paid in full and add +25% to research each. There is no cap on T&R drivers — but every driver beyond the first 2 costs an exponential fine per race ($0.5M for the 3rd, $1.5M/race for the 3rd+4th), shown in the sign pop-up before you commit. 🎓 Academy: add a free-agent or F2 driver aged 25 or under to your Driver Academy — the team pays 1/3 of their salary, they weigh your offers more heavily, and their rating grows faster; the first 3 academy drivers are free of the academy fine. Poaching another team's driver costs that driver's break fee. Poaching an academy junior from another team costs half their salary term + $1.0M. Driver perf is hidden when the chart is off."}</p>` +
     // v0.4.2: the T&R fine warning, as one line above the table
     // (not in every row — the rows must stay compact): what signing
     // one more T&R driver would cost this team per race.
@@ -2073,39 +2119,44 @@ function renderTabs(){
   const prevRank = d => { const i = prevOrder.indexOf(d.id); return i === -1 ? prevOrder.length : i; };
   const prevTeamOrder = c.prev_team_order || [];
   const prevTeamRank = t => { const i = prevTeamOrder.indexOf(t.id); return i === -1 ? prevTeamOrder.length : i; };
-  const drvSort = (a, b) => b.points - a.points || (b.season_wins || 0) - (a.season_wins || 0)
-    || (a.best_pos || 99) - (b.best_pos || 99)
-    || (a.best_finish_round || 99) - (b.best_finish_round || 99)
+  // v0.7.3: the F1-effective values for a driver — a T&R driver
+  // still racing in F2 (f2_tr) reads their f1_* fields (their F1
+  // results, from illness-substitute races), never their F2 points
+  // in the plain fields. Mirrors race.f1_tally on the server.
+  const f1Val = d => d.f2_tr
+    ? { pts: d.f1_points || 0, wins: d.f1_wins || 0, best: d.f1_best_pos, round: d.f1_best_finish_round }
+    : { pts: d.points, wins: d.season_wins || 0, best: d.best_pos, round: d.best_finish_round };
+  const drvSort = (a, b) => { const av = f1Val(a), bv = f1Val(b);
+    return bv.pts - av.pts || bv.wins - av.wins
+    || (av.best || 99) - (bv.best || 99)
+    || (av.round || 99) - (bv.round || 99)
     || prevRank(a) - prevRank(b)
-    || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name);
+    || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name); };
   const drv = [...c.drivers.filter(d => d.status === "f1" || (d.status === "free" && d.points > 0) || (d.f1_races || 0) > 0)].sort(drvSort);
   const teams = [...c.teams].sort((a, b) => b.points - a.points || (b.season_wins || 0) - (a.season_wins || 0)
     || (a.best_pos || 99) - (b.best_pos || 99)
     || (a.best_finish_round || 99) - (b.best_finish_round || 99)
     || prevTeamRank(a) - prevTeamRank(b) || a.name.localeCompare(b.name));
-  // v0.7.1: an F2 driver promoted to F1 mid-season STAYS listed in
-  // the F2 standings with their points frozen at departure (f2_left
-  // + the frozen tally) and an "↑ F1" tag. The F2 sim only races
-  // status == "f2" drivers, so they score no more F2 points. Sorted
-  // by the effective values — live for drivers still in F2, frozen
-  // for those who left — mirroring the server's f2_standings.
-  const f2Val = d => d.f2_left
-    ? { pts: d.f2_points || 0, wins: d.f2_wins || 0, best: d.f2_best_pos, round: d.f2_best_finish_round }
-    : { pts: d.points, wins: d.season_wins || 0, best: d.best_pos, round: d.best_finish_round };
-  const f2 = [...c.drivers.filter(d => d.status === "f2" || d.f2_left)].sort((a, b) => {
-    const av = f2Val(a), bv = f2Val(b);
-    return bv.pts - av.pts || bv.wins - av.wins || (av.best || 99) - (bv.best || 99)
-      || (av.round || 99) - (bv.round || 99) || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name);
-  });
+  // v0.7.3: an F2 driver holding an F1 T&R contract (f2_tr) KEEPS
+  // racing F2 — they stay in this table with a live tally (the
+  // plain fields ARE their F2 tally) and stay eligible for the F2
+  // title. They carry a T&R pill so you can see they also hold an
+  // F1 Test & Reserve contract. (Replaces the v0.7.1 freeze: no
+  // frozen points, no promotion tag.)
+  const f2 = [...c.drivers.filter(d => d.status === "f2" || d.f2_tr)].sort((a, b) =>
+    b.points - a.points || (b.season_wins || 0) - (a.season_wins || 0)
+    || (a.best_pos || 99) - (b.best_pos || 99)
+    || (a.best_finish_round || 99) - (b.best_finish_round || 99)
+    || (b.perf || 0) - (a.perf || 0) || a.name.localeCompare(b.name));
   // v0.5: F2 drivers are coloured by their academy F1 team
   // (academy_team_id); juniors with no academy team stay neutral,
   // like free agents in the F1 table. Same sort and listing as before.
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${d.points}</td><td>${d.season_wins}</td></tr>`; }).join("") + "</table></div>" +
+    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; const v = f1Val(d); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") + "</table></div>" +
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td><td>${t.season_wins || 0}</td></tr>`).join("") + "</table></div>" +
     `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const nameColour = atm ? atm.colour : null; const v = f2Val(d); const f1Tag = d.f2_left ? ` <span class="pill adv">↑ F1</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!atm, atm ? atm.colour : null)}${f1Tag}</td><td>${atm ? teamNameHtml(atm) : "—"}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
+    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const nameColour = atm ? atm.colour : null; const trTag = d.f2_tr ? ` <span class="pill adv" title="Also holds an F1 Test & Reserve contract — still racing F2">T&R</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!atm, atm ? atm.colour : null)}${trTag}</td><td>${atm ? teamNameHtml(atm) : "—"}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
   // Chart
   if(room.chart_on){
     const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
