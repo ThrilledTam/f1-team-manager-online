@@ -445,7 +445,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 13  # v0.7.2 save format
+        assert loaded["version"] == 14  # v0.7.3 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -1754,18 +1754,40 @@ def test_midseason_move_keeps_points_across_teams():
 
 
 def test_f2_signing_starts_at_zero():
-    """An F2 driver signed mid-season starts at 0: F2 championship
-    points must not carry into F1."""
+    """v0.7.3: an F2 driver signed mid-season can ONLY join as Test &
+    Reserve — a main seat is rejected until the F2 season ends. As a
+    T&R driver they keep racing F2 (their F2 points stay in the plain
+    fields) while their F1 tally starts at 0. In the winter break a
+    main-seat signing is allowed, and then the F2 tally is cleared so
+    F2 championship points never carry into F1."""
     career = two_human_career()
     f2 = game.f2_drivers(career)[0]
     f2["points"] = 30  # F2 championship points
     team = career["teams"][0]
     team["money"] = 100.0
     ok, msg = game.sign_driver(career, team["id"], f2["id"], 1)
+    assert not ok and "Test & Reserve" in msg, msg
+    assert f2["status"] == "f2" and f2["points"] == 30
+    ok, msg = game.sign_tr_driver(career, team["id"], f2["id"], 2)
     assert ok, msg
-    assert f2["status"] == "f1" and f2["team_id"] == team["id"]
-    assert f2["points"] == 0 and f2["team_points"] == 0
-    assert f2["season_wins"] == 0 and f2["best_pos"] is None
+    assert f2["status"] == "tr" and f2.get("f2_tr") is True
+    assert f2["points"] == 30  # still racing F2 — the tally stays
+    assert f2["f1_points"] == 0 and f2["f1_wins"] == 0
+    assert f2["f1_best_pos"] is None
+    # Winter break: the same driver may now take a main seat, and the
+    # F2 tally is cleared on the move.
+    career["phase"] = "winter_break"
+    other = game.f2_drivers(career)[0]
+    other["points"] = 40
+    team["money"] = 100.0
+    # In the winter break the direct sign is blocked (offers only),
+    # so the winter-break signing API is used here.
+    ok, msg = game.sign_driver_wb(career, team, other, 2, 2)
+    assert ok, msg
+    assert other["status"] == "f1" and other["team_id"] == team["id"]
+    assert other["points"] == 0 and other["team_points"] == 0
+    assert other["season_wins"] == 0 and other["best_pos"] is None
+    assert other.get("f2_tr") is False
 
 
 def test_replacement_cost_matches_charge_and_is_shown():
@@ -1780,7 +1802,7 @@ def test_replacement_cost_matches_charge_and_is_shown():
     incoming = game.free_agents(career)[0]  # Tsunoda
     occupant = game.get_driver(career, team["driver1_id"])
     # Round 1: 12 rounds left this season + 1 more year (12 rounds).
-    expected = (12 + 12) * occupant["salary"] / 12 + 2.0
+    expected = (12 + 12) * occupant["salary"] / 12 + 3.0
     quote = game.break_cost(career, team["id"], incoming["id"], 1)
     assert quote is not None
     assert quote["total"] == pytest.approx(expected)
@@ -1871,23 +1893,44 @@ def test_replaced_driver_old_team_in_standings_ui():
             }""")
             p1.click("#btn-start-career")
             p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
-            # Play one round so the McLaren drivers have points.
-            p1.click("#btn-advance")
-            p2.click("#btn-advance")
-            p1.wait_for_selector("#screen-results:not(.hidden)", timeout=15000)
-            p1.click("#btn-vote-next")
-            p2.click("#btn-vote-next")
-            p1.wait_for_selector("text=Race Results", timeout=15000)
-            p1.click("#btn-vote-next")
-            p2.click("#btn-vote-next")
-            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
-            # Who is in each McLaren seat? (The outgoing driver's
-            # surname must stay visible with McLaren in the standings
-            # after replacement.) The race sorts D1/D2 by team points,
-            # so either driver can be in seat 1 after round 1.
-            my_team = p1.inner_text("#my-team")
-            seats = re.findall(r"\b([A-Z][a-z]+)\s+([A-Z]+)\b", my_team)
-            assert len(seats) >= 2, my_team
+            # Play rounds until a McLaren seat is affordable. v0.7.3:
+            # the $3.0M flat raised break fees (Norris's seat is now
+            # $12.97M at round 2), so a bad round 1 can leave both
+            # seats unaffordable against McLaren's worst-case $12.26M
+            # after round 1 — each extra round adds prize money, so
+            # loop (cap 4 rounds) and re-read the seats each time
+            # (the race sorts D1/D2 by team points).
+            seats = []
+            for _round in range(4):
+                p1.click("#btn-advance")
+                p2.click("#btn-advance")
+                p1.wait_for_selector("#screen-results:not(.hidden)", timeout=15000)
+                p1.click("#btn-vote-next")
+                p2.click("#btn-vote-next")
+                p1.wait_for_selector("text=Race Results", timeout=15000)
+                p1.click("#btn-vote-next")
+                p2.click("#btn-vote-next")
+                p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+                # Who is in each McLaren seat? (The outgoing driver's
+                # surname must stay visible with McLaren in the standings
+                # after replacement.) The race sorts D1/D2 by team points,
+                # so either driver can be in seat 1 after a round.
+                my_team = p1.inner_text("#my-team")
+                seats = re.findall(r"\b([A-Z][a-z]+)\s+([A-Z]+)\b", my_team)
+                assert len(seats) >= 2, my_team
+                p1.click("button[data-tab='market']")
+                affordable = p1.evaluate("""() => {
+                    const btns = [...document.querySelectorAll('#market-box button[data-sign][data-seat]')]
+                      .filter(b => (b.dataset.seat === '1' || b.dataset.seat === '2') && !b.disabled);
+                    return btns.length > 0;
+                }""")
+                if affordable:
+                    break
+                # Not affordable yet: back to the dashboard and play
+                # another round for more prize money.
+                p1.click("button[data-tab='research']")
+            else:
+                raise AssertionError("no McLaren seat affordable after 4 rounds")
             # Market tab: per-seat costs are shown before committing.
             p1.click("button[data-tab='market']")
             market = p1.inner_text("#market-box")
@@ -2047,7 +2090,7 @@ def test_swapped_driver_stays_in_standings_ui():
 def test_break_cost_gasly_example():
     """Matthew's own example, verbatim: Gasly, contract 3, start of
     round 9 (4 rounds left this season), salary $4.0M ->
-    28 x $4.0M/12 + $2.0M = $11.33M."""
+    28 x $4.0M/12 + $3.0M = $12.33M."""
     career = game.build_new_career("Test", "Matthew")
     alpine = next(t for t in career["teams"] if t["name"] == "Alpine")
     gasly = next(d for d in game.team_drivers(career, alpine)
@@ -2058,12 +2101,12 @@ def test_break_cost_gasly_example():
     fa = game.free_agents(career)[0]
     quote = game.break_cost(career, alpine["id"], fa["id"], 1)
     assert quote is not None
-    assert quote["total"] == pytest.approx(11.33, abs=0.01)
-    assert quote["break_fee"] == pytest.approx(11.33, abs=0.01)
+    assert quote["total"] == pytest.approx(12.33, abs=0.01)
+    assert quote["break_fee"] == pytest.approx(12.33, abs=0.01)
     # Seat 2 (Colapinto, salary 1.5, 1 year left): only the 4 rounds
-    # left this season count -> 4 x 1.5/12 + 2 = $2.50M.
+    # left this season count -> 4 x 1.5/12 + 3 = $3.50M.
     quote2 = game.break_cost(career, alpine["id"], fa["id"], 2)
-    assert quote2["total"] == pytest.approx(2.50, abs=0.01)
+    assert quote2["total"] == pytest.approx(3.50, abs=0.01)
 
 
 def test_break_cost_winter_break_and_final_round():
@@ -2080,14 +2123,14 @@ def test_break_cost_winter_break_and_final_round():
     career["phase"] = "winter_break"
     career["round"] = 12
     quote = game.break_cost(career, alpine["id"], fa["id"], 1)
-    # 2 full years left: 24 x 4/12 + 2 = $10.00M.
-    assert quote["total"] == pytest.approx(10.00, abs=0.01)
+    # 2 full years left: 24 x 4/12 + 3 = $11.00M.
+    assert quote["total"] == pytest.approx(11.00, abs=0.01)
     career["phase"] = "round"
     career["round"] = 12
     gasly["contract_left"] = 1
     quote = game.break_cost(career, alpine["id"], fa["id"], 1)
-    # 1 round left: 1 x 4/12 + 2 = $2.33M.
-    assert quote["total"] == pytest.approx(2.33, abs=0.01)
+    # 1 round left: 1 x 4/12 + 3 = $3.33M.
+    assert quote["total"] == pytest.approx(3.33, abs=0.01)
 
 
 def test_signing_into_empty_seat_is_free():
@@ -2382,7 +2425,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 13
+        assert loaded["version"] == 14
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2490,15 +2533,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v072():
-    """The live version string is v0.7.2 everywhere it is shown."""
+def test_health_reports_v073():
+    """The live version string is v0.7.3 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.7.2"
+    assert client.get("/api/health").json()["version"] == "v0.7.3"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.7.2</title>" in html
-    assert "Online · v0.7.2 beta" in html
+    assert "<title>F1 Team Manager Online — v0.7.3</title>" in html
+    assert "Online · v0.7.3 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3108,7 +3151,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 13
+    assert SAVE_VERSION == 14
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -3757,15 +3800,19 @@ def test_academy_leaving_on_signing():
     camara = next(d for d in career["drivers"] if d["name"] == "Rafael Câmara")
     assert camara["academy_team_id"] == ferrari["id"]
     # Main signing with another team frees the academy slot.
+    # (v0.7.3: an F2 driver can only take a main seat in the winter
+    # break, so the winter-break signing API is used here.)
+    career["phase"] = "winter_break"
     mercedes["driver1_id"] = None
     mercedes["money"] = 100.0
-    ok, msg = game.sign_driver(career, mercedes["id"], camara["id"], 1)
+    ok, msg = game.sign_driver_wb(career, mercedes, camara, 1, 2)
     assert ok, msg
     assert camara["status"] == "f1" and camara["academy_team_id"] is None
     assert game.team_academy_drivers(career, ferrari) == [
         d for d in game.team_academy_drivers(career, ferrari)
         if d["name"] == "Dino Beganovic"]
-    # T&R signing frees it too.
+    # T&R signing frees it too (T&R is allowed mid-season).
+    career["phase"] = "round"
     dunne = next(d for d in career["drivers"] if d["name"] == "Alex Dunne")
     alpine = next(t for t in career["teams"] if t["name"] == "Alpine")
     assert dunne["academy_team_id"] == alpine["id"]
@@ -3947,7 +3994,7 @@ def test_import_flow_save_appears_immediately():
 def test_release_tr_driver_costs_main_driver_break_fee():
     """v0.4.3: releasing a T&R driver costs EXACTLY what breaking a
     main driver's contract costs — rounds_remaining x salary/12 +
-    $2.0M — shown upfront and charged on confirm. The driver becomes
+    $3.0M — shown upfront and charged on confirm. The driver becomes
     a free agent, keeps championship points, and the points they
     scored for the team stay with the team."""
     career = game.build_new_career("Test", "Matthew")
@@ -3957,8 +4004,8 @@ def test_release_tr_driver_costs_main_driver_break_fee():
     d = next(x for x in trs if x["name"] == "Nyck de Vries")
     d["points"] = 10  # a T&R driver can hold points from an earlier stint
     fee = game.break_fee_for_driver(career, d)
-    # Round 1, 2-year contract: (12 + 12) x 1.5/12 + 2.0 = $5.0M.
-    assert fee == pytest.approx(5.0)
+    # Round 1, 2-year contract: (12 + 12) x 1.5/12 + 3.0 = $6.0M.
+    assert fee == pytest.approx(6.0)
     money_before = mclaren["money"]
     ok, msg = game.release_driver(career, mclaren["id"], d["id"])
     assert ok, msg
@@ -3981,9 +4028,9 @@ def test_release_main_driver_empties_seat_and_keeps_points():
     norris["points"] = 25
     norris["team_points"] = 25
     mclaren["points"] = 25
-    mclaren["money"] = 100.0  # Norris's fee ($12.4M) needs a full bank
+    mclaren["money"] = 100.0  # Norris's fee ($13.4M) needs a full bank
     fee = game.break_fee_for_driver(career, norris)
-    assert fee == pytest.approx(12.4)
+    assert fee == pytest.approx(13.4)
     ok, msg = game.release_driver(career, mclaren["id"], norris["id"])
     assert ok, msg
     assert mclaren["driver1_id"] is None
@@ -4008,12 +4055,12 @@ def test_release_driver_blocked_when_unaffordable_but_allowed_in_winter_break():
     assert not ok and "Need $" in msg
     assert d["status"] == "tr" and mclaren["money"] == 0.5
     # Winter break: allowed when affordable. Nyck de Vries, 2-year
-    # contract, $1.5M/yr: 24 x 1.5/12 + 2.0 = $5.0M.
+    # contract, $1.5M/yr: 24 x 1.5/12 + 3.0 = $6.0M.
     mclaren["money"] = 100.0
     career["phase"] = "winter_break"
     assert d["name"] == "Nyck de Vries"
     fee = game.break_fee_for_driver(career, d)
-    assert fee == pytest.approx(5.0)
+    assert fee == pytest.approx(6.0)
     ok, msg = game.release_driver(career, mclaren["id"], d["id"])
     assert ok, msg
     assert d["status"] == "free" and d["team_id"] is None
@@ -4143,7 +4190,7 @@ def test_drivers_tab_and_history_grid_playwright():
             }""")
             page.wait_for_selector("[data-confirm-yes]", timeout=15000)
             confirm_text = page.inner_text(".ov-panel[data-overlay='confirm']")
-            assert "Breaking their contract costs $5.00M" in confirm_text
+            assert "Breaking their contract costs $6.00M" in confirm_text
             page.click("[data-confirm-yes]")
             page.wait_for_function(
                 "() => !document.querySelector('#drivers-box').innerText.includes('VRIES')",
@@ -4541,12 +4588,14 @@ def test_relation_progression():
     assert ok, why
     assert aston["sup_stage"] == 2
     assert aston["relation_years"] == 2
-    # Audi becomes Mercedes' customer first (AI target: Mercedes is
-    # faster, so the bot accepts on the spot) — then a second junior
-    # for Mercedes is rejected.
+    # Audi becomes Mercedes' customer first (AI target: the bot
+    # accepts with p = 0.75 x 1.25 poor = 0.9375 — the roll is pinned
+    # so the test is deterministic) — then a second junior for
+    # Mercedes is rejected.
     audi = team_by_name(career, "Audi")
     ok, why = game.propose_relation(career, mercedes["id"], audi["id"],
-                                    "customer", mercedes["id"], 2)
+                                    "customer", mercedes["id"], 2,
+                                    rng=_FixedRng(0.0))
     assert ok, why
     assert audi["sup_stage"] == 1 and audi["supplier_id"] == mercedes["id"]
     ok, why = game.propose_relation(career, mercedes["id"], audi["id"],
@@ -4712,10 +4761,10 @@ def test_wanted_reward():
     ok, why = game.set_wanted(career, redbull["id"], ricciardo["id"], 3.0)
     assert ok, why
     assert rbr["wanted"] == [{"driver_id": ricciardo["id"], "reward": 3.0}]
-    # Junior signs them into a main seat: Lawson's break fee is $3.0M.
+    # Junior signs them into a main seat: Lawson's break fee is $4.0M.
     ok, why = game.sign_driver(career, rbr["id"], ricciardo["id"], 1, 2)
     assert ok, why
-    assert rbr["money"] == 4.0  # 4.0 - 3.0 fee + 3.0 reward
+    assert rbr["money"] == 3.0  # 4.0 - 4.0 fee + 3.0 reward
     assert redbull["money"] == 5.5  # 8.5 - 3.0 reward
     assert rbr["wanted"] == []
     assert ricciardo["status"] == "f1" and ricciardo["team_id"] == rbr["id"]
@@ -4883,7 +4932,7 @@ def test_migration_v8_to_v12():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 13
+    assert SAVE_VERSION == 14
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -4954,15 +5003,20 @@ def test_bot_relations():
     assert rbr["driver1_id"] == drugovich["id"]
     assert rbr["wanted"] == []
     assert redbull["money"] == 7.5
-    # Bot proposal decisions: a poor team accepts a supplier; a
-    # comfortable team declines a slower supplier; a close customer
-    # accepts becoming a junior.
+    # Bot proposal decisions (v0.7.3: probability formulas, not
+    # hard rules — the rolls are pinned so the tests are
+    # deterministic): a poor team accepts a supplier; a comfortable
+    # team declines a non-frontrunner supplier; a customer accepts
+    # becoming a junior.
     career = game.build_new_career("Test", "Matthew")
     career["phase"] = "winter_break"
     aston = team_by_name(career, "Aston Martin")
     audi = team_by_name(career, "Audi")
+    # Aston is P7 (not a frontrunner, x0.57) and Audi is poor ($3.5M,
+    # x1.25): p = 0.75 x 0.57 x 1.25 = 0.54 — a low roll accepts.
     ok, why = game.propose_relation(career, aston["id"], audi["id"],
-                                    "customer", aston["id"], 2)
+                                    "customer", aston["id"], 2,
+                                    rng=_FixedRng(0.0))
     assert ok and "accepted" in why, why  # Audi is poor ($3.5M)
     assert audi["sup_stage"] == 1 and audi["supplier_id"] == aston["id"]
     assert career["relation_proposals"] == []
@@ -4978,16 +5032,17 @@ def test_bot_relations():
     assert not ok and "already has a supplier" in why
     assert aston["sup_stage"] == 0
     assert career["relation_proposals"] == []
-    # A comfortable team declines a slower supplier: Aston (independent,
-    # 125 perf) offers to supply Audi (145 perf — faster, so the
-    # supplier is slower — and made comfortable here with $25M, so
-    # it says no). v0.7.2: Mercedes can no longer play this role —
+    # A comfortable team declines a non-frontrunner supplier: Aston
+    # (P7, not a frontrunner) offers to supply Audi, made comfortable
+    # here with $25M (no poor bonus): p = 0.75 x 0.57 = 0.43 — a high
+    # roll declines. v0.7.2: Mercedes can no longer play this role —
     # it supplies McLaren / Williams / Alpine, so it cannot become a
     # customer team at all.
     audi = team_by_name(career, "Audi")
     audi["money"] = 25.0
     ok, why = game.propose_relation(career, aston["id"], audi["id"],
-                                    "customer", aston["id"], 2)
+                                    "customer", aston["id"], 2,
+                                    rng=_FixedRng(0.9))
     assert ok and "declined" in why, why
     assert audi["sup_stage"] == 0
     assert career["relation_proposals"] == []
@@ -4995,9 +5050,12 @@ def test_bot_relations():
     career["phase"] = "winter_break"
     mercedes = team_by_name(career, "Mercedes")
     alpine = team_by_name(career, "Alpine")
+    # Mercedes is P2 (a frontrunner) and Alpine is not beating it:
+    # p = 0.75 — a low roll accepts.
     ok, why = game.propose_relation(career, mercedes["id"], alpine["id"],
-                                    "junior", mercedes["id"], 2)
-    assert ok and "accepted" in why, why  # within 60 perf, no junior yet
+                                    "junior", mercedes["id"], 2,
+                                    rng=_FixedRng(0.0))
+    assert ok and "accepted" in why, why
     assert alpine["sup_stage"] == 2
     assert alpine["supplier_id"] == mercedes["id"]
 
@@ -5324,8 +5382,12 @@ def test_break_notice_v066():
     assert ok
     mclaren = team_by_name(career, "McLaren")
     mercedes = team_by_name(career, "Mercedes")
-    # The notice ticks once per race weekend (complete_race_weekend).
+    # v0.7.3: the break must START in the winter break; the notice
+    # then ticks once per race weekend (complete_race_weekend) once
+    # the season is running again.
+    career["phase"] = "winter_break"
     ok, why = game.break_relation(career, mclaren["id"], mercedes["id"])
+    career["phase"] = "round"
     assert ok, why
     assert mclaren["money"] == 6.0  # 10.0 - 2 yrs x $2.0M
     assert mclaren["sup_stage"] == 1  # still active
@@ -5486,10 +5548,12 @@ def test_ws_relationship_actions():
         assert act["ok"], act
         assert rbr["wanted"] == [{"driver_id": free["id"], "reward": 1.5}]
         # Winter break: propose a customer deal to Audi (a bot — it
-        # accepts on the spot, Red Bull is much faster than Audi).
+        # accepts with p = 0.75 x 1.25 poor = 0.9375; seed the global
+        # random so the roll, 0.134, accepts).
         career["phase"] = "winter_break"
         audi = team_by_name(career, "Audi")
         redbull = team_by_name(career, "Red Bull")
+        random.seed(1)
         ws.send_json({"type": "propose_relation", "target_team_id": audi["id"],
                       "kind": "customer", "supplier_team_id": redbull["id"],
                       "years": 2})
@@ -5644,8 +5708,8 @@ def test_ws_winter_break_release_v065():
                          check=lambda m: m.get("action") == "release_driver")
         assert act.get("ok") is True, act
         assert tr["status"] == "free"
-        # Winter-break fee: 24 x 1.5/12 + 2.0 = $5.0M off $10.0M.
-        assert team_by_name(career, "McLaren")["money"] == pytest.approx(5.0)
+        # Winter-break fee: 24 x 1.5/12 + 3.0 = $6.0M off $10.0M.
+        assert team_by_name(career, "McLaren")["money"] == pytest.approx(4.0)
 
 
 def test_junior_badge_and_relation_controls_v065():
@@ -6467,14 +6531,15 @@ def test_team_rep_proposal_factor():
                                     rng=_FixedRng(0.5))
     assert ok and "declined" in why, why
     assert aston2["sup_stage"] == 0
-    # At rep 25 there is no roll at all — the base rule decides.
+    # At rep 25 the factor is 1.0, so p = 0.75 and the roll decides
+    # (a 0.5 roll accepts; a 0.99 roll would decline).
     career3 = _winter_career()
     redbull3 = team_by_name(career3, "Red Bull")
     aston3 = team_by_name(career3, "Aston Martin")
     redbull3["team_rep"] = 25.0
     ok, why = game.propose_relation(career3, redbull3["id"], aston3["id"],
                                     "customer", redbull3["id"], 2,
-                                    rng=_FixedRng(0.99))
+                                    rng=_FixedRng(0.5))
     assert ok and "accepted" in why, why
 
 
@@ -7103,12 +7168,14 @@ def test_f2_champion_rep_boost():
     assert champ["status"] == "free"
 
 
-def test_f2_promoted_driver_stays_in_standings_frozen_and_no_title():
-    """v0.7.1: an F2 driver promoted to F1 mid-season stays in the
-    F2 standings with their points frozen at departure (and an
-    '↑ F1' tag in the page), scores no more F2 points, and cannot
-    win the F2 title — the title goes to the best driver still in
-    F2 at the rollover."""
+def test_f2_tr_driver_keeps_racing_f2_and_can_win_title():
+    """v0.7.3 (replaces the v0.7.1 freeze): an F2 driver signed as
+    Test & Reserve mid-season KEEPS racing in F2 — they stay in the
+    F2 standings with a live tally, score more F2 points, and stay
+    eligible for the F2 title. At the rollover the title goes to the
+    best F2 driver INCLUDING the T&R driver, who is then forced out
+    of F2 but keeps their F1 T&R contract. No frozen tally, no
+    '↑ F1' tag anywhere in the page."""
     from f1 import race as race_mod
     career = game.build_new_career("Test", "Matthew")
     f2 = game.f2_drivers(career)
@@ -7123,38 +7190,37 @@ def test_f2_promoted_driver_stays_in_standings_frozen_and_no_title():
         d["points"] = 0
     mclaren = team_by_name(career, "McLaren")
     mclaren["money"] = 100.0
-    ok, why = game.sign_driver(career, mclaren["id"], promoted["id"], 1)
+    ok, why = game.sign_tr_driver(career, mclaren["id"], promoted["id"], 2)
     assert ok, why
-    # Frozen at departure, still listed, at the top.
-    assert promoted["f2_left"] is True
-    assert promoted["f2_points"] == 100
-    assert promoted["f2_wins"] == 3
+    assert promoted["status"] == "tr" and promoted.get("f2_tr") is True
+    assert not promoted.get("f2_left")  # the v0.7.1 freeze field is gone
+    # Still listed in F2, at the top, with the live tally.
     standings = race_mod.f2_standings(career)
     assert standings[0]["id"] == promoted["id"]
+    assert standings[0]["points"] == 100
     assert standings[1]["id"] == runner["id"]
-    # The F2 sim only races drivers still in F2 — the promoted
-    # driver scores no more F2 points.
+    # The F2 sim still races them — they keep scoring F2 points.
     game.run_race_weekend(career, rng=seeded(5))
-    assert promoted["f2_points"] == 100
-    assert promoted["points"] != 100 or promoted["status"] == "f1"
-    # At the rollover the title goes to the best driver STILL in
-    # F2, not to the promoted driver with the frozen 100 points.
+    assert promoted["points"] >= 100
+    assert promoted in race_mod.f2_standings(career)
+    assert promoted.get("f2_tr") is True
+    # At the rollover the title goes to the best F2 driver — the
+    # T&R driver themselves, with 100+ points.
     for d in career["drivers"]:
         d["age"] = 25
         d["cha"] = 0
-    rep_before = runner["rep"]
+    rep_before = promoted["rep"]
     game.end_of_season(career, rng=seeded(3))
-    assert any("won F2" in line and runner["name"] in line
+    assert any("won F2" in line and promoted["name"] in line
                for line in career["transfers"])
-    assert runner["rep"] == rep_before + 0.5
-    assert promoted["status"] == "f1"  # never the F2 champion
-    # The new season starts clean: the frozen tally is cleared for
-    # every driver at the rollover.
-    assert promoted["f2_left"] is False
-    assert promoted["f2_points"] == 0
-    # The UI tag is in the page.
+    assert promoted["rep"] == rep_before + 0.5
+    assert promoted["status"] == "tr"  # keeps the F1 T&R contract
+    assert promoted.get("f2_tr") is False  # but leaves the feeder series
+    assert promoted["points"] == 0  # fresh season tally
+    # The old v0.7.1 tag is gone from the page.
     html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
-    assert "↑ F1" in html
+    assert "↑ F1" not in html
+    assert "f2_left" not in html
 
 
 def test_resign_offer_counts_toward_limit_and_not_guaranteed():
@@ -7297,36 +7363,44 @@ def test_market_compact_grouped_headers():
         proc.terminate()
 
 
-def test_v12_migration_adds_illness_f2_and_resign_fields():
-    """v0.7.1 (save v12): an old save without the new driver fields
-    backfills them — no driver ill, no frozen F2 tally, no last
-    slot — and the real Season 3 save loads with them (its file is
-    never modified by loading it)."""
+def test_v14_migration_adds_f2_tr_f1_tally_and_gender_fields():
+    """v0.7.3 (save v14): an old save without the new driver fields
+    backfills them — no T&R driver still racing F2, a zero F1 tally,
+    gender M except the five real female drivers — and the frozen
+    v0.7.1 F2 fields are dropped. The real Season 3 save loads with
+    them (its file is never modified by loading it)."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save
-    assert SAVE_VERSION == 13
+    assert SAVE_VERSION == 14
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
-    doc["version"] = 11
+    doc["version"] = 13
     for d in doc["drivers"]:
-        for k in ("ill_until_round", "ill_label", "ill_seat", "ill_sub_id",
-                  "ill_sub_for", "ill_sub_from", "f2_left", "f2_points",
-                  "f2_wins", "f2_best_pos", "f2_best_finish_round",
-                  "last_slot"):
+        for k in ("f2_tr", "f1_points", "f1_wins", "f1_podiums",
+                  "f1_best_pos", "f1_best_finish_round", "gender"):
             d.pop(k, None)
+        # An old save still carries the v0.7.1 frozen tally.
+        d["f2_left"] = True
+        d["f2_points"] = 12
+        d["f2_wins"] = 1
+        d["f2_best_pos"] = 3
+        d["f2_best_finish_round"] = 2
     migrated = migrate_save(doc)
     for d in migrated["drivers"]:
-        assert d["ill_until_round"] is None
-        assert d["ill_label"] is None
-        assert d["ill_seat"] is None
-        assert d["ill_sub_id"] is None
-        assert d["ill_sub_for"] is None
-        assert d["ill_sub_from"] is None
-        assert d["f2_left"] is False
-        assert d["f2_points"] == 0
-        assert d["f2_wins"] == 0
-        assert d["f2_best_pos"] is None
-        assert d["f2_best_finish_round"] is None
-        assert d["last_slot"] is None
+        assert d["f2_tr"] is False
+        assert d["f1_points"] == 0
+        assert d["f1_wins"] == 0
+        assert d["f1_podiums"] == 0
+        assert d["f1_best_pos"] is None
+        assert d["f1_best_finish_round"] is None
+        assert "f2_left" not in d
+        assert "f2_points" not in d
+        assert "f2_wins" not in d
+        assert "f2_best_pos" not in d
+        assert "f2_best_finish_round" not in d
+        expected = "F" if d["name"] in (
+            "Mathilda Paatz", "Marta García", "Abbi Pulling",
+            "Doriane Pin", "Payton Westcott") else "M"
+        assert d["gender"] == expected, d["name"]
     path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
     if not path.exists():
         pytest.skip("Season 3 save not present in this checkout")
@@ -7334,8 +7408,13 @@ def test_v12_migration_adds_illness_f2_and_resign_fields():
     loaded = _load_s3_save()
     assert loaded is not None
     assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
-    assert all(d["ill_until_round"] is None for d in loaded["drivers"])
-    assert all(d["f2_left"] is False for d in loaded["drivers"])
+    assert all(d["f2_tr"] is False for d in loaded["drivers"])
+    assert all(d["gender"] in ("M", "F") for d in loaded["drivers"])
+    paatz = next(d for d in loaded["drivers"]
+                 if d["name"] == "Mathilda Paatz")
+    assert paatz["gender"] == "F"
+    boya = next(d for d in loaded["drivers"] if d["name"] == "Mari Boya")
+    assert boya["gender"] == "M"  # male — verified via Wikipedia/FIA F2
     assert path.read_bytes() == before
 
 
@@ -7564,7 +7643,7 @@ def test_v072_resign_seat_picker_old_seat_occupied():
 
 
 def test_v13_migration_backfills_2026_snapshot_relationships():
-    """v0.7.2 (save v13): the 2026 season snapshot backfills its
+    """v0.7.2 (save v13, now v14): the 2026 season snapshot backfills its
     relationship data from the 2026 grid — Mercedes -> McLaren /
     Williams / Alpine customers, Red Bull -> Racing Bulls junior,
     Ferrari -> Haas / Cadillac customers — while the 2027/2028
@@ -7572,14 +7651,14 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
     real Season 3 save (v10) and the Season 4 Round 2 export (v12)
     migrate cleanly, and their files are never modified."""
     from f1.saves import SAVE_VERSION, load_save
-    assert SAVE_VERSION == 13
+    assert SAVE_VERSION == 14
     path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
     if not path.exists():
         pytest.skip("Season 3 save not present in this checkout")
     before = path.read_bytes()
     loaded = _load_s3_save()
     assert loaded is not None
-    assert loaded["version"] == 13
+    assert loaded["version"] == 14
     assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
     snaps = {s["year"]: s for s in loaded["season_snapshots"]}
     assert {2026, 2027, 2028} <= set(snaps)
@@ -7610,7 +7689,7 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
         before4 = path4.read_bytes()
         loaded4 = load_save(str(path4.parent), "matthew-max-wugynr-s4-round2")
         assert loaded4 is not None
-        assert loaded4["version"] == 13
+        assert loaded4["version"] == 14
         assert loaded4["year"] == 2029 and loaded4["round"] == 2
         assert loaded4["phase"] == "round"
         rb = team_by_name(loaded4, "Red Bull")
@@ -7623,3 +7702,465 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
             for t in snaps4[y]["teams"]:
                 assert "supplier_id" not in t, (y, t["name"])
         assert path4.read_bytes() == before4
+
+
+# ---------------------------------------------------------------------------
+# v0.7.3 — full-history snapshots, F2 T&R rework, team-contract matrix
+# + bot probability rules, Develop message vs chart toggle, academy
+# poaching fee + $3.0M poaching flat, retired-driver cleanup,
+# grouped retirement rumours, winter-break-only contracts, gender
+# indicators, regenerated custom colours. Save format v14.
+# ---------------------------------------------------------------------------
+
+def test_v073_snapshot_saves_full_registered_driver_list():
+    """v0.7.3 (1): the season snapshot saves EVERY driver registered
+    in the season's standings — main drivers, free agents with
+    points, substitutes and mid-season movers (anyone who raced in
+    F1 or scored) — not just the 22 main seats. Points, wins and
+    team (last team) are preserved per driver."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    # A free agent who raced and scored, then was dropped.
+    fa = game.free_agents(career)[0]
+    fa["points"] = 10
+    fa["team_points"] = 10
+    fa["f1_races"] = 2
+    fa["season_wins"] = 0
+    fa["last_team_id"] = mclaren["id"]
+    # A T&R driver who substituted in a race but scored 0.
+    tr = game.team_tr_drivers(career, mclaren)[0]
+    tr["points"] = 0
+    tr["f1_races"] = 2
+    for d in career["drivers"]:
+        d["age"] = 25
+        d["cha"] = 0
+    game.end_of_season(career, rng=seeded(9))
+    rows = {r["id"]: r for r in career["last_season"]["drivers"]}
+    # 22 main seats + the free agent + the substitute.
+    assert len(rows) == 24
+    assert rows[fa["id"]]["points"] == 10
+    assert rows[fa["id"]]["team"] == "McLaren"
+    assert rows[tr["id"]]["points"] == 0
+    assert rows[tr["id"]]["team"] == "McLaren"
+    # Order preserved: the free agent (10 pts) sits ahead of the
+    # scoreless drivers.
+    names = [r["name"] for r in career["last_season"]["drivers"]]
+    assert names.index(fa["name"]) < names.index(tr["name"])
+
+
+def test_v073_f2_tr_promotion_refused_midseason_illness_sub_only():
+    """v0.7.3 (2): a T&R driver still racing in F2 cannot be
+    promoted to a main seat mid-season — except as an illness
+    substitute, the one in-season F1 race they may do. In the
+    winter break the promotion is allowed and the F2 tally is
+    cleared."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    f2 = game.f2_drivers(career)[0]
+    f2["points"] = 30
+    mclaren["money"] = 100.0
+    ok, why = game.sign_tr_driver(career, mclaren["id"], f2["id"], 2)
+    assert ok, why
+    # Mid-season promotion to an empty main seat: refused.
+    piastri = game.get_driver(career, mclaren["driver2_id"])
+    piastri["status"] = "free"
+    piastri["team_id"] = None
+    mclaren["driver2_id"] = None
+    ok, why = game.promote_tr_to_main(career, mclaren["id"], f2["id"], 2)
+    assert not ok and "F2" in why, why
+    assert f2["status"] == "tr" and f2.get("f2_tr") is True
+    # Illness stand-in: the main driver is ill, seat 1 is empty, the
+    # T&R driver is the highest-rep reserve — they get the seat.
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    f2["rep"] = 5.0
+    norris["ill_until_round"] = 2
+    norris["ill_seat"] = 1
+    mclaren["driver1_id"] = None
+    game.ensure_ill_substitutes(career, rng=seeded(1))
+    assert mclaren["driver1_id"] == f2["id"]
+    assert f2.get("ill_sub_for") == norris["id"]
+    assert f2["status"] == "tr" and f2.get("f2_tr") is True
+    # Winter break: the same driver may take a main seat for real.
+    career["phase"] = "winter_break"
+    mclaren["driver2_id"] = None
+    ok, why = game.promote_tr_to_main(career, mclaren["id"], f2["id"], 2)
+    assert ok, why
+    assert f2["status"] == "f1" and f2.get("f2_tr") is False
+    assert f2["points"] == 0
+
+
+def test_v073_bot_prefers_high_rep_f2_drivers():
+    """v0.7.3 (2, bot fix): bot promotion picks are
+    probability-weighted by hidden reputation (weight = rep^2) —
+    high-rep F2 drivers are favoured, but a lower-rep driver can
+    still be picked (no hard cutoff)."""
+    rng = seeded(7)
+    top = {"id": "d-top", "name": "Top", "rep": 4.5}
+    mid = {"id": "d-mid", "name": "Mid", "rep": 2.5}
+    low = {"id": "d-low", "name": "Low", "rep": 1.0}
+    picks = [game._rep_weighted_pick([top, mid, low], rng=rng)["id"]
+             for _ in range(200)]
+    assert picks.count("d-top") > 100  # ~74% expected (20.25 / 27.5)
+    assert picks.count("d-low") < 20   # ~4% expected, never favoured
+    # And the best-available helper draws from the same preference.
+    career = game.build_new_career("Test", "Matthew")
+    f2 = game.f2_drivers(career)
+    f2[0]["rep"] = 4.5
+    for d in f2[1:]:
+        d["rep"] = 1.0
+    best = game._best_available_driver(career, statuses=("f2",))
+    assert best is not None and best["rep"] >= 4.0
+
+
+def test_v073_supplied_team_cannot_be_proposed_to():
+    """v0.7.3 (3): a team that already has a supplier cannot be
+    proposed to in either role — as a customer/junior, or as a
+    supplier — and a supplied team cannot offer supply either. They
+    can only break their contract."""
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    mercedes = team_by_name(career, "Mercedes")
+    mclaren = team_by_name(career, "McLaren")  # a Mercedes customer
+    aston = team_by_name(career, "Aston Martin")
+    # McLaren as the customer side: already supplied.
+    ok, why = game.propose_relation(career, aston["id"], mclaren["id"],
+                                    "customer", aston["id"], 2)
+    assert not ok and "already has a supplier" in why, why
+    # McLaren as the supplier side: already supplied.
+    ok, why = game.propose_relation(career, mclaren["id"], aston["id"],
+                                    "customer", mclaren["id"], 2)
+    assert not ok and "already has a supplier" in why, why
+    # McLaren offering to supply Aston (the v0.6.5 rule): rejected.
+    ok, why = game.propose_relation(career, mclaren["id"], aston["id"],
+                                    "junior", mclaren["id"], 2)
+    assert not ok
+    # An unaffiliated pair still works (Aston is human-free here, so
+    # the proposal goes to a bot target — pin the roll).
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
+                                    "customer", mercedes["id"], 2,
+                                    rng=_FixedRng(0.0))
+    assert ok, why
+
+
+def test_v073_stale_proposal_supplier_side_rechecked():
+    """v0.7.3 (3): a pending proposal is re-checked on the SUPPLIER
+    side at accept time too — if the would-be supplier has since
+    taken a supplier of their own (or the customer has since taken
+    one), the accept is rejected as stale."""
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    ok, _ = game.choose_team(career, team_by_name(career, "Aston Martin")["id"],
+                             "p-matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    aston = team_by_name(career, "Aston Martin")
+    redbull = team_by_name(career, "Red Bull")
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
+                                    "customer", mercedes["id"], 2)
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    # The supplier takes a supplier of its own in the meantime.
+    mercedes["supplier_id"] = redbull["id"]
+    mercedes["sup_stage"] = 1
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
+    assert not ok and "already has a supplier" in why, why
+    assert aston["sup_stage"] == 0
+    # Same, customer side: the customer takes another supplier first.
+    mercedes["supplier_id"] = None
+    mercedes["sup_stage"] = 0
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
+                                    "customer", mercedes["id"], 2)
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    aston["supplier_id"] = redbull["id"]
+    aston["sup_stage"] = 1
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
+    assert not ok and "already has a supplier" in why, why
+
+
+def _v073_proposal(career, supplier_name, customer_name, kind="customer",
+                   target_as="customer"):
+    """A raw proposal dict for bot_accepts_proposal (bypasses
+    propose_relation so the probability itself is tested)."""
+    supplier = team_by_name(career, supplier_name)
+    customer = team_by_name(career, customer_name)
+    target = customer if target_as == "customer" else supplier
+    return {"target_team_id": target["id"],
+            "supplier_team_id": supplier["id"],
+            "customer_team_id": customer["id"], "kind": kind}
+
+
+def test_v073_bot_proposal_probability_factors():
+    """v0.7.3 (3): the bot formation probability is built from
+    standings-visible info only — beating the supplier, the supplier
+    not being a frontrunner (top 4), bad reputation, and a customer
+    becoming a threat (within 40 points, within 1 position, or top
+    4). Never car perf. Each factor is pinned with a fixed roll."""
+    from f1 import race as race_mod
+    career = game.build_new_career("Test", "Matthew")
+    # Base case: Mercedes (P2, frontrunner, rep 50) -> Alpine (P10,
+    # not poor): p = 0.75.
+    p = _v073_proposal(career, "Mercedes", "Alpine")
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.5)) is True
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.8)) is False
+    # Bad supplier reputation (rep 0 -> x0.4): p = 0.30.
+    mercedes = team_by_name(career, "Mercedes")
+    mercedes["team_rep"] = 0
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.5)) is False
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.2)) is True
+    mercedes["team_rep"] = 50
+    # Beating the supplier AND a non-frontrunner supplier: McLaren
+    # (P1) asked to be supplied by Aston (P7): p = 0.75 x 0.25 x 0.57
+    # = 0.11.
+    p = _v073_proposal(career, "Aston Martin", "McLaren")
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.5)) is False
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.05)) is True
+    # Supplier side, no threat: Mercedes 100 pts, Alpine 10, Alpine
+    # last (P11, 90-point gap, > 1 position): p = 0.75.
+    for t, pts in (("Mercedes", 100), ("McLaren", 90), ("Red Bull", 80),
+                   ("Ferrari", 70), ("Williams", 60), ("Racing Bulls", 50),
+                   ("Aston Martin", 40), ("Haas", 30), ("Audi", 20),
+                   ("Cadillac", 15), ("Alpine", 10)):
+        team_by_name(career, t)["points"] = pts
+    career["teams"] = race_mod.constructor_standings(career)
+    p = _v073_proposal(career, "Mercedes", "Alpine", target_as="supplier")
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.5)) is True
+    # Supplier side, threat (Alpine within 40 points): p = 0.75 x 0.35
+    # = 0.26.
+    team_by_name(career, "Alpine")["points"] = 80
+    career["teams"] = race_mod.constructor_standings(career)
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.5)) is False
+    assert game.bot_accepts_proposal(career, p, rng=_FixedRng(0.2)) is True
+
+
+def test_v073_bot_spontaneous_donations():
+    """v0.7.3 (3): a bot parent spontaneously donates to a struggling
+    supplied team with a good reputation — small per-round chance,
+    amount scaled by the customer's need and the parent's surplus.
+    Low customer rep -> the parent will not willingly donate (p ~ 0);
+    high rep -> low chance plus a slight size boost."""
+    career = game.build_new_career("Test", "Matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    alpine = team_by_name(career, "Alpine")  # P10, bottom half
+    mercedes["money"] = 25.0
+    alpine["money"] = 1.0  # need = (5 - 1) / 5 = 0.8
+    # Neutralise the other parents so only Mercedes -> Alpine fires.
+    team_by_name(career, "Red Bull")["money"] = 5.0
+    team_by_name(career, "Ferrari")["money"] = 5.0
+    # High rep: p = 0.12 x 0.8 = 0.096; amount = min(3, 20 x 0.05) x
+    # 0.8 x 1.1 = $0.88.
+    alpine["team_rep"] = 80
+    made = game.bot_spontaneous_donations(career, rng=_FixedRng(0.0))
+    assert made == [(mercedes["id"], alpine["id"], 0.88)], made
+    assert alpine["money"] == pytest.approx(1.88)
+    assert mercedes["money"] == pytest.approx(24.12)
+    # Mid rep: same chance shape, no size boost — $0.80.
+    mercedes["money"] = 25.0
+    alpine["money"] = 1.0
+    alpine["team_rep"] = 50
+    made = game.bot_spontaneous_donations(career, rng=_FixedRng(0.0))
+    assert made == [(mercedes["id"], alpine["id"], 0.80)], made
+    # Low rep: no willing donation, even on a 0.0 roll.
+    mercedes["money"] = 25.0
+    alpine["money"] = 1.0
+    alpine["team_rep"] = 10
+    made = game.bot_spontaneous_donations(career, rng=_FixedRng(0.0))
+    assert made == []
+    assert alpine["money"] == 1.0 and mercedes["money"] == 25.0
+
+
+def test_v073_develop_message_hides_perf_when_chart_off():
+    """v0.7.3 (4): after developing parts the pop-up shows success +
+    the amount invested, and EXCLUDES the perf gained when the perf
+    bar chart is toggled off. Chart on = the current message."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    mclaren["perf_res"] = 5.0
+    mclaren["reli_res"] = 5.0
+    mclaren["money"] = 100.0
+    ok, msg = game.do_develop(career, mclaren["id"], chart_on=True)
+    assert ok and "Perf" in msg and "$1M spent" in msg, msg
+    mclaren["perf_res"] = 5.0
+    mclaren["reli_res"] = 5.0
+    mclaren["money"] = 100.0
+    ok, msg = game.do_develop(career, mclaren["id"], chart_on=False)
+    assert ok, msg
+    assert "Perf" not in msg and "$1M spent" in msg, msg
+    assert "Reliability" in msg  # the one visible car stat stays
+
+
+def test_v073_academy_poach_fee_and_3m_flat():
+    """v0.7.3 (5): poaching an academy junior from another team costs
+    50% of the salary term + $1.0M flat, shown upfront and charged
+    on signing; your own academy junior is free. The general
+    poaching flat is now $3.0M (shared formula — it also raises the
+    seat-occupant break fee and release fees)."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    ferrari = team_by_name(career, "Ferrari")
+    # Dino Beganovic is in Ferrari's academy (fresh career).
+    junior = next(d for d in career["drivers"]
+                  if d["name"] == "Dino Beganovic")
+    assert junior["academy_team_id"] == ferrari["id"]
+    junior["salary"] = 0.5
+    junior["contract_left"] = 0
+    # Round 1: 12 rounds left x $0.5M/12 x 0.5 + $1.0M = $1.25M.
+    quote = game.sign_cost(career, mclaren["id"], junior["id"], ("tr", None))
+    assert quote["poach_fee"] == pytest.approx(1.25), quote
+    mclaren["money"] = 100.0
+    money_before = mclaren["money"]
+    ok, msg = game.sign_tr_driver(career, mclaren["id"], junior["id"], 2)
+    assert ok, msg
+    assert mclaren["money"] == pytest.approx(money_before - 1.25)
+    # Your own academy junior costs no poach fee.
+    own = next(d for d in game.f2_drivers(career)
+               if d["status"] == "f2" and not d.get("academy_team_id"))
+    ok, why = game.add_academy_driver(career, mclaren["id"], own["id"])
+    assert ok, why
+    quote = game.sign_cost(career, mclaren["id"], own["id"], ("tr", None))
+    assert quote["poach_fee"] == 0
+    # The $3.0M flat: Norris, round 1, 2-year contract —
+    # 24 x $5.2M/12 + $3.0M = $13.40M.
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    assert norris["name"] == "Lando Norris"
+    assert game.break_fee_for_driver(career, norris) == pytest.approx(13.4)
+
+
+def test_v073_retired_tr_driver_cleaned_off_next_season_standings():
+    """v0.7.3 (6): a driver who retires from Test & Reserve (or free
+    agency) is wiped off the NEXT season's active standings, like a
+    grid retiree — Matthew's Magnussen case (retired end of 2027 as
+    Aston T&R, still listed in 2028). They stay in the previous
+    season's history snapshot."""
+    from f1 import race as race_mod
+    retired = None
+    for seed in range(1, 31):
+        career = game.build_new_career("Test", "Matthew")
+        cadillac = team_by_name(career, "Cadillac")
+        tr = game.team_tr_drivers(career, cadillac)[0]
+        tr["age"] = 60  # backmarker, low rep: a very high chance
+        tr["rep"] = 1.0
+        tr["points"] = 10
+        tr["team_points"] = 10
+        tr["f1_races"] = 3
+        for d in career["drivers"]:
+            if d is not tr:
+                d["age"] = 25
+                d["cha"] = 0
+        game.end_of_season(career, rng=seeded(seed))
+        if tr["name"] in (career.get("retired_this_season") or []):
+            retired = (career, tr)
+            break
+    assert retired is not None, "no seed retired the T&R driver"
+    career, tr = retired
+    # Wiped from the new season's active standings: points and F1
+    # starts reset, so driver_standings no longer lists them.
+    assert tr["points"] == 0 and tr["f1_races"] == 0
+    assert tr["id"] not in [d["id"] for d in race_mod.driver_standings(career)]
+    # But they stay in the previous season's snapshot, with the
+    # points they scored.
+    snap = {r["id"]: r for r in career["last_season"]["drivers"]}
+    assert snap[tr["id"]]["points"] == 10
+
+
+def test_v073_retirement_rumours_grouped_and_zero_hidden():
+    """v0.7.3 (6): retirement rumours cover main, T&R, academy and
+    F2 drivers, grouped by category in that order, highest chance
+    first within each group — and any driver at 0% chance is hidden
+    (drivers under 30 are 0%, so the list stays short)."""
+    career = game.build_new_career("Test", "Matthew")
+    cadillac = team_by_name(career, "Cadillac")
+    tr = game.team_tr_drivers(career, cadillac)[0]
+    tr["age"] = 60
+    tr["rep"] = 1.0
+    junior = next(d for d in career["drivers"]
+                  if d.get("academy_team_id"))
+    junior["age"] = 45
+    junior["rep"] = 1.0
+    rows = game.retirement_rumours(career)
+    assert rows, "expected at least the old T&R driver to be listed"
+    assert all(r["chance"] > 0 for r in rows)
+    assert all(r["gender"] in ("M", "F") for r in rows)
+    cats = [r["category"] for r in rows]
+    assert cats == sorted(cats, key=lambda c: {
+        "Main": 0, "Test & Reserve": 1, "Academy": 2, "F2": 3}[c])
+    assert any(r["driver"] == tr["name"] and r["category"] == "Test & Reserve"
+               for r in rows)
+    assert any(r["driver"] == junior["name"] and r["category"] == "Academy"
+               for r in rows)
+    # A 25-year-old main driver is 0% and hidden.
+    young = next(d for d in career["drivers"]
+                 if d["status"] == "f1" and d["age"] < 30)
+    assert all(r["driver"] != young["name"] for r in rows)
+
+
+def test_v073_relation_actions_winter_break_only():
+    """v0.7.3 (7): offering, accepting and breaking a team contract
+    happen only in the winter break — enforced server-side. A break
+    notice started in the winter break is allowed; donations stay
+    any-time (tested elsewhere)."""
+    career = game.build_new_career("Test", "Matthew")
+    career["phase"] = "winter_break"
+    ok, _ = game.choose_team(career, team_by_name(career, "Aston Martin")["id"],
+                             "p-matthew")
+    mercedes = team_by_name(career, "Mercedes")
+    aston = team_by_name(career, "Aston Martin")
+    audi = team_by_name(career, "Audi")
+    # A pending proposal to a human target, made in the winter break.
+    ok, why = game.propose_relation(career, mercedes["id"], aston["id"],
+                                    "customer", mercedes["id"], 2)
+    assert ok, why
+    proposal = career["relation_proposals"][0]
+    # Outside the winter break, answering is rejected.
+    career["phase"] = "round"
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
+    assert not ok and "winter break" in why, why
+    assert aston["sup_stage"] == 0
+    # Back in the winter break, the same accept works.
+    career["phase"] = "winter_break"
+    ok, why = game.respond_relation(career, aston["id"], proposal["id"], True)
+    assert ok, why
+    assert aston["sup_stage"] == 1
+    # Breaking is rejected mid-season, allowed in the winter break.
+    career["phase"] = "round"
+    ok, why = game.break_relation(career, mercedes["id"], aston["id"])
+    assert not ok and "winter break" in why, why
+    assert aston["sup_stage"] == 1  # relation untouched
+    career["phase"] = "winter_break"
+    ok, why = game.break_relation(career, mercedes["id"], aston["id"])
+    assert ok, why
+    assert aston.get("break_notice") is not None
+    assert aston["sup_stage"] == 1  # active during the notice
+
+
+def test_v073_gender_field_and_page():
+    """v0.7.3 (8): every driver carries a gender field — "F" for the
+    five real female drivers, "M" for everyone else (including
+    Mari Boya, who is male, and all fictional drivers) — and the
+    page renders a small M/F badge next to every name through the
+    shared renderer."""
+    from f1.models import FEMALE_DRIVERS
+    career = game.build_new_career("Test", "Matthew")
+    assert FEMALE_DRIVERS == {"Mathilda Paatz", "Marta García",
+                              "Abbi Pulling", "Doriane Pin",
+                              "Payton Westcott"}
+    for d in career["drivers"]:
+        expected = "F" if d["name"] in FEMALE_DRIVERS else "M"
+        assert d["gender"] == expected, d["name"]
+    boya = next(d for d in career["drivers"] if d["name"] == "Mari Boya")
+    assert boya["gender"] == "M"
+    html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+    assert "gender-badge" in html
+    assert "genderBadge" in html
+    assert "genderOf" in html
+
+
+def test_v073_custom_colours_exact_list():
+    """v0.7.3 (9): the custom-team colour list is exactly the ten
+    Matthew approved — orange, yellow, purple, pink kept; brown,
+    charcoal, lime, tan, deep magenta, olive new."""
+    from f1.models import CUSTOM_COLOURS
+    assert CUSTOM_COLOURS == ["#e67e22", "#f39c12", "#9b59b6", "#fd79a8",
+                              "#8B4513", "#2D3436", "#7CB342", "#C3B091",
+                              "#AD1457", "#827717"]
+    assert len(set(CUSTOM_COLOURS)) == 10
