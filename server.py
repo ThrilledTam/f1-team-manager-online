@@ -109,6 +109,15 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     rumours      {}                       # retirement rumours for your drivers
     season_detail {year}                  # v0.7.0: full standings for one
                                           # season (clickable champion year)
+    save_note    {text, note_id?}          # v0.7.4: add a note (no note_id)
+                                          # or edit one (note_id set) —
+                                          # Notes tab, round + winter break
+    delete_note  {note_id}                # v0.7.4: delete one of your notes
+    cheat_state  {}                        # v0.7.4: the menu data (perf /
+                                          # money / standings), on request
+    cheat_adjust {team_id, perf_delta?, money_delta?}  # v0.7.4: change a
+                                          # team's perf / money
+    cheat_driver {driver_id, rating}      # v0.7.4: set a driver's rating
     ping         {}
   Server -> client:
     joined       {code, player_id, room}  # this player only
@@ -122,6 +131,8 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     rumours      {rumours}                # retirement rumours (on request)
     season_detail {detail}                # v0.7.0: full standings for one
                                           # season, on request
+    cheat_state  {cheat}                  # v0.7.4: the menu data, on request
+                                          # or after a change
     pong         {}
 """
 import asyncio
@@ -159,7 +170,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.7.3", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.7.4", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -175,6 +186,8 @@ PALETTE = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
     "#3498db", "#9b59b6", "#fd79a8", "#00cec9", "#6c5ce7",
 ]
+
+_NOTE_TRIGGER = "chmenU"
 
 
 def new_code():
@@ -308,6 +321,9 @@ def my_team_public(room, player_id):
         return None
     career = room["career"]
     out = {k: v for k, v in team.items() if k != "perf"}
+    # v0.7.4: the team's Notes travel here — the private channel.
+    # public_state strips them, so no other team's browser ever
+    # receives them (see game.public_state).
     # v0.4: raw regulation numbers never reach a client — only the
     # percentages + cost in reg_view. Strip the raw fields here too.
     # v0.7.0: hidden team reputation NEVER reaches a client either.
@@ -476,7 +492,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.3"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.4"}
 
 
 @app.get("/api/saves")
@@ -1091,6 +1107,75 @@ async def ws_endpoint(ws: WebSocket):
                         await ws.send_json({"type": "action", "action": mtype,
                                             "ok": True, "message": why})
                     await broadcast(room)
+
+            elif mtype in ("save_note", "delete_note", "cheat_state",
+                           "cheat_adjust", "cheat_driver"):
+                # v0.7.4: Notes and the cheats menu. Notes work between
+                # races and in the winter break (the tab is on the
+                # dashboard in both); the cheats menu opens from the
+                # Notes tab and its adjustments are server-authoritative
+                # (a client-side edit would be overwritten by the next
+                # broadcast).
+                if not room["started"] or not career:
+                    await send_error(ws, "The career has not started yet.")
+                elif not team:
+                    await send_error(ws, "Pick a team first (take over an AI team).")
+                elif career.get("phase") not in ("round", "winter_break"):
+                    await send_error(ws, "You cannot do that right now.")
+                else:
+                    if mtype == "save_note":
+                        text = (msg.get("text") or "")
+                        if text.strip() == _NOTE_TRIGGER:
+                            # Exact match: open the menu, save nothing.
+                            await ws.send_json({"type": "cheat_state",
+                                                "cheat": game.cheat_state(career)})
+                        else:
+                            ok, why = game.save_note(career, team["id"], text,
+                                                     msg.get("note_id"))
+                            if not ok:
+                                await send_error(ws, why)
+                            else:
+                                await ws.send_json({"type": "action", "action": mtype,
+                                                    "ok": True, "message": why})
+                            await broadcast(room)
+                    elif mtype == "delete_note":
+                        ok, why = game.delete_note(career, team["id"],
+                                                   msg.get("note_id"))
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": mtype,
+                                                "ok": True, "message": why})
+                        await broadcast(room)
+                    elif mtype == "cheat_state":
+                        await ws.send_json({"type": "cheat_state",
+                                            "cheat": game.cheat_state(career)})
+                    elif mtype == "cheat_adjust":
+                        ok, why = game.cheat_adjust(career, msg.get("team_id"),
+                                                    msg.get("perf_delta"),
+                                                    msg.get("money_delta"))
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": mtype,
+                                                "ok": True, "message": why})
+                            await broadcast(room)
+                            # Fresh menu data for the requester (the
+                            # broadcast does not carry real perf when
+                            # the chart is off).
+                            await ws.send_json({"type": "cheat_state",
+                                                "cheat": game.cheat_state(career)})
+                    elif mtype == "cheat_driver":
+                        ok, why = game.cheat_set_rating(career, msg.get("driver_id"),
+                                                        msg.get("rating"))
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": mtype,
+                                                "ok": True, "message": why})
+                            await broadcast(room)
+                            await ws.send_json({"type": "cheat_state",
+                                                "cheat": game.cheat_state(career)})
 
             elif mtype == "start_next_season":
                 if not room["started"] or not career:
