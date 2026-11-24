@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.7.3</title>
+<title>F1 Team Manager Online — v0.7.4</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -112,6 +112,19 @@
   .hist-cell:hover { border-color:#1f6feb; }
   .hist-cell.empty { cursor:default; background:transparent; color:#8b949e; }
   .hist-cell.empty:hover { border-color:#21262d; }
+  /* v0.7.4: Notes — post-it grid, 5 per row, max 15 per team. */
+  .notes-grid { display:grid; grid-template-columns:repeat(5, 1fr); gap:8px; margin-top:10px; }
+  @media (max-width: 600px){ .notes-grid { grid-template-columns:repeat(2, 1fr); } }
+  .note-card { background:#fff8c5; color:#1f2328; border-radius:6px; padding:10px; font-size:14px; min-height:64px; display:flex; flex-direction:column; gap:6px; word-break:break-word; }
+  .note-card .note-actions { display:flex; gap:6px; margin-top:auto; }
+  .note-card button { min-height:30px; padding:2px 8px; font-size:12px; background:#e3e8ef; color:#1f2328; }
+  .note-card button.danger { background:#da3633; color:#fff; }
+  .note-card textarea { width:100%; min-height:64px; font:inherit; background:#fff; color:#1f2328; }
+  /* v0.7.4: tappable names in the menu — look like plain text, not
+     links, so the team/driver colours are what you see; the hover
+     underline is the only hint they are clickable. */
+  .tap-name { background:none; border:0; padding:0; margin:0; min-height:0; min-width:0; font-size:inherit; font-family:inherit; color:inherit; cursor:pointer; text-align:left; }
+  .tap-name:hover { text-decoration:underline; }
   /* v0.7.0: clickable champion years — a year with recorded
      standings (every real 2010–2025 year; in-game years with a
      season snapshot) opens the full season standings. A button
@@ -153,7 +166,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.3 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.4 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -311,6 +324,7 @@
   <div class="card">
     <div class="tabs">
       <button data-tab="research" class="sel">Research</button>
+      <button data-tab="notes">Notes</button>
       <button data-tab="drivers">Drivers</button>
       <button data-tab="relations">Relationships</button>
       <button data-tab="finances">Finances</button>
@@ -340,6 +354,16 @@
       <button id="btn-reg-adapt" class="secondary">Adapt all</button>
       <button id="btn-reg-adapt-10" class="secondary">Adapt 10 pts</button>
       <div id="my-pools"></div>
+    </div>
+    <div id="tab-notes" class="tab hidden">
+      <h3>Notes</h3>
+      <p class="note">Post-it notes for your team only — no other team can see them.</p>
+      <div class="bar-row">
+        <input id="note-text" placeholder="Write a note…" maxlength="200" style="flex:1; min-width:200px">
+        <button id="btn-note-add">Save note</button>
+        <span id="notes-count" class="note"></span>
+      </div>
+      <div id="notes-box"></div>
     </div>
     <div id="tab-finances" class="tab hidden"><div id="finances-box"></div></div>
     <div id="tab-drivers" class="tab hidden"><div id="drivers-box"></div></div>
@@ -382,6 +406,16 @@
   <p><button id="btn-results-leave" class="secondary">Leave room</button></p>
 </div>
 
+<!-- ================= MENU (v0.7.4) ================= -->
+<div id="screen-cheats" class="hidden">
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.4 beta</span></h1>
+  <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
+  <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
+  <div class="card"><h2>Finances</h2><div id="cheats-money"></div></div>
+  <div class="card"><h2>Drivers' standings</h2><div id="cheats-drivers"></div></div>
+  <div class="card"><h2>Constructors' standings</h2><div id="cheats-teams"></div></div>
+</div>
+
 <div id="toasts"></div>
 
 </div>
@@ -406,6 +440,15 @@ let chartDefault = true, lastRound = null, lastPhase = null, viewingGP = null, v
    signing directly. wbOffers is the player's pending offers for the
    current winter-break round (cleared when the round changes). */
 let pendingSign = null;
+// v0.7.4: Notes editing state — while a note is being edited the
+// grid is not re-rendered, so a broadcast never wipes the edit.
+let editingNoteId = null, lastNotesKey = null;
+// v0.7.4: the menu — opened from the Notes tab, closed with BACK.
+// cheatData is the authoritative menu payload from the server
+// (real perf even when the chart is off); pendingCheatTeam /
+// pendingCheatDriver hold the team / driver whose pop-up is open.
+let cheatsOpen = false, cheatData = null;
+let pendingCheatTeam = null, pendingCheatDriver = null;
 let wbOffers = [];
 let wbRoundSeen = 0;
 /* v0.4: "Continue a saved career" on the home screen — the saves
@@ -450,6 +493,8 @@ function clearPopupState(id){
   if(id === "gp") viewingGP = null;
   if(id === "sign") pendingSign = null;
   if(id === "season"){ viewingSeason = null; seasonDetail = null; }
+  if(id === "cheat-team") pendingCheatTeam = null;
+  if(id === "cheat-driver") pendingCheatDriver = null;
 }
 function syncBackdrop(){
   const anyOpen = popupStack.some(p => p.kind === "overlay" && !p.minimized);
@@ -582,6 +627,35 @@ function renderOverlayBody(p){
     const realTag = d.source === "real" ? " (real F1)" : "";
     html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
       `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>${relNote}`;
+  } else if(p.id === "cheat-team"){
+    // v0.7.4: the team pop-up — add/subtract perf and money. The
+    // bodyKey is the team's current perf/money, so typing in the
+    // free inputs is never wiped by a broadcast, and the panel
+    // re-renders with the new values after an adjustment.
+    const t = cheatData ? (cheatData.teams || []).find(x => x.id === pendingCheatTeam) : null;
+    if(!t || !pendingCheatTeam){ closePopup("cheat-team", {silent:true}); return; }
+    key = `cheat-team:${t.id}:${t.perf}:${t.money}`;
+    if(p.bodyKey === key) return;
+    html = `<p><b>${esc(t.name)}</b> — perf ${t.perf.toFixed(1)} · money ${money(t.money)}</p>
+      <p class="note">Perf is clamped to 0–400. Money cannot go below $0 (a team already in debt can only go up).</p>
+      <p><label>Perf change <input id="cheat-perf-delta" type="number" step="1" value="0" style="width:90px"></label>
+      <label>Money change ($M) <input id="cheat-money-delta" type="number" step="0.5" value="0" style="width:90px"></label>
+      <button data-cheat-apply>Apply</button></p>
+      <p><span class="note">Perf:</span> ${[10, 25, 50].map(v => `<button data-cheat-preset="perf:${v}">+${v}</button> <button data-cheat-preset="perf:${-v}">−${v}</button>`).join(" ")}</p>
+      <p><span class="note">Money:</span> ${[1, 5, 10].map(v => `<button data-cheat-preset="money:${v}">+$${v}M</button> <button data-cheat-preset="money:${-v}">−$${v}M</button>`).join(" ")}</p>`;
+  } else if(p.id === "cheat-driver"){
+    // v0.7.4: the driver pop-up — set the driver's skill rating.
+    // The rating is clamped server-side to the range for the
+    // driver's current age (shown here); the applied result is in
+    // the toast.
+    const d = cheatData ? (cheatData.drivers || []).find(x => x.id === pendingCheatDriver) : null;
+    if(!d || !pendingCheatDriver){ closePopup("cheat-driver", {silent:true}); return; }
+    key = `cheat-driver:${d.id}:${d.rating}:${d.min_rating}:${d.max_rating}`;
+    if(p.bodyKey === key) return;
+    html = `<p><b>${driverNameHtml(d.name, d.colour, 0, false, null, d.gender)}</b> — ${esc(d.team || "")} · age ${d.age} · rating ${d.rating}</p>
+      <p class="note">Rating for age ${d.age}: min ${d.min_rating} – max ${d.max_rating}. The new rating is clamped to that range.</p>
+      <p><label>New rating <input id="cheat-rating" type="number" step="1" min="${d.min_rating}" max="${d.max_rating}" value="${d.rating}" style="width:90px"></label>
+      <button data-cheat-driver-apply>Apply</button></p>`;
   }
   p.bodyKey = key;
   body.innerHTML = html;
@@ -664,6 +738,26 @@ function syncOverlays(){
   } else if(popupById("sign")){
     closePopup("sign", {silent:true});
   }
+  // v0.7.4: the menu's adjust pop-ups — opened by tapping a team
+  // or driver name in the menu, closed when the menu closes.
+  if(pendingCheatTeam && cheatData){
+    const t = (cheatData.teams || []).find(x => x.id === pendingCheatTeam);
+    if(t){
+      const p = openOverlay("cheat-team", `Adjust ${t.name}`);
+      p.onClose = () => { pendingCheatTeam = null; renderAll(); };
+    } else closePopup("cheat-team", {silent:true});
+  } else if(popupById("cheat-team")){
+    closePopup("cheat-team", {silent:true});
+  }
+  if(pendingCheatDriver && cheatData){
+    const d = (cheatData.drivers || []).find(x => x.id === pendingCheatDriver);
+    if(d){
+      const p = openOverlay("cheat-driver", `Set rating — ${d.name}`);
+      p.onClose = () => { pendingCheatDriver = null; renderAll(); };
+    } else closePopup("cheat-driver", {silent:true});
+  } else if(popupById("cheat-driver")){
+    closePopup("cheat-driver", {silent:true});
+  }
 }
 document.addEventListener("keydown", e => {
   if(e.key === "Escape"){
@@ -710,6 +804,30 @@ $("ov-root").addEventListener("click", e => {
     return;
   }
   if(e.target.closest("[data-confirm-no]")){ closePopup("confirm"); return; }
+  // v0.7.4: the menu's adjust pop-ups — preset buttons apply
+  // immediately; the free inputs go through the Apply button.
+  const cpreset = e.target.closest("[data-cheat-preset]");
+  if(cpreset && pendingCheatTeam){
+    const parts = (cpreset.dataset.cheatPreset || "").split(":");
+    const delta = parseFloat(parts[1]);
+    if(parts[0] === "perf") send({type:"cheat_adjust", team_id: pendingCheatTeam, perf_delta: delta});
+    else if(parts[0] === "money") send({type:"cheat_adjust", team_id: pendingCheatTeam, money_delta: delta});
+    return;
+  }
+  const capply = e.target.closest("[data-cheat-apply]");
+  if(capply && pendingCheatTeam){
+    const pd = parseFloat(($("cheat-perf-delta") || {}).value);
+    const md = parseFloat(($("cheat-money-delta") || {}).value);
+    send({type:"cheat_adjust", team_id: pendingCheatTeam,
+          perf_delta: isNaN(pd) ? 0 : pd, money_delta: isNaN(md) ? 0 : md});
+    return;
+  }
+  const cdapply = e.target.closest("[data-cheat-driver-apply]");
+  if(cdapply && pendingCheatDriver){
+    const r = parseInt(($("cheat-rating") || {}).value, 10);
+    send({type:"cheat_driver", driver_id: pendingCheatDriver, rating: isNaN(r) ? 0 : r});
+    return;
+  }
 });
 $("ov-chips").addEventListener("click", e => {
   const x = e.target.closest("[data-chip-close]");
@@ -959,9 +1077,13 @@ function connect(){
       renderAll();
     } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box){ let lastCat = null; const rows = (m.rumours || []).map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; const head = (r.category && r.category !== lastCat) ? `<tr><th colspan="4" style="text-align:left">${esc(r.category)}</th></tr>` : ""; lastCat = r.category || lastCat; return head + `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false, null, r.gender)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join(""); box.innerHTML = rows ? `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>${rows}</table></div>` : `<p class="note">No driver is likely to retire — every driver is under 30 or in a good position.</p>`; }
     } else if(m.type === "season_detail"){ seasonDetail = m.detail; viewingSeason = m.detail.year; syncOverlays();
+    } else if(m.type === "cheat_state"){ cheatData = m.cheat; cheatsOpen = true; renderAll();
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
     } else if(m.type === "saved"){ showOk("game-err", "Saved as " + m.save.name); refreshSaves();
     } else if(m.type === "action"){ showOk(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
+      // v0.7.4: a note saved — clear the add box and close any open
+      // edit; the broadcast that follows re-renders the grid.
+      if(m.action === "save_note" && m.ok){ const inp = $("note-text"); if(inp) inp.value = ""; editingNoteId = null; }
     } else if(m.type === "error"){ joinPending = false; showErr(room && room.started ? "game-err" : (room ? "lobby-err" : "home-err"), m.message);
     } else if(m.type === "kicked"){ alert(m.message); location.reload(); }
   };
@@ -1009,16 +1131,21 @@ function renderAll(){
   // Pop-ups belong to one screen: changing screen (home → lobby →
   // game → results) closes them, so a stale panel never floats over
   // the new screen.
-  const screen = !inGame ? "lobby" : inResults ? "results" : showPicker ? "picker" : "game";
+  const screen = !inGame ? "lobby" : inResults ? "results" : showPicker ? "picker" : cheatsOpen ? "cheats" : "game";
+  // v0.7.4: the menu only lives on the dashboard — leaving the
+  // game screen (results, lobby, picker) closes it for good.
+  if(screen !== "game" && screen !== "cheats") cheatsOpen = false;
   if(screen !== currentScreen){ closeAllPopups({silent:true}); currentScreen = screen; }
   $("screen-home").classList.toggle("hidden", true);
   $("screen-lobby").classList.toggle("hidden", inGame);
   $("screen-picker").classList.toggle("hidden", screen !== "picker");
-  $("screen-game").classList.toggle("hidden", !inGame || inResults || showPicker);
+  $("screen-game").classList.toggle("hidden", !inGame || inResults || showPicker || cheatsOpen);
   $("screen-results").classList.toggle("hidden", !inResults);
+  $("screen-cheats").classList.toggle("hidden", screen !== "cheats");
   if(!inGame) renderLobby();
   else if(inResults) renderResults();
   else if(showPicker) renderPicker();
+  else if(cheatsOpen) renderCheats();
   else renderGame();
   // v0.6.2: while the picker is up, tick the "available in Xs"
   // countdowns once a second (text only — the list re-renders when
@@ -1521,19 +1648,33 @@ function renderDriversTab(){
     const subNote = illDriver ? ` <span class="note">(standing in for ${esc(illDriver.name || "an ill driver")}${genderBadge(illDriver.name || "", illDriver.gender)})</span>` : "";
     return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>${subNote} ${dropBtn(d)}</div>`;
   }).join("");
-  const trHtml = trs.length ? trs.map(d =>
+  const trHtml = trs.length ? trs.map(d => {
+    // v0.7.4: a T&R driver still racing in F2 cannot swap into a
+    // main seat mid-season — except when the seat's occupant is
+    // standing in for an ill driver (then the F2 driver takes over
+    // the stand-in role). The server re-validates; this just greys
+    // the button out with the reason, instead of letting you click
+    // it and get an error.
+    const swapBtn = s => {
+      if(d.f2_tr){
+        const occ = (t.drivers || []).find(x => x.id === t["driver" + s + "_id"]);
+        if(!(occ && occ.ill_sub_for))
+          return ` <button disabled title="Still racing in F2 — main seats open in the winter break">Swap with Seat ${s} — still racing in F2</button>`;
+      }
+      return ` <button data-swap-tr="${d.id}" data-seat="${s}">Swap with Seat ${s}</button>`;
+    };
     // v0.7.1: an ill driver recovering in T&R is shown with the
     // illness and the round they return — with NO Swap/Promote or
     // Drop buttons (they cannot race, and cannot be released, until
     // they recover; the server refuses both).
-    `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>` +
+    return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>` +
     (d.ill_until_round
       ? ` <span class="note">🤒 ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}</span>`
       : (emptySeats.length
         ? emptySeats.map(s => ` <button data-promote-tr="${d.id}" data-seat="${s}">Promote to Seat ${s}</button>`).join("")
-        : [1, 2].map(s => ` <button data-swap-tr="${d.id}" data-seat="${s}">Swap with Seat ${s}</button>`).join("")) +
-      ` ${dropBtn(d)}`) + `</div>`
-  ).join("") : `<p class="note">No T&R drivers — sign one from the Driver Market (paid in full, +25% research each).</p>`;
+        : [1, 2].map(swapBtn).join("")) +
+      ` ${dropBtn(d)}`) + `</div>`;
+  }).join("") : `<p class="note">No T&R drivers — sign one from the Driver Market (paid in full, +25% research each).</p>`;
   const acHtml = acs.length ? acs.map(d =>
     `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span> <button class="secondary" data-release-academy="${d.id}">Release</button></div>`
   ).join("") : `<p class="note">No academy drivers yet — add a free-agent or F2 driver aged 25 or under from the Driver Market (🎓 Academy button).</p>`;
@@ -1614,6 +1755,73 @@ function renderDriversTab(){
       `Release ${d ? d.name : "this driver"} from your Driver Academy? It is free — they stay a free agent / F2 driver and can be signed by anyone, and your academy slot frees up.`,
       () => send({type:"release_academy", driver_id: b.dataset.releaseAcademy}));
   });
+}
+
+// v0.7.4: Notes tab — per-team post-it notes (add, edit, delete;
+// max 15 per team, 200 characters each, 5 per row). The notes live
+// in myTeam (the private channel — no other team's browser ever
+// gets them). The add box is static HTML so a broadcast never wipes
+// what you are typing; the grid re-renders only when the notes
+// actually change, and never while an edit is open.
+function renderNotesTab(){
+  const box = $("notes-box"); if(!box) return;
+  const notes = (myTeam && myTeam.notes) || [];
+  const countEl = $("notes-count"), addBtn = $("btn-note-add"), addInput = $("note-text");
+  if(countEl) countEl.textContent = `${notes.length}/15 notes`;
+  if(addBtn) addBtn.disabled = notes.length >= 15;
+  if(addInput) addInput.disabled = notes.length >= 15;
+  if(editingNoteId !== null) return;
+  const key = JSON.stringify(notes);
+  if(key === lastNotesKey) return;
+  lastNotesKey = key;
+  if(!notes.length){ box.innerHTML = `<p class="note">No notes yet — write one above.</p>`; return; }
+  box.innerHTML = `<div class="notes-grid">` + notes.map(n =>
+    `<div class="note-card" data-note-id="${n.id}"><div>${esc(n.text)}</div>
+     <div class="note-actions"><button data-note-edit="${n.id}">Edit</button><button class="danger" data-note-del="${n.id}">Delete</button></div></div>`
+  ).join("") + `</div>`;
+  box.querySelectorAll("[data-note-edit]").forEach(b => b.onclick = () => startNoteEdit(parseInt(b.dataset.noteEdit)));
+  box.querySelectorAll("[data-note-del]").forEach(b => b.onclick = () => send({type:"delete_note", note_id: parseInt(b.dataset.noteDel)}));
+}
+function startNoteEdit(id){
+  const notes = (myTeam && myTeam.notes) || [];
+  const n = notes.find(x => x.id === id); if(!n) return;
+  editingNoteId = id;
+  const box = $("notes-box");
+  const card = box ? box.querySelector(`[data-note-id="${id}"]`) : null;
+  if(!card) return;
+  card.innerHTML = `<textarea id="note-edit-text" maxlength="200">${esc(n.text)}</textarea>
+    <div class="note-actions"><button data-note-save>Save</button><button class="secondary" data-note-cancel>Cancel</button></div>`;
+  const ta = card.querySelector("#note-edit-text");
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  card.querySelector("[data-note-save]").onclick = () => send({type:"save_note", note_id: id, text: ta.value});
+  card.querySelector("[data-note-cancel]").onclick = () => { editingNoteId = null; renderNotesTab(); };
+}
+
+// v0.7.4: the menu — a full-screen view (perf bars, finances, mini
+// drivers' + constructors' standings) fed by cheatData, the
+// authoritative payload from the server. Tapping a team name opens
+// the team pop-up (perf / money); tapping a driver name opens the
+// driver pop-up (rating). BACK returns to the Notes tab.
+function renderCheats(){
+  const d = cheatData; if(!d) return;
+  const best = Math.max(0.001, ...(d.teams || []).map(t => t.perf));
+  $("cheats-perf").innerHTML = (d.teams || []).map(t =>
+    `<div class="bar-row"><button class="tap-name" data-cheat-team="${t.id}">${teamNameHtml({name: t.name, colour: t.colour})}</button>
+     <div class="bar-track"><div class="bar-fill" style="width:${(t.perf / best * 100).toFixed(1)}%; background:${t.colour}"></div></div>
+     <span>${t.perf.toFixed(1)}</span></div>`).join("");
+  const byMoney = [...(d.teams || [])].sort((a, b) => b.money - a.money);
+  $("cheats-money").innerHTML = `<div class="table-scroll"><table><tr><th>Team</th><th>Money</th></tr>` +
+    byMoney.map(t => `<tr><td><button class="tap-name" data-cheat-team="${t.id}">${teamNameHtml({name: t.name, colour: t.colour})}</button></td><td>${money(t.money)}</td></tr>`).join("") + `</table></div>`;
+  $("cheats-drivers").innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Pts</th></tr>` +
+    (d.drivers || []).map(dr => `<tr><td><button class="tap-name" data-cheat-driver="${dr.id}">${driverNameHtml(dr.name, dr.colour, 0, false, null, dr.gender)}</button></td><td>${fmtPts(dr.points)}</td></tr>`).join("") + `</table></div>`;
+  $("cheats-teams").innerHTML = `<div class="table-scroll"><table><tr><th>Team</th><th>Pts</th></tr>` +
+    (d.constructors || []).map(t => `<tr><td><button class="tap-name" data-cheat-team="${t.id}">${teamNameHtml({name: t.name, colour: t.colour})}</button></td><td>${fmtPts(t.points)}</td></tr>`).join("") + `</table></div>`;
+  document.querySelectorAll("#screen-cheats [data-cheat-team]").forEach(b => b.onclick = () => { pendingCheatTeam = b.dataset.cheatTeam; syncOverlays(); });
+  document.querySelectorAll("#screen-cheats [data-cheat-driver]").forEach(b => b.onclick = () => { pendingCheatDriver = b.dataset.cheatDriver; syncOverlays(); });
+  // The adjust pop-ups are overlay panels — keep them in sync with
+  // the menu data (renderTabs does this for the dashboard; the menu
+  // is a separate screen, so it does it here).
+  syncOverlays();
 }
 
 // v0.6: Relationships tab — the supplier / customer / junior system.
@@ -2245,6 +2453,7 @@ function renderTabs(){
   document.querySelectorAll("[data-season-year]").forEach(b => b.onclick = e => { e.preventDefault(); send({type:"season_detail", year: parseInt(b.dataset.seasonYear)}); });
   const rb = $("btn-rumours"); if(rb) rb.onclick = () => send({type:"rumours"});
   renderDriversTab();
+  renderNotesTab();
   renderRelationsTab($("relations-box"));
   if(myTeam) renderMyTeam();
   syncOverlays();
@@ -2287,6 +2496,10 @@ $("btn-reg-adapt").onclick = () => send({type:"reg_adapt"});
 $("btn-reg-adapt-10").onclick = () => send({type:"reg_adapt", points: 10});
 $("btn-refresh-home-saves").onclick = refreshHomeSaves;
 $("btn-save").onclick = () => send({type:"save_career", name: $("save-name").value.trim() || undefined});
+// v0.7.4: Notes — the add box sends the text as usual; the server
+// decides what it is. BACK on the menu returns to the Notes tab.
+$("btn-note-add").onclick = () => { const v = $("note-text").value; if(!v.trim()){ showErr("game-err", "Write something first."); return; } send({type:"save_note", text: v}); };
+$("btn-cheats-back").onclick = () => { cheatsOpen = false; renderAll(); const nb = document.querySelector('[data-tab="notes"]'); if(nb) nb.click(); };
 $("btn-leave").onclick = () => { sessionStorage.removeItem("f1code"); sessionStorage.removeItem("f1player"); location.href = "/"; };
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("sel"));
