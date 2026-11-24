@@ -445,7 +445,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 14  # v0.7.3 save format
+        assert loaded["version"] == 15  # v0.7.4 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -2425,7 +2425,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 14
+        assert loaded["version"] == 15
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2533,15 +2533,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v073():
-    """The live version string is v0.7.3 everywhere it is shown."""
+def test_health_reports_v074():
+    """The live version string is v0.7.4 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.7.3"
+    assert client.get("/api/health").json()["version"] == "v0.7.4"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.7.3</title>" in html
-    assert "Online · v0.7.3 beta" in html
+    assert "<title>F1 Team Manager Online — v0.7.4</title>" in html
+    assert "Online · v0.7.4 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3151,7 +3151,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 14
+    assert SAVE_VERSION == 15
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -4932,7 +4932,7 @@ def test_migration_v8_to_v12():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 14
+    assert SAVE_VERSION == 15
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -7370,7 +7370,7 @@ def test_v14_migration_adds_f2_tr_f1_tally_and_gender_fields():
     v0.7.1 F2 fields are dropped. The real Season 3 save loads with
     them (its file is never modified by loading it)."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save
-    assert SAVE_VERSION == 14
+    assert SAVE_VERSION == 15
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
     doc["version"] = 13
@@ -7643,7 +7643,7 @@ def test_v072_resign_seat_picker_old_seat_occupied():
 
 
 def test_v13_migration_backfills_2026_snapshot_relationships():
-    """v0.7.2 (save v13, now v14): the 2026 season snapshot backfills its
+    """v0.7.2 (save v13, now v15): the 2026 season snapshot backfills its
     relationship data from the 2026 grid — Mercedes -> McLaren /
     Williams / Alpine customers, Red Bull -> Racing Bulls junior,
     Ferrari -> Haas / Cadillac customers — while the 2027/2028
@@ -7651,14 +7651,14 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
     real Season 3 save (v10) and the Season 4 Round 2 export (v12)
     migrate cleanly, and their files are never modified."""
     from f1.saves import SAVE_VERSION, load_save
-    assert SAVE_VERSION == 14
+    assert SAVE_VERSION == 15
     path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
     if not path.exists():
         pytest.skip("Season 3 save not present in this checkout")
     before = path.read_bytes()
     loaded = _load_s3_save()
     assert loaded is not None
-    assert loaded["version"] == 14
+    assert loaded["version"] == 15
     assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
     snaps = {s["year"]: s for s in loaded["season_snapshots"]}
     assert {2026, 2027, 2028} <= set(snaps)
@@ -7689,7 +7689,7 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
         before4 = path4.read_bytes()
         loaded4 = load_save(str(path4.parent), "matthew-max-wugynr-s4-round2")
         assert loaded4 is not None
-        assert loaded4["version"] == 14
+        assert loaded4["version"] == 15
         assert loaded4["year"] == 2029 and loaded4["round"] == 2
         assert loaded4["phase"] == "round"
         rb = team_by_name(loaded4, "Red Bull")
@@ -8164,3 +8164,607 @@ def test_v073_custom_colours_exact_list():
                               "#8B4513", "#2D3436", "#7CB342", "#C3B091",
                               "#AD1457", "#827717"]
     assert len(set(CUSTOM_COLOURS)) == 10
+
+# ---------------------------------------------------------------------------
+# v0.7.4 — F2 T&R swap fix, Notes tab, cheats menu (perf / money /
+# driver rating).
+# ---------------------------------------------------------------------------
+
+
+def _sign_f2_tr(career, team, rep=None, skip=0):
+    """Sign an unsigned F2 driver as a T&R driver for `team` (the
+    v0.7.3 rule: an F2 driver may join as T&R mid-season). Returns
+    the driver."""
+    cands = [d for d in game.f2_drivers(career) if not d.get("f2_tr")]
+    f2 = cands[skip]
+    team["money"] = 100.0
+    ok, why = game.sign_tr_driver(career, team["id"], f2["id"], 2)
+    assert ok, why
+    assert f2.get("f2_tr") is True
+    if rep is not None:
+        f2["rep"] = rep
+    return f2
+
+
+def test_v074_f2_tr_swap_refused_midseason():
+    """v0.7.4 (1): the manual Swap button was the F2 loophole —
+    promoting an f2_tr driver into an empty seat was already blocked
+    (v0.7.3), but swapping them with a main driver was not. Now the
+    swap is refused mid-season too, and a normal T&R driver still
+    swaps fine."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    f2 = _sign_f2_tr(career, mclaren)
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    ok, why = game.swap_main_tr(career, mclaren["id"], 1, f2["id"])
+    assert not ok and "F2" in why, why
+    assert f2["status"] == "tr" and f2.get("f2_tr") is True
+    assert mclaren["driver1_id"] == norris["id"]
+    tr = next(d for d in game.team_tr_drivers(career, mclaren)
+              if not d.get("f2_tr"))
+    ok, why = game.swap_main_tr(career, mclaren["id"], 1, tr["id"])
+    assert ok, why
+    assert mclaren["driver1_id"] == tr["id"]
+
+
+def test_v074_f2_tr_swap_allowed_as_ill_standin():
+    """v0.7.4 (1): the one allowed mid-season swap — an f2_tr driver
+    taking over a stand-in seat for an ill driver. They keep status
+    "tr" + f2_tr (like the promote path) and return to T&R when the
+    ill driver recovers."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    a = _sign_f2_tr(career, mclaren, rep=5.0)
+    b = _sign_f2_tr(career, mclaren, rep=1.0)
+    norris = game.get_driver(career, mclaren["driver1_id"])
+    newly = game.roll_illness(
+        career, rng=_ScriptedIllnessRng(
+            _illness_rolls_for(career, norris["id"]), duration=2))
+    assert newly == [norris]
+    # A (highest-rep T&R) is the provisional stand-in.
+    assert mclaren["driver1_id"] == a["id"]
+    assert a.get("ill_sub_for") == norris["id"]
+    assert a["status"] == "tr" and a.get("f2_tr") is True
+    # B swaps in for A: allowed, and B takes over the stand-in role.
+    ok, why = game.swap_main_tr(career, mclaren["id"], 1, b["id"])
+    assert ok, why
+    assert mclaren["driver1_id"] == b["id"]
+    assert b["status"] == "tr" and b.get("f2_tr") is True
+    assert b.get("ill_sub_for") == norris["id"]
+    assert norris["ill_sub_id"] == b["id"]
+    assert a["status"] == "tr" and a.get("ill_sub_for") is None
+    # B races the two rounds as the stand-in, then Norris returns
+    # and B is back in T&R (still racing F2).
+    game.run_race_weekend(career, rng=seeded(31))
+    assert b["id"] in _raced_ids(career)
+    assert norris["id"] not in _raced_ids(career)
+    game.complete_race_weekend(career, rng=seeded(32))
+    game.run_race_weekend(career, rng=seeded(33))
+    assert b["id"] in _raced_ids(career)
+    game.complete_race_weekend(career, rng=seeded(34))
+    assert career["round"] == 3
+    assert norris["status"] == "f1"
+    assert norris["id"] in (mclaren["driver1_id"], mclaren["driver2_id"])
+    assert b["status"] == "tr" and b.get("f2_tr") is True
+    assert b.get("ill_sub_for") is None
+    assert a["status"] == "tr" and a.get("f2_tr") is True
+
+
+def test_v074_f2_tr_swap_allowed_winter_break():
+    """v0.7.4 (1): in the winter break the F2 season is over, so the
+    swap is allowed — and the driver leaves F2 for the main seat
+    (f2_tr cleared, F2 tally reset), like the promote path."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    f2 = _sign_f2_tr(career, mclaren)
+    f2["points"] = 30
+    f2["season_wins"] = 2
+    f2["best_pos"] = 1
+    career["phase"] = "winter_break"
+    ok, why = game.swap_main_tr(career, mclaren["id"], 1, f2["id"])
+    assert ok, why
+    assert f2["status"] == "f1" and f2.get("f2_tr") is False
+    assert f2["points"] == 0 and f2["season_wins"] == 0
+    assert mclaren["driver1_id"] == f2["id"]
+
+
+def test_v074_bot_does_not_swap_f2_tr_midseason():
+    """v0.7.4 (1): the server-side guard covers bots too — the bot
+    AI swaps through swap_main_tr, so a bot team with an f2_tr
+    driver as its best T&R does not swap them into a main seat
+    mid-season."""
+    career = game.build_new_career("Test", "Matthew")
+    career["round"] = 6
+    cadillac = team_by_name(career, "Cadillac")
+    bad = game.get_driver(career, cadillac["driver1_id"])
+    bad["points"] = 0
+    bad["finish_count"] = 5
+    bad["finish_sum"] = 100  # average finish 20th
+    f2 = _sign_f2_tr(career, cadillac, rep=5.0)
+    game.bot_post_race(career, rng=seeded(41))
+    assert cadillac["driver1_id"] == bad["id"]
+    assert f2["status"] == "tr" and f2.get("f2_tr") is True
+    assert f2["id"] not in (cadillac["driver1_id"], cadillac["driver2_id"])
+
+
+def test_v074_notes_crud_and_limits():
+    """v0.7.4 (2): Notes — add, edit, delete; max 15 per team, max
+    200 characters per note; limits enforced server-side."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    ok, why = game.save_note(career, mclaren["id"], "  Remember to pit  ")
+    assert ok, why
+    assert mclaren["notes"] == [{"id": 1, "text": "Remember to pit"}]
+    ok, why = game.save_note(career, mclaren["id"], "Second note")
+    assert ok and mclaren["notes"][1]["id"] == 2
+    # Edit by id.
+    ok, why = game.save_note(career, mclaren["id"], "Edited", note_id=1)
+    assert ok, why
+    assert mclaren["notes"][0]["text"] == "Edited"
+    # Unknown id / empty / too long.
+    ok, why = game.save_note(career, mclaren["id"], "x", note_id=99)
+    assert not ok and "No such note" in why
+    ok, why = game.save_note(career, mclaren["id"], "   ")
+    assert not ok
+    ok, why = game.save_note(career, mclaren["id"], "x" * 201)
+    assert not ok and "200" in why
+    ok, why = game.save_note(career, mclaren["id"], "x" * 200)
+    assert ok, why
+    # Fill to the cap: 15 notes, the 16th is refused.
+    for i in range(12):
+        ok, why = game.save_note(career, mclaren["id"], f"note {i}")
+        assert ok, why
+    assert len(mclaren["notes"]) == 15
+    ok, why = game.save_note(career, mclaren["id"], "one too many")
+    assert not ok and "15" in why
+    # Delete (immediate) and the id counter does not reuse ids.
+    ok, why = game.delete_note(career, mclaren["id"], 1)
+    assert ok, why
+    assert len(mclaren["notes"]) == 14
+    assert all(n["id"] != 1 for n in mclaren["notes"])
+    ok, why = game.delete_note(career, mclaren["id"], 1)
+    assert not ok and "No such note" in why
+    ok, why = game.save_note(career, mclaren["id"], "fresh")
+    assert ok and mclaren["notes"][-1]["id"] == 16
+
+
+def test_v074_notes_privacy_and_migration():
+    """v0.7.4 (2): Notes are private — public_state (the broadcast
+    copy of the whole career) never carries them, and my_team_public
+    only ever carries the viewer's own team's notes. A pre-v0.7.4
+    save migrates with notes=[] on every team."""
+    import server as srv
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    ferrari = team_by_name(career, "Ferrari")
+    game.save_note(career, mclaren["id"], "McLaren secret")
+    game.save_note(career, ferrari["id"], "Ferrari secret")
+    # The broadcast copy: no notes anywhere, not even as a substring.
+    state = game.public_state(career, True, mclaren["id"])
+    assert "McLaren secret" not in json.dumps(state)
+    assert "Ferrari secret" not in json.dumps(state)
+    assert all("notes" not in t for t in state["teams"])
+    # The private channel: each team sees only its own notes.
+    mclaren["owner_player_id"] = "p-m"
+    ferrari["owner_player_id"] = "p-f"
+    room = {"career": career, "chart_on": True, "players": []}
+    mine = srv.my_team_public(room, "p-m")
+    assert [n["text"] for n in mine["notes"]] == ["McLaren secret"]
+    theirs = srv.my_team_public(room, "p-f")
+    assert [n["text"] for n in theirs["notes"]] == ["Ferrari secret"]
+    # Migration: a v14 career with no notes field gains notes=[].
+    career2 = game.build_new_career("Test", "Matthew")
+    for t in career2["teams"]:
+        t.pop("notes", None)
+    career2["version"] = 14
+    migrated = migrate_save(career2)
+    assert migrated["version"] == 15
+    assert all(t["notes"] == [] for t in migrated["teams"])
+
+
+def test_v074_cheat_state_with_chart_off():
+    """v0.7.4 (3): cheat_state returns the REAL perf values even
+    when the perf chart is off (public_state strips them) — teams
+    best-first, all registered drivers in championship order, all
+    constructors in order."""
+    career = game.build_new_career("Test", "Matthew", chart_on=False)
+    state = game.public_state(career, False, career["teams"][0]["id"])
+    assert all("perf" not in t for t in state["teams"])
+    cheat = game.cheat_state(career)
+    assert len(cheat["teams"]) == 11
+    perfs = [t["perf"] for t in cheat["teams"]]
+    assert perfs == sorted(perfs, reverse=True)
+    assert all(p > 0 for p in perfs)
+    assert len(cheat["drivers"]) == 22
+    assert cheat["drivers"][0]["points"] >= cheat["drivers"][-1]["points"]
+    assert all("rating" in d and "min_rating" in d and "max_rating" in d
+               for d in cheat["drivers"])
+    assert len(cheat["constructors"]) == 11
+    assert cheat["constructors"][0]["points"] >= cheat["constructors"][-1]["points"]
+
+
+def test_v074_cheat_adjust_clamps():
+    """v0.7.4 (3): perf is clamped to [0, 400]; money is floored at
+    $0 — and a team already in debt cannot go further down, only up."""
+    career = game.build_new_career("Test", "Matthew")
+    aston = team_by_name(career, "Aston Martin")
+    aston["perf"] = 100.0
+    aston["money"] = 10.0
+    ok, why = game.cheat_adjust(career, aston["id"], perf_delta=500)
+    assert ok, why
+    assert aston["perf"] == 400.0
+    ok, why = game.cheat_adjust(career, aston["id"], perf_delta=-500)
+    assert ok, why
+    assert aston["perf"] == 0.0
+    ok, why = game.cheat_adjust(career, aston["id"], money_delta=-100)
+    assert ok, why
+    assert aston["money"] == 0.0
+    # Already negative: a negative change is refused outright (no
+    # change at all, perf included), a positive one is allowed and
+    # may still leave the team in debt.
+    aston["money"] = -5.0
+    aston["perf"] = 100.0
+    ok, why = game.cheat_adjust(career, aston["id"], perf_delta=10, money_delta=-1)
+    assert not ok and "already" in why, why
+    assert aston["perf"] == 100.0 and aston["money"] == -5.0
+    ok, why = game.cheat_adjust(career, aston["id"], money_delta=3)
+    assert ok, why
+    assert aston["money"] == -2.0
+    ok, why = game.cheat_adjust(career, aston["id"], money_delta=5)
+    assert ok, why
+    assert aston["money"] == 3.0
+    # No log entry for a cheat change.
+    assert not any("Aston Martin: perf" in line for line in career["transfers"])
+
+
+def test_v074_rating_bounds():
+    """v0.7.4 (3, driver rating): the clamp range comes from the age
+    rating table — the spec's examples, plus the out-of-table
+    fallbacks (below 12 → age-12 row, 50+ → age-49 row)."""
+    from f1.rules import rating_bounds
+    assert rating_bounds(19) == (61, 85)
+    assert rating_bounds(25) == (70, 100)
+    assert rating_bounds(45) == (62, 86)
+    assert rating_bounds(49) == (58, 86)
+    assert rating_bounds(50) == (58, 86)
+    assert rating_bounds(60) == (58, 86)
+    assert rating_bounds(12) == (47, 55)
+    assert rating_bounds(5) == (47, 55)
+
+
+def test_v074_cheat_set_rating():
+    """v0.7.4 (3, driver rating): setting a rating within range
+    applies it; above the age max clamps to the max, below the age
+    min clamps to the min; a 50+ driver clamps to the age-49 row;
+    a driver who is not in the drivers' standings cannot be edited."""
+    career = game.build_new_career("Test", "Matthew")
+    norris = driver_by_name(career, "Lando Norris")
+    assert norris["age"] == 26
+    ok, why = game.cheat_set_rating(career, norris["id"], 90)
+    assert ok, why
+    assert norris["perf"] == 90
+    ok, why = game.cheat_set_rating(career, norris["id"], 150)
+    assert ok, why
+    assert norris["perf"] == 100  # age-26 max
+    assert "clamped" in why
+    ok, why = game.cheat_set_rating(career, norris["id"], 10)
+    assert ok, why
+    assert norris["perf"] == 71  # age-26 min
+    # A 19-year-old clamps to [61, 85] (the spec's example).
+    antonelli = driver_by_name(career, "Kimi Antonelli")
+    assert antonelli["age"] == 19
+    ok, why = game.cheat_set_rating(career, antonelli["id"], 90)
+    assert ok, why
+    assert antonelli["perf"] == 85
+    # A 50+ driver clamps to the age-49 row [58, 86].
+    alonso = driver_by_name(career, "Fernando Alonso")
+    alonso["age"] = 52
+    ok, why = game.cheat_set_rating(career, alonso["id"], 200)
+    assert ok, why
+    assert alonso["perf"] == 86
+    ok, why = game.cheat_set_rating(career, alonso["id"], 10)
+    assert ok, why
+    assert alonso["perf"] == 58
+    # Not in the standings: an F2 driver cannot be edited.
+    f2 = game.f2_drivers(career)[0]
+    ok, why = game.cheat_set_rating(career, f2["id"], 80)
+    assert not ok and "not in the drivers' standings" in why
+    # No log entry.
+    assert not any("rating" in line for line in career["transfers"])
+
+
+def test_ws_v074_notes_and_cheats():
+    """v0.7.4 over the real WebSocket (two clients): Notes CRUD via
+    save_note/delete_note with the server-side caps; the trigger
+    text opens the menu (cheat_state) and creates no note, while the
+    lowercase variant creates a normal note; cheat_adjust and
+    cheat_driver apply server-side and broadcast — the second client
+    sees the new perf in the room state and the new rating in a
+    cheat_state request."""
+    from fastapi.testclient import TestClient
+    import server as srv
+
+    client = TestClient(srv.app)
+
+    def recv_until(ws, want, limit=60, check=None):
+        for _ in range(limit):
+            m = ws.receive_json()
+            if m.get("type") == want and (check is None or check(m)):
+                return m
+        raise AssertionError(f"never got {want}")
+
+    with client.websocket_connect("/ws") as host_ws:
+        host_ws.send_json({"type": "create_room", "nickname": "Matthew", "colour": "#e74c3c"})
+        joined = recv_until(host_ws, "joined")
+        code = joined["code"]
+        host_ws.send_json({"type": "new_career", "name": "WS Notes"})
+        state = recv_until(host_ws, "room_state",
+                           check=lambda m: m["room"]["career"] is not None)
+        teams = {t["name"]: t for t in state["room"]["career"]["teams"]}
+        host_ws.send_json({"type": "choose_team", "team_id": teams["McLaren"]["id"]})
+        host_ws.send_json({"type": "start_career"})
+        recv_until(host_ws, "room_state", check=lambda m: m["room"]["started"] is True)
+        room = srv.ROOMS[code]
+        career = room["career"]
+        mclaren = team_by_name(career, "McLaren")
+        # A second client joins and takes Ferrari.
+        with client.websocket_connect("/ws") as ws2:
+            ws2.send_json({"type": "join_room", "code": code, "nickname": "Cousin",
+                           "colour": "#3498db"})
+            recv_until(ws2, "joined")
+            ws2.send_json({"type": "choose_team", "team_id": teams["Ferrari"]["id"]})
+            recv_until(ws2, "room_state", check=lambda m: m["room"]["started"] is True)
+            # Notes: add, edit, delete.
+            host_ws.send_json({"type": "save_note", "text": "Remember to pit"})
+            act = recv_until(host_ws, "action", check=lambda m: m.get("action") == "save_note")
+            assert act["ok"], act
+            assert [n["text"] for n in mclaren["notes"]] == ["Remember to pit"]
+            nid = mclaren["notes"][0]["id"]
+            host_ws.send_json({"type": "save_note", "text": "Edited note", "note_id": nid})
+            act = recv_until(host_ws, "action", check=lambda m: m.get("action") == "save_note")
+            assert act["ok"], act
+            assert mclaren["notes"][0]["text"] == "Edited note"
+            host_ws.send_json({"type": "delete_note", "note_id": nid})
+            act = recv_until(host_ws, "action", check=lambda m: m.get("action") == "delete_note")
+            assert act["ok"], act
+            assert mclaren["notes"] == []
+            # The trigger: exact match opens the menu, creates no note.
+            host_ws.send_json({"type": "save_note", "text": "chmenU"})
+            cheat = recv_until(host_ws, "cheat_state")
+            assert len(cheat["cheat"]["teams"]) == 11
+            assert len(cheat["cheat"]["drivers"]) == 22
+            assert mclaren["notes"] == []
+            # The lowercase variant is just a normal note.
+            host_ws.send_json({"type": "save_note", "text": "chmenu"})
+            act = recv_until(host_ws, "action", check=lambda m: m.get("action") == "save_note")
+            assert act["ok"], act
+            assert [n["text"] for n in mclaren["notes"]] == ["chmenu"]
+            host_ws.send_json({"type": "delete_note",
+                               "note_id": mclaren["notes"][0]["id"]})
+            recv_until(host_ws, "action", check=lambda m: m.get("action") == "delete_note")
+            # Server-side caps over the wire: 15 notes, then the 16th
+            # is refused; a 201-char note is refused.
+            for i in range(15):
+                host_ws.send_json({"type": "save_note", "text": f"n{i}"})
+                act = recv_until(host_ws, "action",
+                                 check=lambda m: m.get("action") == "save_note")
+                assert act["ok"], act
+            assert len(mclaren["notes"]) == 15
+            host_ws.send_json({"type": "save_note", "text": "one too many"})
+            err = recv_until(host_ws, "error")
+            assert "15" in err["message"]
+            host_ws.send_json({"type": "save_note", "text": "x" * 201})
+            err = recv_until(host_ws, "error")
+            assert "200" in err["message"]
+            # Team adjust: the target is the team named in the
+            # message, NOT the requester's own team — adjust Mercedes
+            # (an AI team) and check McLaren is untouched. The second
+            # client sees the new perf in the broadcast room state.
+            mercedes = team_by_name(career, "Mercedes")
+            host_ws.send_json({"type": "cheat_adjust", "team_id": mercedes["id"],
+                               "perf_delta": 500})
+            act = recv_until(host_ws, "action", check=lambda m: m.get("action") == "cheat_adjust")
+            assert act["ok"], act
+            assert mercedes["perf"] == 400.0
+            assert mclaren["perf"] != 400.0
+            recv_until(ws2, "room_state",
+                       check=lambda m: any(t["name"] == "Mercedes" and t.get("perf") == 400.0
+                                           for t in m["room"]["career"]["teams"]))
+            # Driver rating: set above the age max, it clamps; the
+            # second client sees the new rating in a cheat_state.
+            norris = driver_by_name(career, "Lando Norris")
+            host_ws.send_json({"type": "cheat_driver", "driver_id": norris["id"],
+                               "rating": 150})
+            act = recv_until(host_ws, "action", check=lambda m: m.get("action") == "cheat_driver")
+            assert act["ok"], act
+            assert norris["perf"] == 100
+            ws2.send_json({"type": "cheat_state"})
+            cheat2 = recv_until(ws2, "cheat_state")
+            row = next(d for d in cheat2["cheat"]["drivers"] if d["id"] == norris["id"])
+            assert row["rating"] == 100
+
+
+def test_v074_notes_tab_and_cheats_menu_browser():
+    """v0.7.4 (browser): the Notes tab renders (add box, 0/15 count),
+    a note can be added, the trigger text opens the menu (perf bars,
+    finances, all 22 drivers, all 11 constructors), a team pop-up
+    opens and a preset applies, a driver pop-up opens and a rating
+    clamps to the age max, and BACK returns to the Notes tab — with
+    the trigger having created no note. No JS errors."""
+    pytest.importorskip("playwright")
+    import re
+    import subprocess
+    import time
+    import urllib.request
+    port = 8813
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        errors = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            page.click("#btn-new-career")
+            page.wait_for_selector("[data-team]", timeout=15000)
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            page.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            page.click("#btn-start-career")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # The Notes tab (right after Research).
+            page.click('[data-tab="notes"]')
+            page.wait_for_selector("#tab-notes:not(.hidden)", timeout=15000)
+            notes = page.inner_text("#tab-notes")
+            assert "Notes" in notes, notes
+            assert "0/15 notes" in notes, notes
+            # Add a note: it appears in the grid.
+            page.fill("#note-text", "Remember to pit on lap 20")
+            page.click("#btn-note-add")
+            page.wait_for_selector("#notes-box .note-card", timeout=15000)
+            assert "Remember to pit on lap 20" in page.inner_text("#notes-box")
+            assert "1/15 notes" in page.inner_text("#tab-notes")
+            # The trigger opens the menu.
+            page.fill("#note-text", "chmenU")
+            page.click("#btn-note-add")
+            page.wait_for_selector("#screen-cheats:not(.hidden)", timeout=15000)
+            # The menu: perf bars, finances, all 22 drivers, all 11 teams.
+            menu = page.inner_text("#screen-cheats")
+            assert "Car performance" in menu, menu
+            assert "Finances" in menu, menu
+            assert "Drivers' standings" in menu, menu
+            assert "Constructors' standings" in menu, menu
+            assert page.locator("#cheats-drivers [data-cheat-driver]").count() == 22
+            assert page.locator("#cheats-teams [data-cheat-team]").count() == 11
+            # Team pop-up: tap a team name, apply a +10 perf preset.
+            # Presets apply immediately and the pop-up stays open
+            # (so more presets can be tapped), showing the new value.
+            page.locator("#cheats-perf [data-cheat-team]").first.click()
+            page.wait_for_selector(".ov-panel:not(.hidden)", timeout=15000)
+            ov = page.inner_text(".ov-body")
+            assert "Perf change" in ov and "Money change" in ov, ov
+            m = re.search(r"perf ([\d.]+)", ov)
+            before = float(m.group(1))
+            page.click('[data-cheat-preset="perf:10"]')
+            page.wait_for_function(
+                """(before) => {
+                    const b = document.querySelector('.ov-body');
+                    return b && b.textContent.includes('perf ' + (before + 10).toFixed(1));
+                }""", arg=before, timeout=15000)
+            # Close the team pop-up, then open a driver pop-up.
+            page.click('[data-ov-close="cheat-team"]')
+            page.locator("#cheats-drivers [data-cheat-driver]").first.click()
+            page.wait_for_function(
+                """() => {
+                    const b = document.querySelector('.ov-body');
+                    return b && b.textContent.includes('New rating');
+                }""", timeout=15000)
+            ov = page.inner_text(".ov-body")
+            mm = re.search(r"min (\d+) – max (\d+)", ov)
+            assert mm, ov
+            max_rating = int(mm.group(2))
+            page.fill("#cheat-rating", str(max_rating + 10))
+            page.click("[data-cheat-driver-apply]")
+            page.wait_for_function(
+                """(mx) => {
+                    const b = document.querySelector('.ov-body');
+                    return b && b.textContent.includes('rating ' + mx);
+                }""", arg=max_rating, timeout=15000)
+            # BACK returns to the game screen, Notes tab selected —
+            # and the trigger created no note (still exactly 1).
+            page.click('[data-ov-close="cheat-driver"]')
+            page.click("#btn-cheats-back")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            page.wait_for_selector("#tab-notes:not(.hidden)", timeout=15000)
+            assert "1/15 notes" in page.inner_text("#tab-notes")
+            assert page.locator("#notes-box .note-card").count() == 1
+            assert "Remember to pit on lap 20" in page.inner_text("#notes-box")
+            browser.close()
+        assert not errors, errors
+    finally:
+        proc.terminate()
+
+
+def test_v074_f2_swap_button_disabled_browser():
+    """v0.7.4 (1, browser): sign an F2 driver as T&R from the Driver
+    Market, then the Drivers tab shows their Swap buttons disabled
+    with the F2 reason (the server refuses the swap too)."""
+    pytest.importorskip("playwright")
+    import subprocess
+    import time
+    import urllib.request
+    port = 8815
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        from playwright.sync_api import sync_playwright
+        errors = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.fill("#home-nick", "Max")
+            page.click("#btn-create")
+            page.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            page.click("#btn-new-career")
+            page.wait_for_selector("[data-team]", timeout=15000)
+            page.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            page.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            page.click("#btn-start-career")
+            page.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Market tab: sign the first F2 driver as T&R.
+            page.click('[data-tab="market"]')
+            page.wait_for_selector("#tab-market:not(.hidden)", timeout=15000)
+            page.evaluate("""() => {
+                const h = [...document.querySelectorAll('#tab-market h3.market-group')]
+                    .find(x => x.textContent.trim().startsWith('F2 '));
+                const btn = h.nextElementSibling.querySelector('[data-target="tr"]');
+                btn.click();
+            }""")
+            page.wait_for_selector(".ov-panel:not(.hidden)", timeout=15000)
+            page.click('[data-contract-years="2"]')
+            page.wait_for_selector(".ov-panel", state="detached", timeout=15000)
+            # Drivers tab: the new T&R driver's Swap buttons are
+            # disabled with the F2 reason (one per seat).
+            page.click('[data-tab="drivers"]')
+            page.wait_for_selector("#tab-drivers:not(.hidden)", timeout=15000)
+            page.wait_for_function(
+                """() => [...document.querySelectorAll('#tab-drivers button[disabled]')]
+                    .some(b => b.textContent.includes('still racing in F2'))""",
+                timeout=15000)
+            disabled = page.locator('#tab-drivers button[disabled]',
+                                    has_text="still racing in F2")
+            assert disabled.count() == 2
+            browser.close()
+        assert not errors, errors
+    finally:
+        proc.terminate()
