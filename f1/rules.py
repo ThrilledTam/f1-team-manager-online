@@ -151,6 +151,16 @@ RATING_TABLE = {
 }
 
 
+def rating_bounds(age):
+    """v0.7.4: (min, max) skill rating for a driver of this age, from
+    the rating table. Ages outside the table use the nearest row —
+    below 12 the age-12 row, 50+ the age-49 row."""
+    row = RATING_TABLE.get(age)
+    if row is None:
+        row = RATING_TABLE[12] if age < 12 else RATING_TABLE[49]
+    return (row[0], row[2])
+
+
 def rating_growth_range(age):
     """(low, high) integer rating change for the age step age -> age+1,
     from the rating table's min- and max-skill deltas (v0.4.3: the

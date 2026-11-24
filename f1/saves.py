@@ -14,7 +14,9 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 14  # v0.7.3: F2 promotions reworked (a T&R driver
+SAVE_VERSION = 15  # v0.7.4: per-team Notes (a "notes" list [{id, text}]
+# on every team, default empty; private — stripped from the broadcast
+# state, only ever sent to the owning team). v0.7.3: F2 promotions reworked (a T&R driver
 # still racing in F2 keeps their F2 tally in the plain fields and
 # their F1 results in f1_* fields — f2_tr + f1_points / f1_wins /
 # f1_podiums / f1_best_pos / f1_best_finish_round; the v0.7.1
@@ -327,6 +329,9 @@ def migrate_save(doc):
         # in a fresh career; older saves backfill to the neutral 50
         # (there is no history to learn it from).
         team.setdefault("team_rep", 50.0)
+        # v0.7.4: per-team Notes — older saves backfill to an empty
+        # list (no notes yet).
+        team.setdefault("notes", [])
         # v0.6.6: the junior income share (last race / this season,
         # paid and received) and the pending contract-break notice.
         team.setdefault("break_notice", None)

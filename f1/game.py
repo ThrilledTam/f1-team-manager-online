@@ -2192,6 +2192,36 @@ def swap_main_tr(career, team_id, seat, tr_driver_id):
     if tr.get("ill_until_round"):
         return False, (f"{tr['name']} is {tr.get('ill_label') or 'ill'} "
                        f"and cannot race until Round {tr['ill_until_round'] + 1}.")
+    # v0.7.4: a T&R driver still racing in F2 (f2_tr) can only take
+    # a main seat once their F2 season is over (the winter break) —
+    # EXCEPT as an illness substitute: standing in for an ill driver
+    # is the one in-season F1 race they may do. Here the seat is
+    # occupied, so the swap is a stand-in only when the outgoing
+    # main driver is themselves standing in for an ill driver
+    # (same rule as promote_tr_to_main, v0.7.3).
+    is_ill_standin = bool(main.get("ill_sub_for"))
+    if tr.get("f2_tr") and career.get("phase") != "winter_break" \
+            and not is_ill_standin:
+        return False, (f"{tr['name']} is still racing in F2 — they can "
+                       f"only take a main seat once the F2 season ends "
+                       f"(the winter break), unless they are standing in "
+                       f"for an ill driver.")
+    if tr.get("f2_tr") and career.get("phase") == "winter_break":
+        # Leaving F2 for the main seat: the F2 tally must not carry
+        # into F1 (same reset as promote_tr_to_main).
+        tr["f2_tr"] = False
+        tr["points"] = 0
+        tr["season_wins"] = 0
+        tr["season_podiums"] = 0
+        tr["best_pos"] = None
+        tr["best_finish_round"] = None
+        tr["finish_sum"] = 0
+        tr["finish_count"] = 0
+        tr["f1_points"] = 0
+        tr["f1_wins"] = 0
+        tr["f1_podiums"] = 0
+        tr["f1_best_pos"] = None
+        tr["f1_best_finish_round"] = None
     # Outgoing main driver: bank their per-team points (real F1),
     # keep their contract and championship tally, become T&R.
     team["points_kept"] = team.get("points_kept", 0) + main.get("team_points", 0)
@@ -2201,7 +2231,13 @@ def swap_main_tr(career, team_id, seat, tr_driver_id):
     # Incoming T&R driver: take the seat, fresh per-team tally.
     tr["team_points"] = 0
     tr["last_team_id"] = None
-    tr["status"] = "f1"
+    if not tr.get("f2_tr"):
+        # A normal T&R driver becomes a main driver. An illness
+        # stand-in still racing F2 stays a T&R driver (status "tr",
+        # f2_tr) and only holds the seat while the ill driver is
+        # out — restore_ill_driver sends them back (same pattern as
+        # promote_tr_to_main).
+        tr["status"] = "f1"
     team[slot] = tr["id"]
     # v0.7.1: if the outgoing main driver was a substitute standing
     # in for an ill driver, the stand-in role passes to the incoming
@@ -2219,6 +2255,12 @@ def swap_main_tr(career, team_id, seat, tr_driver_id):
     _recompute_team_points(career, team)
     career["transfers"].append(
         f"{tr['name']} swapped with {main['name']} at {team['name']}")
+    if tr.get("f2_tr"):
+        # An illness stand-in still racing F2: they hold the seat
+        # only while the ill driver is out.
+        return True, (f"{tr['name']} swapped with {main['name']} ✓ "
+                      f"({tr['name']} is standing in for Seat {seat}, "
+                      f"{main['name']} is Test & Reserve)")
     return True, (f"{tr['name']} swapped with {main['name']} ✓ "
                   f"({tr['name']} is now Seat {seat}, {main['name']} is Test & Reserve)")
 
@@ -4745,6 +4787,152 @@ def finances_view(career, team):
     }
 
 
+# ---------------------------------------------------------------------------
+# v0.7.4: Notes — per-team post-it notes on the dashboard — and the
+# cheats menu (car perf / money / driver rating), server-authoritative.
+# ---------------------------------------------------------------------------
+
+NOTE_MAX_COUNT = 15   # notes per team
+NOTE_MAX_CHARS = 200  # characters per note (Matthew: "character limit
+                      # per note", no number — 200 is Max's call)
+
+
+def save_note(career, team_id, text, note_id=None):
+    """Add a note (note_id None) or edit one (note_id set). Notes are
+    per-team and private — the server only ever sends a team's notes
+    to that team (public_state strips them; my_team_public carries
+    them). Limits are enforced here as well as in the client."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    text = (text or "").strip()
+    if not text:
+        return False, "Write something first."
+    if len(text) > NOTE_MAX_CHARS:
+        return False, (f"Notes are at most {NOTE_MAX_CHARS} characters "
+                       f"({len(text)} typed).")
+    notes = team.setdefault("notes", [])
+    if note_id is None:
+        if len(notes) >= NOTE_MAX_COUNT:
+            return False, (f"Only {NOTE_MAX_COUNT} notes per team — "
+                           "delete one first.")
+        nid = max((n.get("id", 0) for n in notes), default=0) + 1
+        notes.append({"id": nid, "text": text})
+        return True, "Note added ✓"
+    for n in notes:
+        if n.get("id") == note_id:
+            n["text"] = text
+            return True, "Note saved ✓"
+    return False, "No such note."
+
+
+def delete_note(career, team_id, note_id):
+    """Delete one of the team's notes (immediately, no confirm)."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    notes = team.setdefault("notes", [])
+    before = len(notes)
+    notes[:] = [n for n in notes if n.get("id") != note_id]
+    if len(notes) == before:
+        return False, "No such note."
+    return True, "Note deleted ✓"
+
+
+def cheat_state(career):
+    """The authoritative data for the cheats menu: every team's real
+    perf and money, plus the mini drivers' and constructors'
+    standings. Perf is NEVER in the broadcast state when the chart
+    is off, so the menu reads it here instead of from the client.
+    Driver rows also carry the rating (d["perf"]) and the min/max
+    for the driver's current age, for the driver pop-up."""
+    teams = sorted(career["teams"], key=lambda t: -t["perf"])
+    drivers = race_mod.driver_standings(career)
+    constructors = race_mod.constructor_standings(career)
+    drv_rows = []
+    for d in drivers:
+        tm = get_team(career, d.get("team_id")) \
+            or get_team(career, d.get("last_team_id"))
+        lo, hi = rules_mod.rating_bounds(d.get("age") or 25)
+        drv_rows.append({
+            "id": d["id"], "name": d["name"],
+            "team": tm["name"] if tm else "",
+            "team_id": tm["id"] if tm else None,
+            "colour": tm["colour"] if tm else None,
+            "gender": d.get("gender", "M"),
+            "points": race_mod.f1_tally(d)["points"],
+            "age": d.get("age"),
+            "rating": d.get("perf"),
+            "min_rating": lo, "max_rating": hi,
+        })
+    return {
+        "teams": [{"id": t["id"], "name": t["name"], "colour": t["colour"],
+                   "perf": t["perf"], "money": t["money"]} for t in teams],
+        "drivers": drv_rows,
+        "constructors": [{"id": t["id"], "name": t["name"],
+                          "colour": t["colour"], "points": t["points"]}
+                         for t in constructors],
+    }
+
+
+def cheat_adjust(career, team_id, perf_delta=None, money_delta=None):
+    """Change one team's car perf and money. Perf is clamped to
+    [0, 400]; money is floored at $0 — if the team is already
+    negative, a negative money change is refused outright (no change
+    at all), a positive one is allowed (the result may still be
+    negative). No log entry: the Transfers and History tabs stay
+    clean."""
+    import math
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    try:
+        pd = float(perf_delta if perf_delta is not None else 0)
+        md = float(money_delta if money_delta is not None else 0)
+    except (TypeError, ValueError):
+        return False, "Perf and money changes must be numbers."
+    if not (math.isfinite(pd) and math.isfinite(md)):
+        return False, "Perf and money changes must be numbers."
+    if pd == 0 and md == 0:
+        return False, "Nothing to change."
+    if md < 0 and team["money"] < 0:
+        return False, (f"{team['name']} is already ${team['money']:.2f}M — "
+                       "money cannot go further down, only up.")
+    new_perf = min(400.0, max(0.0, team["perf"] + pd))
+    new_money = team["money"] + md
+    if team["money"] >= 0 and new_money < 0:
+        new_money = 0.0
+    team["perf"] = new_perf
+    team["money"] = new_money
+    return True, (f"{team['name']}: perf {new_perf:.1f}, "
+                  f"money ${new_money:.2f}M ✓")
+
+
+def cheat_set_rating(career, driver_id, rating):
+    """Set a driver's skill rating (d["perf"]) — the cheats-menu
+    driver pop-up. Only drivers in the mini drivers' standings (the
+    registered F1 drivers, driver_standings) are editable. The new
+    rating is clamped to [min(age), max(age)] for the driver's
+    current age (rules.rating_bounds); no log entry."""
+    d = get_driver(career, driver_id)
+    if not d:
+        return False, "No such driver."
+    if not any(x["id"] == driver_id
+               for x in race_mod.driver_standings(career)):
+        return False, (f"{d['name']} is not in the drivers' standings — "
+                       "only listed drivers can be edited.")
+    try:
+        val = int(float(rating))
+    except (TypeError, ValueError):
+        return False, "Rating must be a whole number."
+    lo, hi = rules_mod.rating_bounds(d.get("age") or 25)
+    new = max(lo, min(hi, val))
+    d["perf"] = new
+    note = ("" if new == val else
+            f" (clamped to the age-{d.get('age')} range {lo}–{hi})")
+    return True, f"{d['name']}'s rating is now {new}{note} ✓"
+
+
 def public_state(career, chart_on, viewer_team_id=None):
     """The state sent to a client. When the perf chart is OFF, perf
     numbers are hidden from humans — team perf and driver perf — and
@@ -4782,6 +4970,10 @@ def public_state(career, chart_on, viewer_team_id=None):
         # no number, no hint. Players only ever see the outcomes
         # (donations, offers, proposals), never the value.
         team.pop("team_rep", None)
+        # v0.7.4: per-team Notes are private — they never leave the
+        # server in the broadcast. Each client only gets its OWN
+        # team's notes, attached in my_team_public (server.py).
+        team.pop("notes", None)
     # v0.4: replacement / signing costs for the viewer's team,
     # computed server-side from the exact formula the signing
     # functions charge, so the Driver Market always shows the number
