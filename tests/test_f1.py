@@ -445,7 +445,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 15  # v0.7.4 save format
+        assert loaded["version"] == 16  # v0.7.5 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -2425,7 +2425,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 15
+        assert loaded["version"] == 16
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2533,15 +2533,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v074():
-    """The live version string is v0.7.4 everywhere it is shown."""
+def test_health_reports_v075():
+    """The live version string is v0.7.5 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.7.4"
+    assert client.get("/api/health").json()["version"] == "v0.7.5"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.7.4</title>" in html
-    assert "Online · v0.7.4 beta" in html
+    assert "<title>F1 Team Manager Online — v0.7.5</title>" in html
+    assert "Online · v0.7.5 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3151,7 +3151,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 15
+    assert SAVE_VERSION == 16
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -4932,7 +4932,7 @@ def test_migration_v8_to_v12():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 15
+    assert SAVE_VERSION == 16
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -7370,7 +7370,7 @@ def test_v14_migration_adds_f2_tr_f1_tally_and_gender_fields():
     v0.7.1 F2 fields are dropped. The real Season 3 save loads with
     them (its file is never modified by loading it)."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save
-    assert SAVE_VERSION == 15
+    assert SAVE_VERSION == 16
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
     doc["version"] = 13
@@ -7651,14 +7651,14 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
     real Season 3 save (v10) and the Season 4 Round 2 export (v12)
     migrate cleanly, and their files are never modified."""
     from f1.saves import SAVE_VERSION, load_save
-    assert SAVE_VERSION == 15
+    assert SAVE_VERSION == 16
     path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
     if not path.exists():
         pytest.skip("Season 3 save not present in this checkout")
     before = path.read_bytes()
     loaded = _load_s3_save()
     assert loaded is not None
-    assert loaded["version"] == 15
+    assert loaded["version"] == 16
     assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
     snaps = {s["year"]: s for s in loaded["season_snapshots"]}
     assert {2026, 2027, 2028} <= set(snaps)
@@ -7689,7 +7689,7 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
         before4 = path4.read_bytes()
         loaded4 = load_save(str(path4.parent), "matthew-max-wugynr-s4-round2")
         assert loaded4 is not None
-        assert loaded4["version"] == 15
+        assert loaded4["version"] == 16
         assert loaded4["year"] == 2029 and loaded4["round"] == 2
         assert loaded4["phase"] == "round"
         rb = team_by_name(loaded4, "Red Bull")
@@ -8358,7 +8358,7 @@ def test_v074_notes_privacy_and_migration():
         t.pop("notes", None)
     career2["version"] = 14
     migrated = migrate_save(career2)
-    assert migrated["version"] == 15
+    assert migrated["version"] == 16
     assert all(t["notes"] == [] for t in migrated["teams"])
 
 
@@ -8764,6 +8764,335 @@ def test_v074_f2_swap_button_disabled_browser():
             disabled = page.locator('#tab-drivers button[disabled]',
                                     has_text="still racing in F2")
             assert disabled.count() == 2
+            browser.close()
+        assert not errors, errors
+    finally:
+        proc.terminate()
+
+# ---------------------------------------------------------------------------
+# v0.7.5 — cheats-menu bar alignment, coloured Perf Chart, retirement
+# toggles, reg research rework, winter-break retired list (name + age).
+# ---------------------------------------------------------------------------
+
+
+class _ZeroChaos:
+    """A stand-in rng for reg_change_v2: chaos 0, so the gain is exact."""
+    def uniform(self, a, b):
+        return 0.0
+
+
+def test_v075_reg_research_new_curve():
+    """v0.7.5 (4): the reworked reg curve — minor cap 15 with the
+    optimum at $10M, major cap 24.5 with the optimum at $20M. $10M
+    buys more than $1M bought under the old formula (12 * ln 2
+    = 8.32)."""
+    import math
+    from f1.rules import reg_change_v2
+    z = _ZeroChaos()
+    # Minor (target 12): $1M -> ~+4.3, $5M -> ~+11.2, $10M -> +15.
+    assert reg_change_v2(100.0, 1.0, 12.0, rng=z) == pytest.approx(104.34, abs=0.05)
+    assert reg_change_v2(100.0, 5.0, 12.0, rng=z) == pytest.approx(111.21, abs=0.05)
+    assert reg_change_v2(100.0, 10.0, 12.0, rng=z) == pytest.approx(115.0, abs=0.05)
+    # Major (target 35): $1M -> ~+5.6, $10M -> ~+19.3, $20M -> +24.5.
+    assert reg_change_v2(100.0, 1.0, 35.0, rng=z) == pytest.approx(105.58, abs=0.05)
+    assert reg_change_v2(100.0, 10.0, 35.0, rng=z) == pytest.approx(119.30, abs=0.05)
+    assert reg_change_v2(100.0, 20.0, 35.0, rng=z) == pytest.approx(124.5, abs=0.05)
+    # More money keeps helping until the optimum, then flat.
+    assert reg_change_v2(100.0, 50.0, 12.0, rng=z) == pytest.approx(115.0, abs=0.05)
+    assert reg_change_v2(100.0, 100.0, 35.0, rng=z) == pytest.approx(124.5, abs=0.05)
+    # Nothing adapted and nothing researched is still exactly 0.
+    assert reg_change_v2(0.0, 0.0, 12.0, rng=z) == 0.0
+    assert reg_change_v2(0.0, 0.0, 35.0, rng=z) == 0.0
+    # $10M in a minor year buys more than $1M bought under the old
+    # formula.
+    assert 15.0 > 12 * math.log1p(1.0)
+
+
+def _old_backmarker(career, team_name="Cadillac"):
+    """A main driver with a very high retirement chance (old,
+    backmarker, low rep) — the Magnussen-test shape. Every other
+    driver is made young so no other random retirement can fire."""
+    team = team_by_name(career, team_name)
+    d = game.get_driver(career, team["driver1_id"])
+    d["age"] = 60
+    d["rep"] = 1.0
+    d["points"] = 0
+    d["team_points"] = 0
+    d["season_wins"] = 0
+    for other in career["drivers"]:
+        if other is not d:
+            other["age"] = 25
+    return d
+
+
+def test_v075_custom_retirements_master_on_only_toggled():
+    """v0.7.5 (3): master ON — a toggled driver retires at season
+    close (forced, even at 0% random chance), and NO random
+    retirements happen at all, not even for a high-chance untoggled
+    driver."""
+    from f1 import race as race_mod
+    # (a) A young toggled driver retires — forced, not a roll.
+    career = game.build_new_career("Test", "Matthew")
+    norris = driver_by_name(career, "Lando Norris")
+    ok, why = game.set_custom_retirements(career, True)
+    assert ok, why
+    assert career["custom_retirements"] is True
+    ok, why = game.set_retire_toggle(career, norris["id"], True)
+    assert ok, why
+    assert norris["retire_at_season_end"] is True
+    game.end_of_season(career, rng=seeded(7))
+    assert norris["status"] == "retired"
+    assert career.get("retired_this_season") == ["Lando Norris"]
+    assert norris["id"] not in [d["id"] for d in race_mod.driver_standings(career)]
+    # The flag is spent once the driver retires.
+    assert norris["retire_at_season_end"] is False
+    # (b) With the master on, a high-chance untoggled driver NEVER
+    # retires — the random rolls are skipped entirely.
+    for seed in range(1, 31):
+        career = game.build_new_career("Test", "Matthew")
+        old = _old_backmarker(career)
+        game.set_custom_retirements(career, True)
+        game.end_of_season(career, rng=seeded(seed))
+        assert old["status"] != "retired", f"seed {seed}"
+        assert not career.get("retired_this_season"), \
+            f"seed {seed}: {career.get('retired_this_season')}"
+
+
+def test_v075_custom_retirements_master_off_random_and_clear():
+    """v0.7.5 (3): master OFF — the normal random retirements run
+    (a high-chance driver retires in some seed) and every toggle is
+    cleared at season close."""
+    retired_any = False
+    for seed in range(1, 31):
+        career = game.build_new_career("Test", "Matthew")
+        old = _old_backmarker(career)
+        # A toggle left over from an earlier master-ON spell is
+        # cleared by the season close when the master is off — and
+        # it does not force the retirement (the roll does that).
+        old["retire_at_season_end"] = True
+        assert career.get("custom_retirements") is False
+        game.end_of_season(career, rng=seeded(seed))
+        assert old["retire_at_season_end"] is False
+        if old["status"] == "retired":
+            retired_any = True
+            break
+    assert retired_any, "no seed retired the high-chance driver"
+
+
+def test_v075_retire_toggle_master_gating():
+    """v0.7.5 (3): turning the master OFF clears every driver toggle
+    immediately, and setting a toggle while the master is off is
+    refused server-side. cheat_state carries the master flag and the
+    per-driver toggles."""
+    career = game.build_new_career("Test", "Matthew")
+    norris = driver_by_name(career, "Lando Norris")
+    alonso = driver_by_name(career, "Fernando Alonso")
+    # Master off: setting a toggle is refused.
+    ok, why = game.set_retire_toggle(career, norris["id"], True)
+    assert not ok and "Custom retirements" in why, why
+    assert norris["retire_at_season_end"] is False
+    # Master on: toggles can be set...
+    ok, why = game.set_custom_retirements(career, True)
+    assert ok, why
+    ok, why = game.set_retire_toggle(career, norris["id"], True)
+    assert ok, why
+    ok, why = game.set_retire_toggle(career, alonso["id"], True)
+    assert ok, why
+    assert norris["retire_at_season_end"] is True
+    assert alonso["retire_at_season_end"] is True
+    # ...and turning the master off clears them all immediately.
+    ok, why = game.set_custom_retirements(career, False)
+    assert ok, why
+    assert career["custom_retirements"] is False
+    assert not any(d.get("retire_at_season_end") for d in career["drivers"])
+    # cheat_state carries the master flag and per-driver toggles.
+    game.set_custom_retirements(career, True)
+    game.set_retire_toggle(career, norris["id"], True)
+    cheat = game.cheat_state(career)
+    assert cheat["custom_retirements"] is True
+    row = next(d for d in cheat["drivers"] if d["id"] == norris["id"])
+    assert row["retire_at_season_end"] is True
+    row2 = next(d for d in cheat["drivers"] if d["id"] == alonso["id"])
+    assert row2["retire_at_season_end"] is False
+    # Only a driver in the registered standings can be toggled.
+    ok, why = game.set_retire_toggle(career, "no-such-driver", True)
+    assert not ok
+
+
+def test_v075_retirement_toggles_migration():
+    """v0.7.5 (3): a v15 career with no retirement flags migrates
+    with the master OFF and every driver toggle OFF, at version 16."""
+    career = game.build_new_career("Test", "Matthew")
+    career.pop("custom_retirements", None)
+    for d in career["drivers"]:
+        d.pop("retire_at_season_end", None)
+    career["version"] = 15
+    migrated = migrate_save(career)
+    assert migrated["version"] == 16
+    assert migrated["custom_retirements"] is False
+    assert all(d["retire_at_season_end"] is False
+               for d in migrated["drivers"])
+
+
+def test_v075_cheats_menu_retirements_chart_and_winter_browser():
+    """v0.7.5 (browser): the Perf Chart bars + names are coloured
+    (no default blue); the cheats-menu perf bars line up (every
+    bar-track starts at the same x, name slot 130px); the master
+    toggle sits at the top of the menu (default off); the driver
+    pop-up toggle is disabled while the master is off and works
+    once it is on (a RET marker appears); then a full season with
+    Alonso toggled ends in the winter break with his surname
+    uppercase, bold, in Aston Martin green, plus his age. No JS
+    errors."""
+    pytest.importorskip("playwright")
+    import re
+    import subprocess
+    import time
+    import urllib.request
+    port = 8817
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--port", str(port)],
+        cwd=str(Path(__file__).parent.parent),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(60):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2).read()
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise AssertionError("server did not come up")
+        from playwright.sync_api import sync_playwright
+        errors = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            p1 = browser.new_page(viewport={"width": 1280, "height": 800})
+            p1.on("pageerror", lambda e: errors.append(str(e)))
+            p1.goto(f"http://127.0.0.1:{port}/")
+            p1.fill("#home-nick", "Max")
+            p1.click("#btn-create")
+            p1.wait_for_selector("#screen-lobby:not(.hidden)", timeout=15000)
+            p1.click("#btn-new-career")
+            p1.wait_for_selector("[data-team]", timeout=15000)
+            p1.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('McLaren'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.wait_for_selector("#btn-start-career:not(.hidden)", timeout=15000)
+            code = re.search(r"\b[A-Z0-9]{6}\b",
+                             p1.inner_text("#screen-lobby")).group(0)
+            p2 = browser.new_page(viewport={"width": 1280, "height": 800})
+            p2.on("pageerror", lambda e: errors.append(str(e)))
+            p2.goto(f"http://127.0.0.1:{port}/?code={code}")
+            p2.fill("#home-nick", "Matthew")
+            p2.click("#btn-join")
+            p2.wait_for_selector("[data-team]", timeout=15000)
+            p2.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#team-list > *')];
+                rows.find(r => r.textContent.includes('Ferrari'))
+                    .querySelector('[data-team]').click();
+            }""")
+            p1.click("#btn-start-career")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # (2) Perf Chart: every bar and name carries a team
+            # colour — no default blue #58a6ff anywhere.
+            p1.click('[data-tab="chart"]')
+            p1.wait_for_selector("#tab-chart:not(.hidden)", timeout=15000)
+            colours = p1.evaluate("""() => {
+                const rows = [...document.querySelectorAll('#chart-box .bar-row')];
+                return rows.map(r => ({
+                    bar: (r.querySelector('.bar-fill') || {}).style.background,
+                    name: (r.querySelector('span span') || {}).style.color,
+                }));
+            }""")
+            assert colours, "no chart rows"
+            assert all(c["bar"] for c in colours), colours
+            assert len({c["bar"] for c in colours}) > 1, colours
+            assert all(c["bar"] != "rgb(88, 166, 255)" for c in colours), colours
+            assert all(c["name"] for c in colours), colours
+            assert len({c["name"] for c in colours}) > 1, colours
+            # Open the cheats menu (the Notes-tab trigger).
+            p1.click('[data-tab="notes"]')
+            p1.wait_for_selector("#tab-notes:not(.hidden)", timeout=15000)
+            p1.fill("#note-text", "chmenU")
+            p1.click("#btn-note-add")
+            p1.wait_for_selector("#screen-cheats:not(.hidden)", timeout=15000)
+            # (1) Perf bars line up: same x for every bar-track and
+            # a fixed 130px name slot.
+            align = p1.evaluate("""() => ({
+                lefts: [...document.querySelectorAll('#cheats-perf .bar-track')]
+                    .map(el => el.getBoundingClientRect().left),
+                widths: [...document.querySelectorAll('#cheats-perf .bar-row > button')]
+                    .map(el => el.getBoundingClientRect().width),
+            })""")
+            assert align["lefts"], "no cheats perf rows"
+            assert max(align["lefts"]) - min(align["lefts"]) < 1, align["lefts"]
+            assert all(abs(w - 130) < 1 for w in align["widths"]), align["widths"]
+            # (3) Master toggle: at the top of the menu, default off.
+            assert p1.is_visible("#cheat-custom-retirements")
+            assert not p1.is_checked("#cheat-custom-retirements")
+            menu_text = p1.inner_text("#screen-cheats")
+            assert "Custom retirements" in menu_text
+            # Driver pop-up: the toggle is disabled while the master
+            # is off, with a note saying so.
+            p1.locator("#cheats-drivers [data-cheat-driver]", has_text="ALONSO").click()
+            p1.wait_for_function(
+                "() => document.querySelector('.ov-body') && "
+                "document.querySelector('.ov-body').textContent.includes('Retire at season end')",
+                timeout=15000)
+            assert p1.is_disabled("#cheat-retire-toggle")
+            ov = p1.inner_text(".ov-body")
+            assert "Turn on Custom retirements" in ov
+            # Alonso's age, for the winter-break assertion later.
+            # The rollover ages every driver by one year before the
+            # winter-break screen renders, so the list shows the
+            # post-rollover age (44 in-season -> 45 at the break).
+            age = re.search(r"age (\d+)", ov).group(1)
+            # Turn the master on and toggle Alonso: the marker shows.
+            p1.click('[data-ov-close="cheat-driver"]')
+            p1.check("#cheat-custom-retirements")
+            p1.wait_for_function(
+                "() => document.getElementById('cheat-custom-retirements').checked",
+                timeout=15000)
+            p1.locator("#cheats-drivers [data-cheat-driver]", has_text="ALONSO").click()
+            p1.wait_for_function(
+                "() => document.querySelector('.ov-body') && "
+                "document.querySelector('.ov-body').textContent.includes('Retire at season end')",
+                timeout=15000)
+            assert not p1.is_disabled("#cheat-retire-toggle")
+            p1.check("#cheat-retire-toggle")
+            p1.wait_for_function(
+                "() => document.getElementById('cheats-drivers').textContent.includes('RET')",
+                timeout=15000)
+            p1.click('[data-ov-close="cheat-driver"]')
+            p1.click("#btn-cheats-back")
+            p1.wait_for_selector("#screen-game:not(.hidden)", timeout=15000)
+            # Play the whole season (two humans, both advance + vote).
+            for rnd in range(12):
+                p1.click("#btn-advance")
+                p2.click("#btn-advance")
+                p1.wait_for_selector("#screen-results:not(.hidden)", timeout=30000)
+                p1.click("#btn-vote-next")
+                p2.click("#btn-vote-next")
+                p1.wait_for_selector("text=Race Results", timeout=30000)
+                p1.click("#btn-vote-next")
+                p2.click("#btn-vote-next")
+                if rnd < 11:
+                    p1.wait_for_selector("#screen-game:not(.hidden)", timeout=30000)
+                else:
+                    p1.wait_for_selector("#winter-card:not(.hidden)", timeout=30000)
+            # (5)(6) The winter-break line: Alonso's surname
+            # uppercase and bold (the .surname class), in Aston
+            # Martin green, with the '|' bar and his age.
+            winter = p1.inner_html("#winter-text")
+            assert "ALONSO" in winter, winter
+            assert "Retired:" in winter, winter
+            assert "#4b9774" in winter.lower(), winter
+            assert f"({int(age) + 1})" in winter, winter
+            assert 'class="surname"' in winter, winter
+            assert 'class="team-bar"' in winter, winter
             browser.close()
         assert not errors, errors
     finally:
