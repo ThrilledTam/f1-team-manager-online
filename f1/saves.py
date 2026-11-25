@@ -14,7 +14,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 15  # v0.7.4: per-team Notes (a "notes" list [{id, text}]
+SAVE_VERSION = 16  # v0.7.5: custom retirements (career flag + per-driver toggle)
 # on every team, default empty; private — stripped from the broadcast
 # state, only ever sent to the owning team). v0.7.3: F2 promotions reworked (a T&R driver
 # still racing in F2 keeps their F2 tally in the plain fields and
@@ -228,6 +228,9 @@ def migrate_save(doc):
         from .models import FEMALE_DRIVERS
         d.setdefault("gender",
                      "F" if d.get("name") in FEMALE_DRIVERS else "M")
+        # v0.7.5: the cheats-menu 'Retire at season end' toggle
+        # (default OFF — only settable while the master is on).
+        d.setdefault("retire_at_season_end", False)
     # v0.3: champion history. A save from before v0.3 has none, or only
     # in-game rows (v0.2 appended {year, driver, team, points} per
     # completed season). Either way it gains the real 2010–2025 table
@@ -342,6 +345,8 @@ def migrate_save(doc):
     doc.setdefault("relation_proposals", [])
     # v0.6.6: pending donation requests between supplied teams.
     doc.setdefault("donation_requests", [])
+    # v0.7.5: the cheats-menu master toggle (default OFF).
+    doc.setdefault("custom_retirements", False)
     for team in doc.get("teams") or []:
         team.setdefault("reg_total", 0.0)
         team.setdefault("reg_adapted", 0.0)

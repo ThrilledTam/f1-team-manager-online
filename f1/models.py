@@ -126,6 +126,9 @@ def make_driver(data, status="free", team_id=None):
         # driver's name everywhere in the UI. The five real female
         # drivers are in FEMALE_DRIVERS above; everyone else is "M".
         "gender": "F" if data["name"] in FEMALE_DRIVERS else "M",
+        # v0.7.5: the cheats-menu 'Retire at season end' toggle
+        # (only settable while the master is on).
+        "retire_at_season_end": False,
         # v0.7.1: the slot the driver last held on a team ("seat1" /
         # "seat2" / "tr") — set when they leave a team slot so the
         # winter-break Drivers tab can offer expired drivers for
@@ -290,6 +293,10 @@ def new_career_dict(name, host_nickname, chart_on=True):
         "season_snapshots": [],
         "transfers": [],           # ["Driver from X to Y"] this season
         "retired_this_season": [],
+        # v0.7.5: the cheats-menu master toggle 'Custom retirements'
+        # (default OFF — only toggled drivers retire at season end
+        # while it is on).
+        "custom_retirements": False,
         "last_qual": None,         # v0.1: [{pos, driver, driver_id, team,
                                    #   team_id, cha, gap}] — gaps only, no times
         "last_race": None,         # v0.1: [{pos, driver, driver_id, team,

@@ -198,15 +198,28 @@ def reg_change_v2(adapted, research, target, rng=None):
 
     adapted: perf points already fitted to the new regulations.
     research: $M invested in regulation research after full adaptation.
-    target: 12 (minor year) or 35 (major year) — the research gain is
-    capped at 70% of it, as in regChange().
+    target: 12 (minor year) or 35 (major year).
+    v0.7.5: the gain curve is scaled so the optimum (cap reached) is
+    $10M in a minor year and $20M in a major year, and the minor cap
+    rises 8.4 -> 15 so $10M buys more than $1M buys today (reg
+    research should beat normal R&D): gain = cap * ln(1+R) / ln(1+R*)
+    capped at cap, with cap 15 / R* 10 (minor) and cap 24.5 / R* 20
+    (major). Minor: $1M -> ~+4.3, $5M -> ~+11.2, $10M -> +15. Major:
+    $1M -> ~+5.6, $10M -> ~+19.3, $20M -> +24.5. (In a major year
+    $10M now buys ~19.3, less than the 24.5 it bought before — the
+    max is unchanged, you just need $20M to reach it.)
     Returns 0.0 exactly when nothing was adapted or researched."""
     rng = rng or random
     adapted = float(adapted or 0.0)
     research = float(research or 0.0)
     if adapted <= 0 and research <= 0:
         return 0.0
-    research_gain = min(12 * math.log1p(research), target * 0.70)
+    if target <= 12:
+        cap, r_star = 15.0, 10.0
+    else:
+        cap, r_star = 24.5, 20.0
+    research_gain = min(cap * math.log1p(research) / math.log1p(r_star),
+                        cap)
     chaos = rng.uniform(-4, 4)
     return round(max(0.0, adapted + research_gain + chaos), 2)
 

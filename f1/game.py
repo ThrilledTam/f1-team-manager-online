@@ -3681,39 +3681,58 @@ def end_of_season(career, rng=None):
     # there is no maximum age. v0.7.3: T&R drivers roll too, with
     # their F1 team's context (a T&R driver still racing in F2
     # reads their F1 tally — f1_tally — never their F2 points).
+    # v0.7.5: custom retirements — when the master toggle is ON,
+    # ONLY the toggled drivers retire (forced) and the random rolls
+    # are skipped entirely. When it is OFF, the random rolls run as
+    # before and every toggle is cleared.
     retired = []
-    for d in list(drivers):
-        team = get_team(career, d["team_id"]) if d.get("team_id") else None
-        pos = constructor_pos(career, d["team_id"]) if team else len(career["teams"])
-        team_pts = team["points"] if team else 0
-        if is_retiring(d["age"], d["cha"], pos, d["points"], team_pts,
-                       rep=d.get("rep", 2.5),
-                       wins=d.get("season_wins", 0) or 0,
-                       trajectory=traj_by_team.get(d.get("team_id"), 0),
-                       perf_gap=(top_perf - team["perf"]) if team else 0.0,
-                       rng=rng):
-            retired.append(d)
-    for team in career["teams"]:
-        for d in team_tr_drivers(career, team):
-            tally = race_mod.f1_tally(d)
-            if is_retiring(d["age"], d["cha"],
-                           constructor_pos(career, team["id"]),
-                           tally["points"], team["points"],
+    if career.get("custom_retirements"):
+        for d in list(drivers):
+            if d.get("retire_at_season_end"):
+                retired.append(d)
+        for team in career["teams"]:
+            for d in team_tr_drivers(career, team):
+                if d.get("retire_at_season_end"):
+                    retired.append(d)
+        for d in list(free_agents(career)):
+            if d.get("retire_at_season_end"):
+                retired.append(d)
+    else:
+        for d in list(drivers):
+            team = get_team(career, d["team_id"]) if d.get("team_id") else None
+            pos = constructor_pos(career, d["team_id"]) if team else len(career["teams"])
+            team_pts = team["points"] if team else 0
+            if is_retiring(d["age"], d["cha"], pos, d["points"], team_pts,
                            rep=d.get("rep", 2.5),
-                           wins=tally["wins"] or 0,
-                           trajectory=traj_by_team.get(team["id"], 0),
-                           perf_gap=top_perf - team["perf"],
+                           wins=d.get("season_wins", 0) or 0,
+                           trajectory=traj_by_team.get(d.get("team_id"), 0),
+                           perf_gap=(top_perf - team["perf"]) if team else 0.0,
                            rng=rng):
                 retired.append(d)
-    for d in list(free_agents(career)):
-        # No team (worst position: last constructors' place), no
-        # forced retirement at any age — the same gentle curve.
-        chance = retirement_chance(d["age"], d["cha"], len(career["teams"]),
-                                   d["points"], 0,
-                                   rep=d.get("rep", 2.5),
-                                   wins=d.get("season_wins", 0) or 0)
-        if chance > 0 and rng.random() * 100 <= chance:
-            retired.append(d)
+        for team in career["teams"]:
+            for d in team_tr_drivers(career, team):
+                tally = race_mod.f1_tally(d)
+                if is_retiring(d["age"], d["cha"],
+                               constructor_pos(career, team["id"]),
+                               tally["points"], team["points"],
+                               rep=d.get("rep", 2.5),
+                               wins=tally["wins"] or 0,
+                               trajectory=traj_by_team.get(team["id"], 0),
+                               perf_gap=top_perf - team["perf"],
+                               rng=rng):
+                    retired.append(d)
+        for d in list(free_agents(career)):
+            # No team (worst position: last constructors' place), no
+            # forced retirement at any age — the same gentle curve.
+            chance = retirement_chance(d["age"], d["cha"], len(career["teams"]),
+                                       d["points"], 0,
+                                       rep=d.get("rep", 2.5),
+                                       wins=d.get("season_wins", 0) or 0)
+            if chance > 0 and rng.random() * 100 <= chance:
+                retired.append(d)
+        # v0.7.5: custom retirements off — every toggle resets.
+        for d in career["drivers"]:
+            d["retire_at_season_end"] = False
     for d in retired:
         team = get_team(career, d["team_id"]) if d.get("team_id") else None
         if team:
@@ -3753,6 +3772,8 @@ def end_of_season(career, rng=None):
         d["f1_podiums"] = 0
         d["f1_best_pos"] = None
         d["f1_best_finish_round"] = None
+        # v0.7.5: a retired driver's toggle is spent.
+        d["retire_at_season_end"] = False
     # Ageing (v0.4.2: table-driven grow_rating, replacing DSUS),
     # salary recalc, contracts tick down, points reset.
     for i, d in enumerate(drivers):
@@ -4864,8 +4885,11 @@ def cheat_state(career):
             "age": d.get("age"),
             "rating": d.get("perf"),
             "min_rating": lo, "max_rating": hi,
+            # v0.7.5: the retirement toggle for the driver pop-up.
+            "retire_at_season_end": bool(d.get("retire_at_season_end", False)),
         })
     return {
+        "custom_retirements": bool(career.get("custom_retirements", False)),
         "teams": [{"id": t["id"], "name": t["name"], "colour": t["colour"],
                    "perf": t["perf"], "money": t["money"]} for t in teams],
         "drivers": drv_rows,
@@ -4931,6 +4955,50 @@ def cheat_set_rating(career, driver_id, rating):
     note = ("" if new == val else
             f" (clamped to the age-{d.get('age')} range {lo}–{hi})")
     return True, f"{d['name']}'s rating is now {new}{note} ✓"
+
+
+def _coerce_bool(value):
+    """A checkbox value from the client: a real JSON bool, or a
+    "true"/"false" string (defensive — bool("false") is True)."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+def set_custom_retirements(career, on):
+    """v0.7.5: the cheats-menu master toggle 'Custom retirements'.
+    Turning it OFF clears every per-driver retirement toggle
+    immediately. No log entry."""
+    on = _coerce_bool(on)
+    career["custom_retirements"] = on
+    if not on:
+        for d in career["drivers"]:
+            d["retire_at_season_end"] = False
+    return True, ("Custom retirements ON — only toggled drivers will "
+                  "retire at season end ✓" if on else
+                  "Custom retirements OFF — normal retirements resume, "
+                  "all driver toggles cleared ✓")
+
+
+def set_retire_toggle(career, driver_id, on):
+    """v0.7.5: the per-driver 'Retire at season end' toggle in the
+    driver pop-up. Only settable while the master is ON, and only
+    drivers in the mini drivers' standings (driver_standings) have
+    the toggle. No log entry."""
+    d = get_driver(career, driver_id)
+    if not d:
+        return False, "No such driver."
+    if not career.get("custom_retirements"):
+        return False, ("Custom retirements are OFF — turn the master "
+                       "toggle on at the top of the cheats menu first.")
+    if not any(x["id"] == driver_id
+               for x in race_mod.driver_standings(career)):
+        return False, (f"{d['name']} is not in the drivers' standings — "
+                       "only listed drivers can be toggled.")
+    on = _coerce_bool(on)
+    d["retire_at_season_end"] = on
+    return True, (f"{d['name']} will retire at season end ✓" if on else
+                  f"{d['name']} will not retire at season end ✓")
 
 
 def public_state(career, chart_on, viewer_team_id=None):
