@@ -118,6 +118,10 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     cheat_adjust {team_id, perf_delta?, money_delta?}  # v0.7.4: change a
                                           # team's perf / money
     cheat_driver {driver_id, rating}      # v0.7.4: set a driver's rating
+    cheat_retirements {on}             # v0.7.5: master 'Custom retirements'
+                                          # toggle (top of the cheats menu)
+    cheat_retire_toggle {driver_id, on}   # v0.7.5: per-driver 'Retire at
+                                          # season end' toggle (driver pop-up)
     ping         {}
   Server -> client:
     joined       {code, player_id, room}  # this player only
@@ -170,7 +174,7 @@ async def lifespan(_app):
         task.cancel()
 
 
-app = FastAPI(title="F1 Team Manager Online v0.7.4", lifespan=lifespan)
+app = FastAPI(title="F1 Team Manager Online v0.7.5", lifespan=lifespan)
 
 ROOMS = {}          # code -> room dict
 MAX_PLAYERS = 10
@@ -492,7 +496,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.4"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.5"}
 
 
 @app.get("/api/saves")
@@ -1109,7 +1113,8 @@ async def ws_endpoint(ws: WebSocket):
                     await broadcast(room)
 
             elif mtype in ("save_note", "delete_note", "cheat_state",
-                           "cheat_adjust", "cheat_driver"):
+                           "cheat_adjust", "cheat_driver",
+                           "cheat_retirements", "cheat_retire_toggle"):
                 # v0.7.4: Notes and the cheats menu. Notes work between
                 # races and in the winter break (the tab is on the
                 # dashboard in both); the cheats menu opens from the
@@ -1168,6 +1173,29 @@ async def ws_endpoint(ws: WebSocket):
                     elif mtype == "cheat_driver":
                         ok, why = game.cheat_set_rating(career, msg.get("driver_id"),
                                                         msg.get("rating"))
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": mtype,
+                                                "ok": True, "message": why})
+                            await broadcast(room)
+                            await ws.send_json({"type": "cheat_state",
+                                                "cheat": game.cheat_state(career)})
+                    elif mtype == "cheat_retirements":
+                        # v0.7.5: the master toggle — turning it off
+                        # clears every driver toggle (game does that).
+                        ok, why = game.set_custom_retirements(career, msg.get("on"))
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": mtype,
+                                                "ok": True, "message": why})
+                            await broadcast(room)
+                            await ws.send_json({"type": "cheat_state",
+                                                "cheat": game.cheat_state(career)})
+                    elif mtype == "cheat_retire_toggle":
+                        ok, why = game.set_retire_toggle(career, msg.get("driver_id"),
+                                                         msg.get("on"))
                         if not ok:
                             await send_error(ws, why)
                         else:
