@@ -69,7 +69,7 @@ def reg_change(grid_avg, target, perf, research, rng=None):
 # backmarker starts fully adapted). The research gain keeps the
 # 12*log1p shape and the 70%-of-target cap from regChange().
 # ---------------------------------------------------------------------------
-REG_ADAPT_COST_PER_POINT = 0.25   # $M per point of car perf adapted
+REG_ADAPT_COST_PER_POINT = 0.30   # $M per point of car perf adapted
 REG_OPENS_ROUND = 7               # reg research opens at round 7
 WINTER_BREAK_ROUNDS = 3           # v0.4: winter break is 3 offer rounds
 TR_RESEARCH_BONUS = 0.25          # v0.4: +25% research per T&R driver

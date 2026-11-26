@@ -17,6 +17,7 @@ import copy
 import json
 import random
 import uuid
+import zlib
 from pathlib import Path
 
 from . import race as race_mod
@@ -706,7 +707,7 @@ def reg_view(career, team):
 
 def do_reg_adapt(career, team_id, points=None):
     """v0.4 (feature 7): spend money to adapt unadapted car parts to
-    next season's regulations — $0.25M per point of car perf.
+    next season's regulations — $0.30M per point of car perf.
     points=None adapts everything still unadapted; otherwise adapt
     up to that many points. Only while reg research is open."""
     team = get_team(career, team_id)
@@ -1064,17 +1065,17 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
                 source_team["driver2_id"] = None
             _release_driver(career, d, source_team)
             _recompute_team_points(career, source_team)
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{d['name']} left {source_team['name']} (poached by {team['name']})")
     if academy_team is not None:
-        career["transfers"].append(
+        log_transfer(career, 
             f"{d['name']} left {academy_team['name']}'s academy "
             f"(poached by {team['name']})")
     team["money"] -= cost
     if current:
         _release_driver(career, current, team)
         current["status"] = "free"
-        career["transfers"].append(
+        log_transfer(career, 
             f"{current['name']} left {team['name']} (contract broken)")
     _sign_driver_common(career, team, d, contract_years)
     d["status"] = "f1"
@@ -1084,7 +1085,7 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     # points banked from drivers who scored for this team and have
     # since left (apply_race_results does the same after a race).
     _recompute_team_points(career, team)
-    career["transfers"].append(f"{d['name']} signed for {team['name']}")
+    log_transfer(career, f"{d['name']} signed for {team['name']}")
     # v0.6: a WANTED signing pays the parent's reward to the junior team.
     _pay_wanted_reward(career, team, d)
     # v0.8.0: the agreed meeting is consumed, the bribe is paid, and
@@ -1186,17 +1187,17 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
                 source_team["driver2_id"] = None
             _release_driver(career, d, source_team)
             _recompute_team_points(career, source_team)
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{d['name']} left {source_team['name']} (poached by {team['name']})")
     if academy_team is not None:
-        career["transfers"].append(
+        log_transfer(career, 
             f"{d['name']} left {academy_team['name']}'s academy "
             f"(poached by {team['name']})")
     team["money"] -= cost
     _sign_driver_common(career, team, d, contract_years, as_tr=True)
     d["status"] = "tr"
     d["team_id"] = team["id"]
-    career["transfers"].append(
+    log_transfer(career, 
         f"{d['name']} signed for {team['name']} as Test & Reserve")
     # v0.6: a WANTED signing pays the parent's reward to the junior team.
     _pay_wanted_reward(career, team, d)
@@ -1258,6 +1259,18 @@ RESIGN_DECLINE_VERY_UNHAPPY = 0.90
 # v0.8.0: a happy driver messages their manager after a race with
 # a 15% chance per race (at most 2 messages per team per race).
 DRIVER_MESSAGE_CHANCE = 0.15
+# v0.8.1: the share of media rumours that are plausible-but-wrong
+# speculation instead of grounded truth (about 1 in 4). The
+# speculation is always close to reality — an unhappy or
+# out-of-contract driver linked to a plausible destination — never
+# a claim that contradicts the state.
+MEDIA_SPECULATION_CHANCE = 0.25
+# v0.8.1: activity decline chances — an unhappy driver turns down
+# an activity 60% of the time, a very unhappy one 85%. Neutral and
+# above always accept (unless ill). A declined activity costs
+# nothing.
+ACTIVITY_DECLINE_UNHAPPY = 0.60
+ACTIVITY_DECLINE_VERY_UNHAPPY = 0.85
 # v0.8.0: loyalty growth per race — +0.04 base, x2 when happy,
 # x3 when very happy.
 LOYALTY_GROWTH_PER_RACE = 0.04
@@ -1315,32 +1328,53 @@ DRIVER_MESSAGES = [
     "Every weekend I feel more part of this team. The belief is there.",
 ]
 
-# v0.8.0: PlanetF1-style media rumour templates. {d} = driver,
-# {t} = their team, {r} = a rival team. Grounded rumours are drawn
-# from the real state (an unhappy driver, a very happy driver, a
-# team on the move); the "linked with" rumours are random pairings
-# and may be true or false.
-MEDIA_TRANSFER_TEMPLATES = [
-    "{d} is understood to be unsettled at {t} — {r} are said to be monitoring the situation.",
-    "Sources close to {d} insist they are happy at {t}, despite links to {r}.",
-    "{t} are braced for an approach for {d} after another difficult weekend.",
-    "{d} has been linked with a shock move to {r} — though {t} insist they are going nowhere.",
-    "Paddock whispers: {r} have asked about {d}'s availability at {t}.",
-]
-MEDIA_PERFORMANCE_TEMPLATES = [
-    "{t} have turned a corner — the garage is buzzing after their recent run.",
-    "Questions are being asked at {t} after a run of weekends without points.",
-    "The pressure is mounting on {t} — the board wants results, and fast.",
-    "{t} are the team on the move — rivals are starting to take notice.",
+# v0.8.1: PlanetF1-style media rumour templates. {d} = driver,
+# {t} = their team, {r} = a rival team with a REAL link (a vacancy
+# or a plausible move — never random), {c} = circuit. EVERY rumour
+# must trace to a verified real condition (see
+# generate_media_rumours): an unhappy/happy driver, a contract that
+# really is expiring, a seat that really is vacant, or recent form
+# that really happened (scoreless / sliding / climbing / winning).
+# The SPECULATION set is the only one that may be wrong — and only
+# in the "linked with" sense: the driver really is unhappy or out
+# of contract, and the rival really is a plausible destination. It
+# never contradicts the state (never a championship leader to a
+# backmarker, never a scoreless claim about a team that scored).
+MEDIA_UNHAPPY_TEMPLATES = [
+    "Tensions are said to be growing between {d} and {t} behind closed doors.",
+    "{d} was spotted deep in conversation with {t}'s team principal after the race.",
+    "All is not well at {t} — {d} cut a frustrated figure in the paddock.",
 ]
 MEDIA_HAPPY_TEMPLATES = [
     "{d} has praised {t}: 'I love it here — the team feels like family.'",
     "{d} says {t} are 'the best group I have ever worked with'.",
 ]
-MEDIA_UNHAPPY_TEMPLATES = [
-    "Tensions are said to be growing between {d} and {t} behind closed doors.",
-    "{d} was spotted deep in conversation with {t}'s team principal after the race.",
-    "All is not well at {t} — {d} cut a frustrated figure in the paddock.",
+MEDIA_SCORELESS_TEMPLATES = [
+    "Questions are being asked at {t} after a run of weekends without points.",
+]
+MEDIA_PRESSURE_TEMPLATES = [
+    "The pressure is mounting on {t} — the board wants results, and fast.",
+]
+MEDIA_CORNER_TEMPLATES = [
+    "{t} have turned a corner — the garage is buzzing after their recent run.",
+]
+MEDIA_ON_THE_MOVE_TEMPLATES = [
+    "{t} are the team on the move — rivals are starting to take notice.",
+]
+MEDIA_WINNER_TEMPLATES = [
+    "{d} took the chequered flag at {c} for {t} — the garage is buzzing.",
+]
+MEDIA_CONTRACT_TEMPLATES = [
+    "{d}'s deal with {t} runs out at the end of the season — {r} are among those watching.",
+    "{d}'s deal with {t} runs out at the end of the season — rivals are keeping a close eye on the situation.",
+]
+MEDIA_VACANCY_TEMPLATES = [
+    "{d} has been linked with {t}'s vacant seat.",
+]
+MEDIA_SPECULATION_TEMPLATES = [
+    "{d} has been linked with a shock move to {r} — though {t} insist they are going nowhere.",
+    "Paddock whispers: {r} have asked about {d}'s availability at {t}.",
+    "{d} is understood to be unsettled at {t} — {r} are said to be monitoring the situation.",
 ]
 
 
@@ -1657,11 +1691,15 @@ def _activity_round_key(career):
     return f"{career.get('year')}R{career.get('round', 1)}"
 
 
-def do_activity(career, team_id, driver_id, activity_id):
-    """v0.8.0: do an activity with one of your drivers (main, T&R or
-    academy). Only an at-least-happy driver (level >= 4), one
+def do_activity(career, team_id, driver_id, activity_id, rng=None):
+    """v0.8.1: do an activity with one of your drivers (main, T&R or
+    academy) — at ANY happiness level. An unhappy driver turns it
+    down 60% of the time, a very unhappy one 85%; neutral and above
+    always accept (unless ill). A declined activity costs nothing
+    and does not use up the one-per-driver-per-round slot. One
     activity per driver per round, and the team must afford the
     cost. Raises that driver's happiness and loyalty with the team."""
+    rng = rng or random
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
@@ -1673,9 +1711,9 @@ def do_activity(career, team_id, driver_id, activity_id):
     act = next((a for a in ACTIVITIES if a["id"] == activity_id), None)
     if not act:
         return False, "No such activity."
-    if rules_mod.happiness_level(happiness_with(d, team_id)) < 4:
-        return False, (f"{d['name']} is not happy enough for activities "
-                       f"yet — they need to be at least Happy.")
+    if d.get("ill_until_round"):
+        return False, (f"{d['name']} is ill — no activities until "
+                       f"they recover.")
     key = _activity_round_key(career)
     if d.get("activity_round") == key:
         return False, (f"You already did an activity with {d['name']} "
@@ -1683,11 +1721,39 @@ def do_activity(career, team_id, driver_id, activity_id):
     if act["cost"] > team["money"]:
         return False, (f"Not enough money — {act['name']} costs "
                        f"${act['cost']:.2f}M.")
+    lvl = rules_mod.happiness_level(happiness_with(d, team_id))
+    if lvl <= 1 and rng.random() < ACTIVITY_DECLINE_VERY_UNHAPPY:
+        return False, (f"{d['name']} turned the activity down — they "
+                       f"are very unhappy with the team right now.")
+    if lvl == 2 and rng.random() < ACTIVITY_DECLINE_UNHAPPY:
+        return False, (f"{d['name']} turned the activity down — they "
+                       f"are unhappy with the team right now.")
     team["money"] = round(team["money"] - act["cost"], 2)
     _bump_relation(d, team_id, act["happiness"], act["loyalty"])
     d["activity_round"] = key
     return True, (f"{act['name']} with {d['name']} ✓ — they are happier "
                   f"({rules_mod.happiness_word(happiness_with(d, team_id))})")
+
+
+def log_transfer(career, text):
+    """v0.8.1: append one entry to the Driver transfers feed. Entries
+    are structured dicts (not plain strings) so the UI can show when
+    each one happened — a round label like "R8 2026", or "WB2 2026"
+    for winter-break moves — and can style the driver/team names.
+    Kept to the newest 100 (a season's real moves fit comfortably;
+    the cap only trims multi-season spam)."""
+    entries = career.setdefault("transfers", [])
+    year = career.get("year")
+    if career.get("phase") == "winter_break":
+        label = f"WB{career.get('wb_round') or 1} {year}" if year else None
+        rnd = career.get("round")
+    else:
+        label = f"R{career.get('round')} {year}" if year else None
+        rnd = career.get("round")
+    entries.append({"text": text, "year": year, "round": rnd,
+                    "label": label})
+    if len(entries) > 100:
+        del entries[:len(entries) - 100]
 
 
 def add_media_entry(career, text, kind="rumour"):
@@ -1771,72 +1837,232 @@ def _teammate_gap_12(career, d, team):
     return (mate_pts - my_pts, finish_gap)
 
 
+def _season_positions_by_round(career):
+    """v0.8.1: per-round constructors' positions for the CURRENT
+    season only (like _constructors_positions_by_round, but a new
+    season restarts the list instead of continuing it) — for the
+    media rumours' recent-form checks."""
+    year = career.get("year")
+    series = []
+    cum = {}
+    for entry in career.get("race_history") or []:
+        if entry.get("year") != year:
+            continue
+        for row in entry.get("race") or []:
+            tid = row.get("team_id")
+            if not tid:
+                continue
+            cum[tid] = cum.get(tid, 0) + (row.get("points") or 0)
+        ranked = sorted(career["teams"],
+                        key=lambda t: (-cum.get(t["id"], 0), t["name"]))
+        series.append({t["id"]: i + 1 for i, t in enumerate(ranked)})
+    return series
+
+
+def _team_points_last_n(career, team_id, n):
+    """v0.8.1: points a team scored in the last n races of the
+    current season (0 if fewer than n races have been run)."""
+    total = 0
+    count = 0
+    for entry in reversed(career.get("race_history") or []):
+        if entry.get("year") != career.get("year"):
+            break
+        for row in entry.get("race") or []:
+            if row.get("team_id") == team_id:
+                total += row.get("points") or 0
+        count += 1
+        if count >= n:
+            break
+    return total
+
+
+def _team_wins_last_n(career, team_id, n):
+    """v0.8.1: race wins for a team in the last n races of the
+    current season."""
+    wins = 0
+    count = 0
+    for entry in reversed(career.get("race_history") or []):
+        if entry.get("year") != career.get("year"):
+            break
+        for row in entry.get("race") or []:
+            if row.get("team_id") == team_id and row.get("pos") == 1:
+                wins += 1
+        count += 1
+        if count >= n:
+            break
+    return wins
+
+
+def _plausible_rival(career, d):
+    """v0.8.1: a team it is PLAUSIBLE for driver d to move to — a
+    team with a genuinely vacant main seat first, else a team in the
+    frontrunner band (top 4) or within 3 constructors' positions of
+    d's team. A championship leader's team is P1, so their rivals
+    are P1–P4 only — never a backmarker. Returns the team or None."""
+    teams = career["teams"]
+    own = get_team(career, d.get("team_id"))
+    own_pos = constructor_pos(career, d.get("team_id")) if own else None
+    cands = []
+    for t in teams:
+        if not own or t["id"] == own["id"]:
+            continue
+        pos = constructor_pos(career, t["id"])
+        vacant = not t.get("driver1_id") or not t.get("driver2_id")
+        if vacant or pos <= 4 or (own_pos is not None
+                                 and abs(pos - own_pos) <= 3):
+            cands.append((0 if vacant else 1, abs(pos - (own_pos or pos)),
+                          t))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: (c[0], c[1], c[2]["name"]))
+    return cands[0][2]
+
+
 def generate_media_rumours(career, rng=None):
-    """v0.8.0: two PlanetF1-style rumours after every race — one
-    grounded in the real state, one random pairing (which may be
-    true or false). Grounded: an unhappy driver (a transfer rumour
-    about them), else a very happy driver (praise), else a team on
-    the move over the last 3 races (a performance rumour)."""
+    """v0.8.1: two PlanetF1-style rumours after every race — every
+    one traces to a verified real condition in the game state (the
+    v0.8.0 random pairing is gone). Grounded sources: an unhappy
+    driver (tension), a happy driver (praise), a contract that really
+    expires at season end, a seat that really is vacant, and recent
+    form that really happened — scoreless in the last 3 races,
+    dropped 2+ places in the last 4, climbed 2+ places, won 2+ of
+    the last 3, or won the race just run. About 1 in 4 rumours is
+    plausible-but-wrong speculation instead: a driver who really is
+    unhappy or out of contract, linked to a team that really is a
+    plausible destination (a vacancy or a team in range) — the move
+    itself has not happened and may never happen, but it is close to
+    reality. Never a championship leader to a backmarker, never a
+    scoreless/struggling claim about a team that scored or climbed."""
     rng = rng or random
     drivers = [d for d in career["drivers"]
                if d.get("status") in ("f1", "tr") and d.get("team_id")]
     teams = career["teams"]
     if not drivers or not teams:
         return
-    by_id = {d["id"]: d for d in drivers}
 
     def _team_name(tid):
         t = get_team(career, tid)
         return t["name"] if t else "a rival team"
 
-    def _rival_of(tid):
-        others = [t for t in teams if t["id"] != tid]
-        return rng.choice(others)["name"] if others else "a rival team"
+    def _fmt(tmpl, d=None, t=None, r=None, c=None):
+        return tmpl.format(d=d["name"] if d else "",
+                           t=t["name"] if t else "",
+                           r=r["name"] if r else "",
+                           c=c or "")
 
-    # (a) grounded: an unhappy driver first, then a very happy one,
-    # then a team on the move.
+    grounded = []       # (text, kind)
+    speculative = []    # (text, kind) — plausible but not real
     unhappy = [d for d in drivers
                if rules_mod.happiness_level(
                    happiness_with(d, d.get("team_id"))) <= 2]
-    very_happy = [d for d in drivers
-                  if rules_mod.happiness_level(
-                      happiness_with(d, d.get("team_id"))) >= 5]
-    if unhappy:
-        d = rng.choice(unhappy)
-        add_media_entry(career, rng.choice(MEDIA_TRANSFER_TEMPLATES).format(
-            d=d["name"], t=_team_name(d["team_id"]),
-            r=_rival_of(d["team_id"])))
-    elif very_happy:
-        d = rng.choice(very_happy)
-        add_media_entry(career, rng.choice(MEDIA_HAPPY_TEMPLATES).format(
-            d=d["name"], t=_team_name(d["team_id"])))
-    else:
-        series = _constructors_positions_by_round(career)
-        mover = None
+    happy = [d for d in drivers
+             if rules_mod.happiness_level(
+                 happiness_with(d, d.get("team_id"))) >= 4]
+    for d in unhappy:
+        grounded.append((_fmt(rng.choice(MEDIA_UNHAPPY_TEMPLATES),
+                              d=d, t=get_team(career, d["team_id"])),
+                         "unhappy"))
+        rival = _plausible_rival(career, d)
+        if rival is not None:
+            speculative.append((_fmt(
+                rng.choice(MEDIA_SPECULATION_TEMPLATES), d=d,
+                t=get_team(career, d["team_id"]), r=rival),
+                "speculation"))
+    for d in happy:
+        grounded.append((_fmt(rng.choice(MEDIA_HAPPY_TEMPLATES),
+                              d=d, t=get_team(career, d["team_id"])),
+                         "happy"))
+    # Contracts really expiring at season end.
+    for d in drivers:
+        if (d.get("contract_left") is not None
+                and d.get("contract_left") <= 1):
+            rival = _plausible_rival(career, d)
+            if rival is not None:
+                grounded.append((_fmt(
+                    MEDIA_CONTRACT_TEMPLATES[0], d=d,
+                    t=get_team(career, d["team_id"]), r=rival),
+                    "transfer"))
+                speculative.append((_fmt(
+                    rng.choice(MEDIA_SPECULATION_TEMPLATES), d=d,
+                    t=get_team(career, d["team_id"]), r=rival),
+                    "speculation"))
+            else:
+                grounded.append((_fmt(
+                    MEDIA_CONTRACT_TEMPLATES[1], d=d,
+                    t=get_team(career, d["team_id"])), "transfer"))
+    # A seat that really is vacant, and a driver actually available.
+    vacant = [t for t in teams
+              if not t.get("driver1_id") or not t.get("driver2_id")]
+    available = [d for d in career["drivers"]
+                 if d.get("status") in ("free", "f2")]
+    if vacant and available:
+        t = rng.choice(vacant)
+        d = rng.choice(available)
+        grounded.append((_fmt(rng.choice(MEDIA_VACANCY_TEMPLATES),
+                              d=d, t=t), "transfer"))
+    # Recent form — only claims the state actually supports.
+    series = _season_positions_by_round(career)
+    season_races = [e for e in (career.get("race_history") or [])
+                    if e.get("year") == career.get("year")]
+    for t in teams:
+        if len(season_races) >= 3 and \
+                _team_points_last_n(career, t["id"], 3) == 0:
+            grounded.append((_fmt(rng.choice(MEDIA_SCORELESS_TEMPLATES),
+                                  t=t), "performance"))
         if len(series) >= 2:
-            moves = {}
-            for tid in series[-1]:
-                moves[tid] = series[-4].get(tid, series[-1][tid]) \
-                    - series[-1][tid] if len(series) >= 4 \
-                    else series[0].get(tid, series[-1][tid]) - series[-1][tid]
-            best = max(moves.values()) if moves else 0
-            worst = min(moves.values()) if moves else 0
-            if best >= 1:
-                mover = max(moves, key=lambda k: moves[k])
-            elif worst <= -1:
-                mover = min(moves, key=lambda k: moves[k])
-        if mover:
-            add_media_entry(career, rng.choice(
-                MEDIA_PERFORMANCE_TEMPLATES).format(t=_team_name(mover)))
-        else:
-            t = rng.choice(teams)
-            add_media_entry(career, rng.choice(
-                MEDIA_PERFORMANCE_TEMPLATES).format(t=t["name"]))
-    # (b) random pairing — a transfer link that may be true or false.
-    d = rng.choice(drivers)
-    add_media_entry(career, rng.choice(MEDIA_TRANSFER_TEMPLATES).format(
-        d=d["name"], t=_team_name(d["team_id"]),
-        r=_rival_of(d["team_id"])))
+            back = series[-4] if len(series) >= 4 else series[0]
+            move = back.get(t["id"], series[-1][t["id"]]) \
+                - series[-1][t["id"]]  # positive = climbed
+            if move <= -2:
+                grounded.append((_fmt(
+                    rng.choice(MEDIA_PRESSURE_TEMPLATES), t=t),
+                    "performance"))
+            elif move >= 2:
+                grounded.append((_fmt(
+                    rng.choice(MEDIA_CORNER_TEMPLATES), t=t),
+                    "performance"))
+        if _team_wins_last_n(career, t["id"], 3) >= 2:
+            grounded.append((_fmt(
+                rng.choice(MEDIA_ON_THE_MOVE_TEMPLATES), t=t),
+                "performance"))
+    # The race just run — the winner is always a true, grounded line
+    # (and guarantees at least one candidate every race).
+    last = (career.get("race_history") or [])
+    if last:
+        entry = last[-1]
+        winners = [r for r in entry.get("race") or []
+                   if r.get("pos") == 1]
+        if winners:
+            w = winners[0]
+            d = next((x for x in career["drivers"]
+                      if x["id"] == w.get("driver_id")), None)
+            if d:
+                grounded.append((_fmt(
+                    rng.choice(MEDIA_WINNER_TEMPLATES), d=d,
+                    t=get_team(career, d.get("team_id")),
+                    c=entry.get("circuit") or f"Round {entry.get('round')}"),
+                    "performance"))
+    # Two rumours: about 1 in 4 is the plausible speculation, the
+    # rest grounded — never the same line twice.
+    picked = []
+    seen = set()
+    for _ in range(2):
+        pool = None
+        if speculative and rng.random() < MEDIA_SPECULATION_CHANCE:
+            pool = speculative
+        if pool is None or not [c for c in pool if c[0] not in seen]:
+            pool = grounded
+        cands = [c for c in pool if c[0] not in seen]
+        if not cands:
+            cands = [c for c in grounded + speculative
+                     if c[0] not in seen]
+        if not cands:
+            break
+        text, kind = rng.choice(cands)
+        seen.add(text)
+        picked.append((text, kind))
+    for text, kind in picked:
+        add_media_entry(career, text, kind=kind)
 
 
 def update_driver_happiness(career, rng=None):
@@ -1934,8 +2160,14 @@ def update_driver_happiness(career, rng=None):
                     if favoured:
                         delta += 0.015 * abs(tuning)
                 # --- (c) kept despite poor performances ---
+                # v0.8.1: NO gratitude for a driver disadvantaged by
+                # tuning — their poor performances are at least partly
+                # the team's own doing (the team handicaps them, then
+                # they would thank the team for keeping them). A
+                # behind driver who is NOT disadvantaged still gets
+                # the gratitude as before.
                 mate = next((m for m in mains if m["id"] != d["id"]), None)
-                if mate is not None:
+                if mate is not None and not disadvantaged:
                     points_gap, finish_gap = _teammate_gap_12(
                         career, d, team)
                     if points_gap > 0 or finish_gap > 0:
@@ -2077,7 +2309,7 @@ def donate(career, donor_team_id, recipient_team_id, amount):
     # there is no requester-reputation cost any more.)
     adjust_team_rep(donor, min(TEAM_REP_DONATION_RATE * amount,
                                 TEAM_REP_DONATION_CAP))
-    career["transfers"].append(
+    log_transfer(career, 
         f"{donor['name']} donated ${amount:.2f}M to {recipient['name']}")
     return True, f"Donated ${amount:.2f}M to {recipient['name']} ✓"
 
@@ -2141,7 +2373,7 @@ def _apply_relation_change(career, proposal):
     else:
         line = ""
     if line:
-        career["transfers"].append(line)
+        log_transfer(career, line)
     return line
 
 
@@ -2402,7 +2634,7 @@ def break_relation(career, breaker_team_id, other_team_id):
         _end_relation(career, customer)
         line = (f"{breaker['name']} ended its expired {label} deal "
                 f"with {other['name']} (no fee — the contract had expired)")
-        career["transfers"].append(line)
+        log_transfer(career, line)
         return True, line + " ✓"
     breaker["money"] = round(breaker["money"] - fee, 2)
     customer["break_notice"] = {
@@ -2412,7 +2644,7 @@ def break_relation(career, breaker_team_id, other_team_id):
     line = (f"{breaker['name']} started breaking its {label} deal with "
             f"{other['name']} (${fee:.2f}M break fee paid — the deal "
             f"ends in {RELATION_BREAK_NOTICE_ROUNDS} rounds)")
-    career["transfers"].append(line)
+    log_transfer(career, line)
     return True, line + " ✓"
 
 
@@ -2433,7 +2665,7 @@ def _tick_relation_notices(career):
             supplier = supplier_of(career, team)
             label = relation_label(team) or "partner"
             _end_relation(career, team)
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{team['name']}'s {label} deal with "
                 f"{supplier['name'] if supplier else 'its supplier'} ended "
                 f"(break notice served)")
@@ -2497,7 +2729,7 @@ def set_wanted(career, parent_team_id, driver_id, reward, target_team_id=None):
     if len(wanted) >= MAX_WANTED:
         return False, f"At most {MAX_WANTED} WANTED drivers at a time."
     wanted.append({"driver_id": d["id"], "reward": round(reward, 2)})
-    career["transfers"].append(
+    log_transfer(career, 
         f"{parent['name']} marked {d['name']} WANTED "
         f"(${reward:.2f}M reward for {target['name']})")
     return True, (f"{d['name']} is WANTED ✓ — {target['name']} gets "
@@ -2554,7 +2786,7 @@ def _pay_wanted_reward(career, team, d):
     if paid < reward:
         line += (f" (short of the ${reward:.2f}M reward — "
                  f"the parent's bank was low)")
-    career["transfers"].append(line)
+    log_transfer(career, line)
 
 
 def _wanted_pick(career, team, candidates):
@@ -2595,6 +2827,27 @@ def _is_threat(career, supplier, customer):
     if abs(customer["points"] - supplier["points"]) <= 40:
         return True
     return False
+
+
+def _junior_customer_factor(career, customer):
+    """v0.8.1: how willing a customer is to become a junior team —
+    from their constructors' position and recent trend (standings-
+    visible only, never car perf). A top-4 customer basically never
+    becomes a junior (x0.05); the factor rises the further back they
+    finish (x0.2 at P5 up to x1.0 at P9+). A customer climbing 2+
+    places over the last 4 races is even less likely (they are on the
+    way up). Used by the bot's acceptance and by the supplier's
+    offer gate, so the same rule decides both ends."""
+    pos = constructor_pos(career, customer["id"])
+    factor = max(0.05, min(1.0, (pos - 4) * 0.2))
+    series = _season_positions_by_round(career)
+    if len(series) >= 2:
+        back = series[-4] if len(series) >= 4 else series[0]
+        climb = back.get(customer["id"], series[-1][customer["id"]]) \
+            - series[-1][customer["id"]]
+        if climb >= 2:
+            factor *= 1.0 / (1.0 + 0.25 * climb)
+    return factor
 
 
 def bot_accepts_proposal(career, proposal, rng=None):
@@ -2648,6 +2901,13 @@ def bot_accepts_proposal(career, proposal, rng=None):
             p *= proposal_rep_factor(team_rep_of(supplier))
             if poor(target):
                 p = min(0.95, p * 1.25)
+            if kind == "junior":
+                # v0.8.1: a frontrunner customer basically never
+                # becomes a junior team — the further back they
+                # finish (and the worse their trend), the more
+                # likely they accept. Applied last so it dominates
+                # the poverty boost too.
+                p *= _junior_customer_factor(career, customer)
         else:
             # Deciding as the supplier.
             p = 0.75
@@ -2772,14 +3032,45 @@ def bot_winter_relations(career, team, rng=None):
             best = max(others, key=lambda t: (t["perf"], t["name"]))
             propose_relation(career, team["id"], best["id"], "customer",
                              supplier_team_id=best["id"], years=2, rng=rng)
-    # A bot supplier upgrades a close customer to junior (one junior max).
+    # A bot supplier upgrades a customer to junior (one junior max).
+    # v0.8.1: a top-4 customer is never offered junior status, and a
+    # customer climbing 2+ places over the last 4 races is skipped
+    # too — the offer weighs the customer's constructors' position
+    # and trend, not just how close their car is. Among the eligible
+    # customers the pick is a weighted random draw (worse position =
+    # more likely), so different careers promote different teams
+    # instead of always the same one (McLaren to Mercedes, Haas to
+    # Ferrari).
     if junior_team_of(career, team) is None:
-        close = [t for t in supplied_teams(career, team)
-                 if t.get("sup_stage") == 1
-                 and abs(t["perf"] - team["perf"]) <= BOT_PERF_WINDOW]
-        if close:
-            close.sort(key=lambda t: (-t["perf"], t["name"]))
-            propose_relation(career, team["id"], close[0]["id"], "junior",
+        series = _season_positions_by_round(career)
+        eligible = []
+        for t in supplied_teams(career, team):
+            if t.get("sup_stage") != 1:
+                continue
+            if abs(t["perf"] - team["perf"]) > BOT_PERF_WINDOW:
+                continue
+            if constructor_pos(career, t["id"]) < 5:
+                continue
+            if len(series) >= 2:
+                back = series[-4] if len(series) >= 4 else series[0]
+                climb = back.get(t["id"], series[-1][t["id"]]) \
+                    - series[-1][t["id"]]
+                if climb >= 2:
+                    continue
+            eligible.append(t)
+        if eligible:
+            weights = [constructor_pos(career, t["id"]) - 4
+                       for t in eligible]
+            total = sum(weights)
+            pick = eligible[-1]
+            roll = rng.random() * total
+            acc = 0.0
+            for t, w in zip(eligible, weights):
+                acc += w
+                if roll < acc:
+                    pick = t
+                    break
+            propose_relation(career, team["id"], pick["id"], "junior",
                              supplier_team_id=team["id"], years=2, rng=rng)
     # Parent duties: a WANTED mark for the junior team — or for a
     # customer when there is no junior (v0.6.6: WANTED works for
@@ -2836,7 +3127,7 @@ def add_academy_driver(career, team_id, driver_id):
         n = len(team_academy_drivers(career, team))
         note = (f" — this is academy driver #{n}, so the team now pays "
                 f"a ${fine:.2f}M/race academy fine on top.")
-    career["transfers"].append(
+    log_transfer(career, 
         f"{d['name']} joined {team['name']}'s Driver Academy")
     return True, (f"{d['name']} joined {team['name']}'s Driver Academy ✓ "
                   f"(costs ${cost:.2f}M/season — 1/3 of salary){note}")
@@ -2853,7 +3144,7 @@ def release_academy_driver(career, team_id, driver_id):
     if not d or d.get("academy_team_id") != team["id"]:
         return False, "That driver is not in your academy."
     d["academy_team_id"] = None
-    career["transfers"].append(
+    log_transfer(career, 
         f"{d['name']} left {team['name']}'s Driver Academy")
     return True, f"{d['name']} released from {team['name']}'s academy ✓"
 
@@ -2903,7 +3194,7 @@ def release_driver(career, team_id, driver_id):
     _release_driver(career, d, team)
     d["status"] = "free"
     _recompute_team_points(career, team)
-    career["transfers"].append(
+    log_transfer(career, 
         f"{d['name']} released by {team['name']} (${fee:.2f}M break fee)")
     return True, f"{d['name']} released ✓ — ${fee:.2f}M break fee"
 
@@ -2997,7 +3288,7 @@ def swap_main_tr(career, team_id, seat, tr_driver_id):
         if ill:
             ill["ill_sub_id"] = tr["id"]
     _recompute_team_points(career, team)
-    career["transfers"].append(
+    log_transfer(career, 
         f"{tr['name']} swapped with {main['name']} at {team['name']}")
     if tr.get("f2_tr"):
         # An illness stand-in still racing F2: they hold the seat
@@ -3085,7 +3376,7 @@ def promote_tr_to_main(career, team_id, tr_driver_id, seat):
             tr["ill_sub_from"] = "tr"
             break
     _recompute_team_points(career, team)
-    career["transfers"].append(
+    log_transfer(career, 
         f"{tr['name']} promoted to a race seat at {team['name']}")
     return True, f"{tr['name']} promoted to Seat {seat} at {team['name']} ✓"
 
@@ -3307,14 +3598,14 @@ def promote_junior_driver(career, parent_team_id, junior_driver_id,
     _recompute_team_points(career, junior)
     target_label = f"Seat {seat}" if kind == "seat" else "Test & Reserve"
     if swap is not None:
-        career["transfers"].append(
+        log_transfer(career, 
             f"{d['name']} swapped with {swap['name']} — "
             f"{d['name']} to {parent['name']} ({target_label}), "
             f"{swap['name']} to {junior['name']}")
         return True, (f"{d['name']} swapped with {swap['name']} ✓ "
                       f"({d['name']} is now {target_label} at "
                       f"{parent['name']})")
-    career["transfers"].append(
+    log_transfer(career, 
         f"{d['name']} promoted from {junior['name']} to "
         f"{parent['name']} ({target_label})")
     return True, (f"{d['name']} promoted to {target_label} at "
@@ -3406,6 +3697,18 @@ def ai_best_candidate(career, team, candidates):
     return random.choice(picks)
 
 
+def _ai_season_plan(career, team, kind):
+    """v0.8.1: whether a bot team plans a T&R ("tr") or academy
+    ("academy") signing this season — a stable per-(team, year)
+    coin flip, ~40% of teams each season. The bots used to sign a
+    T&R driver AND an academy junior every single season, which is
+    what made the transfers list essay-length. The plan is a crc32
+    of team+year+kind (not the career rng), so it needs no new saved
+    field and behaves the same for old saves."""
+    key = f"{team['id']}:{career.get('year')}:{kind}".encode()
+    return zlib.crc32(key) % 10 < 4
+
+
 def ai_act(career, team, rng=None):
     """One AI turn for a round, from Main.py's AI block.
 
@@ -3466,7 +3769,11 @@ def ai_act(career, team, rng=None):
     # the pick is probability-weighted by reputation (see
     # _rep_weighted_pick) — bots prefer the high-rep / top-of-F2
     # drivers for promotion now, not the cheapest youngster.
+    # v0.8.1: only ~40% of bot teams plan a T&R signing in a given
+    # season (see _ai_season_plan) — the transfers list was drowning
+    # in one-per-team-per-season T&R signings.
     if (not team_tr_drivers(career, team)
+            and _ai_season_plan(career, team, "tr")
             and career.get("round", 1) <= 6
             and team["money"] > salaries + charges + 10):
         young = [d for d in career["drivers"]
@@ -3484,8 +3791,10 @@ def ai_act(career, team, rng=None):
     # driver to its Driver Academy per season (youngest cheapest,
     # rounds 1-6), when it can comfortably afford it. Bots never
     # exceed 3 academy drivers — they avoid the exponential academy
-    # fine entirely.
+    # fine entirely. v0.8.1: only ~40% of bot teams plan an academy
+    # signing in a given season (see _ai_season_plan).
     if (not team.get("ai_academy_signed")
+            and _ai_season_plan(career, team, "academy")
             and len(team_academy_drivers(career, team)) < ACADEMY_FINE_FREE_COUNT
             and career.get("round", 1) <= 6
             and team["money"] > salaries + charges + 10):
@@ -3670,7 +3979,7 @@ def bot_post_race(career, rng=None):
             _release_driver(career, bad_tr, team)
             bad_tr["status"] = "free"
             _recompute_team_points(career, team)
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{bad_tr['name']} released by {team['name']} "
                 f"(poor results, ${fee:.2f}M break fee)")
             continue
@@ -3692,7 +4001,7 @@ def bot_post_race(career, rng=None):
         d["status"] = "free"
         team[slot] = None
         _recompute_team_points(career, team)
-        career["transfers"].append(
+        log_transfer(career, 
             f"{d['name']} dropped by {team['name']} (poor results, ${fee:.2f}M break fee)")
 
 
@@ -3758,7 +4067,7 @@ def _place_ill_substitute(career, team, ill, rng):
     ill["ill_sub_id"] = pick["id"]
     pick["ill_sub_for"] = ill["id"]
     pick["ill_sub_from"] = "free"
-    career["transfers"].append(
+    log_transfer(career, 
         f"{pick['name']} signed for {team['name']} "
         f"(standing in for {ill['name']})")
     return True
@@ -3800,7 +4109,7 @@ def roll_illness(career, rng=None):
                 note += f" — {sub['name']} is standing in for them"
             elif not placed:
                 note += " — no substitute available, the seat is empty"
-            career["transfers"].append(note)
+            log_transfer(career, note)
             newly.append(d)
     return newly
 
@@ -3857,7 +4166,7 @@ def restore_ill_driver(career, ill):
         ill["team_points"] = 0
         ill["last_team_id"] = None
         _recompute_team_points(career, team)
-        career["transfers"].append(
+        log_transfer(career, 
             f"{ill['name']} is back from {label} at {team['name']}")
     elif team:
         # No seat free — the returning driver joins Test & Reserve.
@@ -3865,7 +4174,7 @@ def restore_ill_driver(career, ill):
         if sub:
             sub["ill_sub_for"] = None
             sub["ill_sub_from"] = None
-        career["transfers"].append(
+        log_transfer(career, 
             f"{ill['name']} is back from {label} — no race seat free "
             f"at {team['name']}, so they join Test & Reserve")
     ill["ill_until_round"] = None
@@ -4174,9 +4483,9 @@ def run_race_weekend(career, rng=None):
         if share > 0:
             team["money"] = round(team["money"] - share, 2)
             parent["money"] = round(parent["money"] + share, 2)
-            career["transfers"].append(
-                f"{team['name']} paid ${share:.2f}M of its race prize to "
-                f"its parent {parent['name']} (15% junior share)")
+            # v0.8.1: the money moves, but the payment is NOT a
+            # transfer — it used to spam the transfers list once per
+            # race per junior team. The Finances tab shows the share.
     leader_time = race_entries[0][0]["race_time"] if race_entries else 0
     career["last_race"] = [
         result_row(d, t, i + 1,
@@ -4234,6 +4543,13 @@ def run_race_weekend(career, rng=None):
         d2 = get_driver(career, team["driver2_id"]) if team["driver2_id"] else None
         if d1 and d2 and d2.get("team_points", 0) > d1.get("team_points", 0):
             team["driver1_id"], team["driver2_id"] = team["driver2_id"], team["driver1_id"]
+            # v0.8.1: tuning follows the DRIVER, not the seat — flip
+            # the tuning sign so it keeps favouring the same driver
+            # (and the disadvantaged driver's tuning_against_streak
+            # keeps accumulating instead of resetting). Without this,
+            # a flip-flopping seat order silently moved the tuning
+            # between drivers and neither driver's happiness moved.
+            team["tuning"] = -int(team.get("tuning") or 0)
     career["teams"] = race_mod.constructor_standings(career)
     # Full Grand Prix record for history (revisit any previous GP).
     if career["last_race"]:
@@ -4448,7 +4764,7 @@ def end_of_season(career, rng=None):
         f2_champ["best_finish_round"] = None
         f2_champ["finish_sum"] = 0
         f2_champ["finish_count"] = 0
-        career["transfers"].append(
+        log_transfer(career, 
             f"{f2_champ['name']} won F2 and joins the free-agent pool"
             if not was_f2_tr else
             f"{f2_champ['name']} won F2 and leaves the feeder series "
@@ -4677,7 +4993,7 @@ def end_of_season(career, rng=None):
                 # v0.7.1: record the slot they held, for the
                 # winter-break re-sign offer.
                 d["last_slot"] = "tr"
-                career["transfers"].append(
+                log_transfer(career, 
                     f"{d['name']} left {team['name']} (T&R contract ended)")
     # Contracts that expired: the driver leaves the team and becomes a free agent.
     for team in career["teams"]:
@@ -4693,7 +5009,7 @@ def end_of_season(career, rng=None):
                 _release_driver(career, d, team)
                 d["status"] = "free"
                 team[slot] = None
-                career["transfers"].append(
+                log_transfer(career, 
                     f"{d['name']} left {team['name']} (contract ended)")
         if team["driver1_id"] is None and team["driver2_id"] is not None:
             team["driver1_id"], team["driver2_id"] = team["driver2_id"], None
@@ -5066,7 +5382,11 @@ def bot_winter_offers(career, team, rng=None):
     # over $50M. v0.7.1: the fine counts FIT T&R drivers — an ill
     # driver sitting in T&R while they recover does not count.
     trs = active_tr_drivers(career, team)
-    if pool:
+    # v0.8.1: only ~40% of bot teams plan a T&R signing in a given
+    # season (see _ai_season_plan) — same plan as the mid-season
+    # signing, so a team that skipped T&R all season does not
+    # suddenly sign one in the winter break.
+    if pool and _ai_season_plan(career, team, "tr"):
         young = [d for d in pool if d["age"] <= 25]
         if young:
             # v0.6: a junior team prefers a WANTED driver as a T&R
@@ -5341,7 +5661,7 @@ def resolve_winter_break_round(career, rng=None):
         if rng.random() < p:
             team = get_team(career, team_id)
             team_name = team["name"] if team else "their old team"
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{d['name']} turned down {team_name}'s offer")
             add_media_entry(
                 career,
@@ -5402,7 +5722,7 @@ def resolve_winter_break_round(career, rng=None):
                         career["meetings"] = [
                             m for m in career.get("meetings") or []
                             if m is not meeting]
-                    career["transfers"].append(
+                    log_transfer(career, 
                         f"{d['name']} left {academy_team['name']}'s academy "
                         f"(poached by {team['name']})")
                     add_media_entry(
@@ -5442,14 +5762,14 @@ def sign_driver_wb(career, team, d, seat, contract_years):
     if current:
         _release_driver(career, current, team)
         current["status"] = "free"
-        career["transfers"].append(
+        log_transfer(career, 
             f"{current['name']} left {team['name']} (contract broken)")
     _sign_driver_common(career, team, d, contract_years)
     d["status"] = "f1"
     d["team_id"] = team["id"]
     team[slot] = d["id"]
     _recompute_team_points(career, team)
-    career["transfers"].append(f"{d['name']} signed for {team['name']}")
+    log_transfer(career, f"{d['name']} signed for {team['name']}")
     # v0.6: a WANTED signing pays the parent's reward to the junior team.
     _pay_wanted_reward(career, team, d)
     return True, "ok"
@@ -5461,7 +5781,7 @@ def sign_tr_driver_wb(career, team, d, contract_years):
     _sign_driver_common(career, team, d, contract_years, as_tr=True)
     d["status"] = "tr"
     d["team_id"] = team["id"]
-    career["transfers"].append(
+    log_transfer(career, 
         f"{d['name']} signed for {team['name']} as Test & Reserve")
     # v0.6: a WANTED signing pays the parent's reward to the junior team.
     _pay_wanted_reward(career, team, d)
@@ -5502,7 +5822,7 @@ def autofill_winter_break(career, rng=None):
             slot = "driver1_id" if seat == 1 else "driver2_id"
             team[slot] = pick["id"]
             _recompute_team_points(career, team)
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{pick['name']} signed for {team['name']} (winter-break auto-fill)")
             # v0.6: even an auto-fill signing of a WANTED driver pays
             # the parent's reward to the junior team.
@@ -5548,7 +5868,7 @@ def start_next_season(career, rng=None):
                 and not team.get("break_notice")):
             supplier = supplier_of(career, team)
             _end_relation(career, team)
-            career["transfers"].append(
+            log_transfer(career, 
                 f"{team['name']}'s deal with "
                 f"{supplier['name'] if supplier else 'its supplier'} "
                 f"lapsed (contract expired, not renewed)")

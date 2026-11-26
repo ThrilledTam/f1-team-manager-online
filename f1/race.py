@@ -208,7 +208,13 @@ def simulate_qual(career, rng=None):
                 else d["perf"] + _happiness_adj(d, team["id"]) \
                 - (team["tuning"] * 1.0)
             # v0.2: per-session form — one draw per driver per session.
-            d["qual_time"] = lap_sim(w, t_perf, max_perf, min_perf, 1, 2.5, rng) \
+            # v0.8.1: two laps per driver, best lap counts — one lap
+            # was too hectic (a single bad draw could bury a driver).
+            # The form draw stays once per driver per session, applied
+            # to the best lap.
+            d["qual_time"] = min(
+                lap_sim(w, t_perf, max_perf, min_perf, 1, 2.5, rng),
+                lap_sim(w, t_perf, max_perf, min_perf, 1, 2.5, rng)) \
                 + rng.gauss(0, SESSION_FORM_QUAL_SIGMA)
             entries.append((d, team))
     entries.sort(key=lambda e: e[0]["qual_time"])

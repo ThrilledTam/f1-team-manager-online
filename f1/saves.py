@@ -14,7 +14,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 17  # v0.8.0: happiness/loyalty/meetings/media (see migrate_save)
+SAVE_VERSION = 18  # v0.8.1: structured transfers (see migrate_save)
 # on every team, default empty; private — stripped from the broadcast
 # state, only ever sent to the owning team). v0.7.3: F2 promotions reworked (a T&R driver
 # still racing in F2 keeps their F2 tally in the plain fields and
@@ -383,6 +383,18 @@ def migrate_save(doc):
     doc.setdefault("media_rumours", [])
     doc.setdefault("driver_messages", [])
     doc.setdefault("team_notices", [])
+    # v0.8.1: transfers are structured dicts now (see game.
+    # log_transfer) so the UI can show when each move happened and
+    # style the names. Old saves carry plain strings — wrap them
+    # (no date known, so no round label) and drop any junior-share
+    # payment lines (those are no longer transfers at all).
+    doc["transfers"] = [
+        {"text": t, "year": None, "round": None, "label": None}
+        if isinstance(t, str) else t
+        for t in (doc.get("transfers") or [])
+        if not (isinstance(t, str) and "junior share" in t)
+        and not (isinstance(t, dict)
+                 and "junior share" in (t.get("text") or ""))]
     # v0.7.5: the cheats-menu master toggle (default OFF).
     doc.setdefault("custom_retirements", False)
     for team in doc.get("teams") or []:
