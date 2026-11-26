@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.8.0 (beta)
+F1 Team Manager Online — v0.8.1 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -60,7 +60,7 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     develop      {}
     tuning       {value}                  # -3..3
     reg_research {amount}
-    reg_adapt    {points?}             # adapt unadapted parts, $0.25M/pt;
+    reg_adapt    {points?}             # adapt unadapted parts, $0.30M/pt;
                                        # no points = adapt all
     sign_driver  {driver_id, seat, contract_years}  # round only (winter
                                                      # break uses offers);
@@ -546,7 +546,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.8.0"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.8.1"}
 
 
 @app.get("/api/saves")
@@ -1117,7 +1117,7 @@ async def ws_endpoint(ws: WebSocket):
                     elif mtype == "reg_research":
                         ok, why = game.do_reg_research(career, team["id"], msg.get("amount"))
                     elif mtype == "reg_adapt":
-                        # v0.4: adapt unadapted parts ($0.25M/pt); no
+                        # v0.4: adapt unadapted parts ($0.30M/pt); no
                         # points = adapt everything still unadapted.
                         ok, why = game.do_reg_adapt(career, team["id"], msg.get("points"))
                     elif mtype == "sign_driver":
@@ -1139,12 +1139,13 @@ async def ws_endpoint(ws: WebSocket):
                             (target.get("kind"), target.get("seat")),
                             msg.get("bribe", 0.0), rng=rng)
                     elif mtype == "activity":
-                        # v0.8.0: an activity with one of your
-                        # at-least-happy drivers (one per driver per
-                        # round, costs money).
+                        # v0.8.1: an activity with one of your drivers
+                        # (any happiness level; unhappy drivers may
+                        # turn it down, one per driver per round,
+                        # costs money).
                         ok, why = game.do_activity(
                             career, team["id"], msg.get("driver_id"),
-                            msg.get("activity_id"))
+                            msg.get("activity_id"), rng=rng)
                     elif mtype == "release_driver":
                         # v0.4.3: release (drop) a main or T&R driver —
                         # break fee = main-driver formula. v0.6.5: round
