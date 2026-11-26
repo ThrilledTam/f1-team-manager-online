@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.7.5</title>
+<title>F1 Team Manager Online — v0.8.0</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -44,9 +44,25 @@
   .bar-row { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:14px; flex-wrap:wrap; }
   .bar-track { flex:1; background:#21262d; border-radius:6px; height:18px; overflow:hidden; min-width:80px; }
   .bar-fill { height:100%; background:#58a6ff; }
-  .tabs { display:flex; overflow-x:auto; gap:4px; padding-bottom:4px; -webkit-overflow-scrolling:touch; }
-  .tabs button { background:#21262d; flex:0 0 auto; white-space:nowrap; }
-  .tabs button.sel { background:#1f6feb; }
+  /* v0.8.0: tab groups — four groups, each with a title and a
+     slightly different shade; the buttons shrink to fit the window
+     (flex, min-width 0) — no horizontal scroll on the dashboard. */
+  .tab-groups { display:flex; flex-wrap:wrap; gap:6px; }
+  .tab-group { flex:1 1 auto; min-width:0; border-radius:8px; padding:5px; }
+  .tab-group-title { font-size:11px; font-weight:700; color:#8b949e; text-transform:uppercase; letter-spacing:.5px; padding:0 2px 3px; }
+  .tab-group-btns { display:flex; flex-wrap:wrap; gap:4px; }
+  .tab-group button { background:#21262d; flex:1 1 auto; min-width:0; white-space:nowrap; padding:6px 8px; font-size:13px; overflow:hidden; text-overflow:ellipsis; }
+  .tab-group button.sel { background:#1f6feb; }
+  @media (max-width: 640px){ .tab-group button { padding:5px 6px; font-size:12px; } .tab-group-title { font-size:10px; } }
+  /* v0.8.0: the small T&R badge in the F2 table (modelled on
+     .jr-badge — 11px, 1px/5px — so F2 rows stay the same height). */
+  .f2-tr-badge { display:inline-block; background:#8250df; color:#fff; border-radius:4px; padding:1px 5px; font-size:11px; font-weight:700; vertical-align:middle; margin-left:4px; }
+  /* v0.8.0: happiness bar in the Drivers tab (own team only). */
+  .hap { display:inline-block; width:56px; height:10px; background:#21262d; border-radius:5px; overflow:hidden; vertical-align:middle; }
+  .hap > i { display:block; height:100%; }
+  /* v0.8.0: collapsible sections in History / Media & Rumours. */
+  details { margin:8px 0; }
+  details summary { cursor:pointer; font-weight:700; font-size:15px; }
   .hidden { display:none; }
   .mono { font-family: ui-monospace, monospace; }
   /* v0.1 driver-name styling (from Matthew's screenshots): first name normal,
@@ -153,7 +169,7 @@
     #screen-results button,
     #winter-card button, #tab-research button, #tab-saves button,
     #screen-game > p > button { width:100%; margin:4px 0; }
-    .tabs button { width:auto; margin:4px 4px 4px 0; }
+    .tab-group button { width:auto; margin:4px 4px 4px 0; }
     table button { width:auto; }
     input, select { width:100%; }
     input[type="checkbox"] { width:24px; }
@@ -166,7 +182,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.5 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.0 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -322,17 +338,26 @@
   </div>
 
   <div class="card">
-    <div class="tabs">
-      <button data-tab="research" class="sel">Research</button>
-      <button data-tab="notes">Notes</button>
-      <button data-tab="drivers">Drivers</button>
-      <button data-tab="relations">Relationships</button>
-      <button data-tab="finances">Finances</button>
-      <button data-tab="market">Driver Market</button>
-      <button data-tab="standings">Standings</button>
-      <button data-tab="chart">Perf Chart</button>
-      <button data-tab="history">History &amp; Rumours</button>
-      <button data-tab="saves">Saves</button>
+    <div class="tab-groups">
+      <div class="tab-group" style="background:#1b2530"><div class="tab-group-title">Team</div><div class="tab-group-btns">
+        <button data-tab="drivers">Drivers</button>
+        <button data-tab="research" class="sel">Research</button>
+        <button data-tab="notes">Notes</button>
+      </div></div>
+      <div class="tab-group" style="background:#1b2436"><div class="tab-group-title">Money &amp; Deals</div><div class="tab-group-btns">
+        <button data-tab="finances">Finances</button>
+        <button data-tab="relations">Relationships</button>
+        <button data-tab="market">Driver Market</button>
+      </div></div>
+      <div class="tab-group" style="background:#241b30"><div class="tab-group-title">Results</div><div class="tab-group-btns">
+        <button data-tab="standings">Standings</button>
+        <button data-tab="chart">Perf Chart</button>
+        <button data-tab="history">History</button>
+        <button data-tab="media">Media &amp; Rumours</button>
+      </div></div>
+      <div class="tab-group" style="background:#1b2b22"><div class="tab-group-title">System</div><div class="tab-group-btns">
+        <button data-tab="saves">Saves</button>
+      </div></div>
     </div>
     <div id="tab-research" class="tab">
       <h3>Research (this round)</h3>
@@ -372,6 +397,7 @@
     <div id="tab-standings" class="tab hidden"><div id="standings-box"></div></div>
     <div id="tab-chart" class="tab hidden"><div id="chart-box"></div></div>
     <div id="tab-history" class="tab hidden"><div id="history-box"></div></div>
+    <div id="tab-media" class="tab hidden"><div id="media-box"></div></div>
     <div id="tab-saves" class="tab hidden">
       <h3>Save this career</h3>
       <p class="note">Saves live on the server, but Render free wipes them on restart — use
@@ -408,13 +434,14 @@
 
 <!-- ================= MENU (v0.7.4) ================= -->
 <div id="screen-cheats" class="hidden">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.7.5 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.0 beta</span></h1>
   <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
   <p><label><input type="checkbox" id="cheat-custom-retirements"> Custom retirements</label> <span class="note">When ON, only drivers you toggle retire at season end — normal retirements are off. Turning it OFF clears every driver toggle.</span></p>
   <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
   <div class="card"><h2>Finances</h2><div id="cheats-money"></div></div>
   <div class="card"><h2>Drivers' standings</h2><div id="cheats-drivers"></div></div>
   <div class="card"><h2>Constructors' standings</h2><div id="cheats-teams"></div></div>
+  <div class="card"><h2>Other drivers</h2><div id="cheats-extra"></div></div>
 </div>
 
 <div id="toasts"></div>
@@ -552,6 +579,13 @@ function topPopup(){
 /* Re-render an overlay panel's body from current state. A bodyKey
    (data the panel shows) skips the re-render when nothing changed,
    so an open panel keeps its scroll position across room updates. */
+/* v0.8.0: every driver the cheats menu can edit — the mini
+   standings plus the four extra sections (T&R, free, academy, F2). */
+function cheatDriversAll(){
+  if(!cheatData) return [];
+  const extra = cheatData.extra || {};
+  return [...(cheatData.drivers || []), ...(extra.tr || []), ...(extra.free || []), ...(extra.academy || []), ...(extra.f2 || [])];
+}
 function renderOverlayBody(p){
   if(p.id === "confirm") return; // body is set by openConfirm only
   const body = p.el.querySelector(".ov-body");
@@ -575,7 +609,19 @@ function renderOverlayBody(p){
     const costKey = pendingSign.target === "tr" ? "tr" : String(pendingSign.seat);
     const pq = (pendingSign && room && room.career) ? ((room.career.market_costs || {})[pendingSign.driver_id] || {})[costKey] : null;
     if(!pd || !pq){ closePopup("sign", {silent:true}); return; }
-    key = `sign:${pd.id}:${pendingSign.target}:${pendingSign.seat}:${pq.total}:${pq.fine_after || 0}:${myTeam ? myTeam.money : 0}`;
+    // v0.8.0: poaching needs a secret meeting first. A poach is
+    // another team's main/T&R driver, or another team's academy
+    // junior; a meeting is agreed per target (seat 1, seat 2, T&R).
+    // In the winter break the only poachable class is academy
+    // juniors — the meeting gates those offers too.
+    const myMeetings = (room.career && room.career.my_meetings) || {};
+    const meet = myMeetings[pd.id] || null;
+    const meetAgreed = !!meet && ((pendingSign.target === "tr" && meet.target === "tr")
+      || (pendingSign.target === "seat" && meet.target === "seat" && meet.seat === pendingSign.seat));
+    const isPoach = myTeam && (((pd.status === "f1" || pd.status === "tr") && pd.team_id && pd.team_id !== myTeam.id)
+      || ((pd.status === "free" || pd.status === "f2") && pd.academy_team_id && pd.academy_team_id !== myTeam.id));
+    const bribeWant = ((room.career.market_costs || {})[pd.id] || {}).bribe_want || 0;
+    key = `sign:${pd.id}:${pendingSign.target}:${pendingSign.seat}:${pq.total}:${pq.fine_after || 0}:${myTeam ? myTeam.money : 0}:${meetAgreed ? "meet" : "nomeet"}:${bribeWant}`;
     if(p.bodyKey === key) return;
     const costTxt = pq.total <= 0 ? "Free" : money(pq.total) + (pq.poach_fee > 0 ? " (poaching break fee)" : " break fee");
     const where = pendingSign.target === "tr" ? "as Test & Reserve" : `into Seat ${pendingSign.seat}`;
@@ -586,11 +632,24 @@ function renderOverlayBody(p){
     const wbNote = pendingSign.wb
       ? `<br><span class="note">Winter break: this ADDS an offer for this round — the driver signs with the best-placed team that offered them when everyone hits NEXT.</span>`
       : `<br><span class="note">T&R drivers are paid their full salary and add +25% to research gained.</span>`;
-    html = `<b>Sign ${esc(pd.name)}${genderBadge(pd.name, pd.gender)} ${where}?</b>
-      <span class="note">Cost: ${costTxt} · Salary ${money(pd.salary)}/season (paid ${money(pd.salary / 12)} after each race).</span>${fineTxt}${wbNote}<br>
-      <span class="note">Pick the contract length:</span>
-      ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
-      <button class="secondary" id="btn-sign-cancel">Cancel</button>`;
+    if(isPoach && !meetAgreed){
+      // No agreed meeting for this target yet — the meeting request
+      // goes here instead of the contract picker.
+      html = `<b>Secret meeting with ${esc(pd.name)}${genderBadge(pd.name, pd.gender)} ${where}?</b>
+        <span class="note">Poaching ${esc(pd.name)} ${where} needs a secret meeting first — $0.5M to set one up. The driver may accept or decline; if they agree, you can sign them straight away (break fee ${costTxt}, plus the bribe below if any). There is a small chance the meeting leaks — a leak costs both sides reputation and the driver's current team reacts.</span><br>
+        <span class="note">They want a bribe of about ${money(bribeWant)}${bribeWant > 0 ? " — paying it restores the normal acceptance chance; paying nothing when they want one lowers it" : " — no bribe needed"}.</span><br>
+        <label>Bribe ($M) <input id="meeting-bribe" type="number" min="0" step="0.1" value="${bribeWant.toFixed(1)}" style="width:90px"></label><br>
+        <button data-request-meeting>Request secret meeting — $0.5M</button>
+        <button class="secondary" id="btn-sign-cancel">Cancel</button>`;
+    } else {
+      const meetNote = meetAgreed ? `<br><span class="note">🤫 Secret meeting agreed — signing also pays the ${money(meet.bribe || 0)} bribe you promised in the meeting${pendingSign.wb ? " (plus any bribe on this offer)" : ""}.</span>` : "";
+      const wbBribe = pendingSign.wb ? `<br><label>Bribe ($M, optional) <input id="wb-bribe" type="number" min="0" step="0.1" value="0" style="width:90px"></label> <span class="note">They want about ${money(bribeWant)} — a bribe is paid only if they sign with you.</span>` : "";
+      html = `<b>Sign ${esc(pd.name)}${genderBadge(pd.name, pd.gender)} ${where}?</b>
+        <span class="note">Cost: ${costTxt} · Salary ${money(pd.salary)}/season (paid ${money(pd.salary / 12)} after each race).</span>${fineTxt}${wbNote}${meetNote}${wbBribe}<br>
+        <span class="note">Pick the contract length:</span>
+        ${[1, 2, 3, 4].map(y => `<button data-contract-years="${y}">${y} yr${y > 1 ? "s" : ""}</button>`).join("")}
+        <button class="secondary" id="btn-sign-cancel">Cancel</button>`;
+    }
   } else if(p.id === "season"){
     // v0.7.0: clickable champion years — the full drivers' +
     // constructors' standings for one season, as a minimizable
@@ -650,7 +709,7 @@ function renderOverlayBody(p){
     // driver's current age (shown here); the applied result is in
     // the toast. v0.7.5: the 'Retire at season end' toggle — only
     // settable while the master is on (disabled + a note otherwise).
-    const d = cheatData ? (cheatData.drivers || []).find(x => x.id === pendingCheatDriver) : null;
+    const d = cheatDriversAll().find(x => x.id === pendingCheatDriver) || null;
     if(!d || !pendingCheatDriver){ closePopup("cheat-driver", {silent:true}); return; }
     const masterOn = !!cheatData.custom_retirements;
     key = `cheat-driver:${d.id}:${d.rating}:${d.min_rating}:${d.max_rating}:${!!d.retire_at_season_end}:${masterOn}`;
@@ -688,6 +747,17 @@ function openOverlay(id, title){
   return p;
 }
 let confirmSeq = 0;
+/* v0.8.0: an information pop-up (no Yes/Cancel choice) — used for
+   the advance gate, which names the empty seat. Reuses the confirm
+   overlay with a single OK button. */
+function openInfo(title, message){
+  const p = openOverlay("confirm", title);
+  p.message = message; p.onConfirm = null; p.bodyKey = "info:" + (++confirmSeq);
+  p.onClose = null;
+  p.el.querySelector(".ov-body").innerHTML =
+    `<p>${esc(message)}</p><p><button data-confirm-no>OK</button></p>`;
+  syncBackdrop();
+}
 function openConfirm(title, message, onYes){
   const p = openOverlay("confirm", title);
   p.message = message; p.onConfirm = onYes; p.bodyKey = "confirm:" + (++confirmSeq);
@@ -754,7 +824,7 @@ function syncOverlays(){
     closePopup("cheat-team", {silent:true});
   }
   if(pendingCheatDriver && cheatData){
-    const d = (cheatData.drivers || []).find(x => x.id === pendingCheatDriver);
+    const d = cheatDriversAll().find(x => x.id === pendingCheatDriver);
     if(d){
       const p = openOverlay("cheat-driver", `Set rating — ${d.name}`);
       p.onClose = () => { pendingCheatDriver = null; renderAll(); };
@@ -780,6 +850,22 @@ $("ov-root").addEventListener("click", e => {
   if(closeBtn){ closePopup(closeBtn.dataset.ovClose); return; }
   if(e.target.closest("#btn-gp-back")){ closePopup("gp"); return; }
   if(e.target.closest("#btn-sign-cancel")){ closePopup("sign"); return; }
+  // v0.8.0: request the secret meeting (the pop-up asked for the
+  // bribe); the server answers with an action message, and the
+  // market row shows the agreed meeting once the broadcast lands.
+  const meetBtn = e.target.closest("[data-request-meeting]");
+  if(meetBtn){
+    const p = pendingSign; pendingSign = null;
+    closePopup("sign", {silent:true});
+    if(p){
+      const bribeInp = document.querySelector("#meeting-bribe");
+      const bribe = bribeInp ? Math.max(0, parseFloat(bribeInp.value) || 0) : 0;
+      send({type:"request_meeting", driver_id: p.driver_id,
+            target: p.target === "tr" ? {kind:"tr"} : {kind:"seat", seat: p.seat},
+            bribe});
+    }
+    return;
+  }
   const yrs = e.target.closest("[data-contract-years]");
   if(yrs){
     const p = pendingSign; pendingSign = null;
@@ -789,8 +875,12 @@ $("ov-root").addEventListener("click", e => {
       if(p.wb){
         // v0.4 winter break: picking the years adds an offer for this
         // round (the player submits all offers from the winter card).
+        // v0.8.0: the offer may carry an optional bribe (the input
+        // sits in the sign pop-up next to the contract picker).
+        const bribeInp = document.querySelector("#wb-bribe");
+        const bribe = bribeInp ? Math.max(0, parseFloat(bribeInp.value) || 0) : 0;
         wbOffers = wbOffers.filter(o => o.driver_id !== p.driver_id);
-        wbOffers.push({driver_id: p.driver_id, target: p.target, seat: p.target === "tr" ? null : p.seat, years});
+        wbOffers.push({driver_id: p.driver_id, target: p.target, seat: p.target === "tr" ? null : p.seat, years, bribe});
         if(room && room.career) renderGame();
       } else if(p.target === "tr"){
         send({type:"sign_tr", driver_id: p.driver_id, contract_years: years});
@@ -1091,6 +1181,7 @@ function connect(){
       // the current screen now that myTeam is fresh.
       renderAll();
     } else if(m.type === "rumours"){ const box = $("rumours-box"); if(box){ let lastCat = null; const rows = (m.rumours || []).map(r => { const tm = room.career ? room.career.teams.find(t => t.name === r.team) : null; const head = (r.category && r.category !== lastCat) ? `<tr><th colspan="4" style="text-align:left">${esc(r.category)}</th></tr>` : ""; lastCat = r.category || lastCat; return head + `<tr><td>${driverNameHtml(r.driver, tm ? tm.colour : null, 0, false, null, r.gender)}</td><td>${tm ? teamNameHtml(tm) : esc(r.team)}</td><td>${r.age}</td><td>${r.chance}%</td></tr>`; }).join(""); box.innerHTML = rows ? `<div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Age</th><th>Retire chance</th></tr>${rows}</table></div>` : `<p class="note">No driver is likely to retire — every driver is under 30 or in a good position.</p>`; }
+    } else if(m.type === "gate"){ openInfo("Cannot advance yet", m.message);
     } else if(m.type === "season_detail"){ seasonDetail = m.detail; viewingSeason = m.detail.year; syncOverlays();
     } else if(m.type === "cheat_state"){ cheatData = m.cheat; cheatsOpen = true; renderAll();
     } else if(m.type === "saves_list"){ renderSaves(m.saves);
@@ -1443,7 +1534,8 @@ function renderGame(){
     const offerLine = o => {
       const d = driverById(o.driver_id);
       const where = o.target === "tr" ? "Test & Reserve" : `Seat ${o.seat}`;
-      return `${d ? esc(d.name) + genderBadge(d.name, d.gender) : "?"} → ${where} (${o.years} yr${o.years > 1 ? "s" : ""})`;
+      const bribeTxt = (o.bribe || 0) > 0 ? ` + ${money(o.bribe)} bribe` : "";
+      return `${d ? esc(d.name) + genderBadge(d.name, d.gender) : "?"} → ${where} (${o.years} yr${o.years > 1 ? "s" : ""})${bribeTxt}`;
     };
     $("winter-offers-box").innerHTML =
       (submitted.length ? `<p><b>Submitted this round:</b> ${submitted.map(offerLine).join(" · ")}</p>` : "") +
@@ -1586,8 +1678,12 @@ function renderMyTeam(){
       ? " Pick a different T&R driver in the Drivers tab if you prefer (free swap)." : "";
     return `<br><span class="note">🤒 <b>${esc(d.name)}${genderBadge(d.name, d.gender)}</b> is ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}${sub ? ` — ${esc(sub.name)}${genderBadge(sub.name, sub.gender)} is standing in for them.` : " — no substitute available."}${swapHint}</span>`;
   }).join("");
+  // v0.8.0: happy drivers sometimes message their manager — the
+  // latest two show at the top of the dashboard (all of them are in
+  // the Drivers tab).
+  const dashMsgs = (t.driver_messages || []).slice(-2).reverse().map(m => `<br><span class="note">💬 <b>${esc(m.driver)}</b>: &ldquo;${esc(m.text)}&rdquo;</span>`).join("");
   $("my-team").innerHTML = `<span class="colour-dot" style="background:${t.colour}"></span><b>${esc(t.name)}</b>
-    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}${reliabilityLine}<br>${drivers}${illNotice}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
+    · ${money(t.money)} · ${t.points} pts · Tuning ${t.tuning}${perfLine}${reliabilityLine}<br>${drivers}${dashMsgs}${illNotice}<br><span class="note">Test &amp; Reserve and academy juniors are in the Drivers tab.</span>${relLine}`;
   // v0.5: driver development factor (main 2 + T&R) — the same
   // helpers do_develop uses, so the number shown is the number
   // Develop Parts applies. Per-driver breakdown, compact.
@@ -1649,6 +1745,31 @@ function renderDriversTab(){
   const c = room.career;
   const isWB = c && c.phase === "winter_break";
   const col = t.colour;
+  // v0.8.0: happiness — shown ONLY to the driver's own team (it
+  // arrives in the private myTeam payload, never in the broadcast).
+  // A coloured bar + the level word; the number behind it stays
+  // hidden, like ratings. 1 very unhappy … 5 very happy.
+  const hapColour = lvl => ["", "#da3633", "#f0883e", "#8b949e", "#3fb950", "#2ecc71"][lvl] || "#8b949e";
+  const hapHtml = d => {
+    if(d.happiness === undefined || d.happiness === null) return "";
+    const lvl = Math.max(1, Math.min(5, Math.round(d.happiness)));
+    const col = hapColour(lvl);
+    const word = d.happiness_word || ["", "Very unhappy", "Unhappy", "Neutral", "Happy", "Very happy"][lvl];
+    return ` <span class="note">Mood:</span> <span class="hap"><i style="width:${(Math.max(0, Math.min(5, d.happiness)) / 5 * 100).toFixed(0)}%;background:${col}"></i></span> <b style="color:${col}">${esc(word)}</b>`;
+  };
+  // v0.8.0: one activity per driver per round, only for drivers at
+  // least happy (level 4+). The round key matches the server's
+  // (_activity_round_key): "2029R3" in a season, "2029WB2" in the
+  // winter break.
+  const actKey = isWB ? `${c.year}WB${(c.wb_status && c.wb_status.round) || c.wb_round || 1}` : `${c.year}R${c.round}`;
+  const actHtml = d => {
+    if(d.happiness === undefined || d.happiness === null) return "";
+    if(Math.round(d.happiness) < 4) return "";
+    if(d.activity_round === actKey) return ` <span class="note">✓ Activity done this round</span>`;
+    const acts = (myTeam && myTeam.activities) || [];
+    if(!acts.length) return "";
+    return ` <select class="act-select" data-act-driver="${d.id}">${acts.map(a => `<option value="${a.id}">${esc(a.name)} — ${money(a.cost)} (+${a.happiness} mood, +${a.loyalty} loyalty)</option>`).join("")}</select> <button data-act-do="${d.id}">Do activity</button>`;
+  };
   const emptySeats = t.empty_seats || [];
   const trs = t.tr_drivers || [];
   const acs = t.academy_drivers || [];
@@ -1673,7 +1794,7 @@ function renderDriversTab(){
     // they recover.
     const illDriver = d.ill_sub_for ? (driverById(d.ill_sub_for) || {}) : null;
     const subNote = illDriver ? ` <span class="note">(standing in for ${esc(illDriver.name || "an ill driver")}${genderBadge(illDriver.name || "", illDriver.gender)})</span>` : "";
-    return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>${subNote} ${dropBtn(d)}</div>`;
+    return `<div class="bar-row"><b>Seat ${seat}</b> — ${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(${d.age}, ${d.points} pts, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>${subNote}${hapHtml(d)}${actHtml(d)} ${dropBtn(d)}</div>`;
   }).join("");
   const trHtml = trs.length ? trs.map(d => {
     // v0.7.4: a T&R driver still racing in F2 cannot swap into a
@@ -1694,7 +1815,7 @@ function renderDriversTab(){
     // illness and the round they return — with NO Swap/Promote or
     // Drop buttons (they cannot race, and cannot be released, until
     // they recover; the server refuses both).
-    return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>` +
+    return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(T&R, ${d.age}, ${d.contract_left} yr left, ${money(d.salary)}/yr, Dev +${(d.dev_contrib || 0).toFixed(3)})</span>${hapHtml(d)}${actHtml(d)}` +
     (d.ill_until_round
       ? ` <span class="note">🤒 ${d.ill_label || "ill"} — out until Round ${d.ill_until_round}${d.ill_until_round >= 12 ? " (back next season)" : ` (back for Round ${d.ill_until_round + 1})`}</span>`
       : (emptySeats.length
@@ -1703,7 +1824,7 @@ function renderDriversTab(){
       ` ${dropBtn(d)}`) + `</div>`;
   }).join("") : `<p class="note">No T&R drivers — sign one from the Driver Market (paid in full, +25% research each).</p>`;
   const acHtml = acs.length ? acs.map(d =>
-    `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span> <button class="secondary" data-release-academy="${d.id}">Release</button></div>`
+    `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(Academy, ${d.age}${(d.perf !== undefined && d.perf !== null) ? `, rating ${d.perf}` : ""}, ${money(d.salary)}/yr — costs ${money(d.salary / 3 / 12)}/race)</span>${hapHtml(d)}${actHtml(d)} <button class="secondary" data-release-academy="${d.id}">Release</button></div>`
   ).join("") : `<p class="note">No academy drivers yet — add a free-agent or F2 driver aged 25 or under from the Driver Market (🎓 Academy button).</p>`;
   // v0.7.1: expired drivers, winter break only — a team's main +
   // T&R drivers whose contracts ended stay listed under their old
@@ -1741,8 +1862,23 @@ function renderDriversTab(){
         return `<div class="bar-row">${driverNameHtml(d.name, col, d.cha, false)} <span class="note">(expired ${slotLabel}, ${d.age}, ${money(d.salary)}/yr)</span> ${seatBtn(1)} ${seatBtn(2)} <button class="secondary" data-resign="${d.id}" data-seat="tr">Re-sign T&R</button></div>`;
       }).join("")
     : "";
+  // v0.8.0: team notices (e.g. a driver poached away) and the
+  // happy-driver messages — the dashboard shows the latest two,
+  // the Drivers tab shows them all.
+  const notices = (myTeam && myTeam.notices) || [];
+  const noticesHtml = notices.length ? `<h3>Team notices</h3>` + notices.slice().reverse().map(n => `<div>📣 ${esc(n.text)} <span class="note">(R${n.round} ${n.year})</span></div>`).join("") : "";
+  const msgs = (myTeam && myTeam.driver_messages) || [];
+  const msgsHtml = msgs.length ? `<h3>Driver messages</h3>` + msgs.slice().reverse().map(m => `<div>💬 <b>${esc(m.driver)}</b>: &ldquo;${esc(m.text)}&rdquo; <span class="note">(R${m.round} ${m.year})</span></div>`).join("") : "";
   box.innerHTML = `<p class="note">Your full roster — main drivers, Test &amp; Reserve, and academy juniors. Make lineup decisions here: swap or promote a T&R driver, drop a driver (break fee), or release an academy junior (free).</p>` +
+    noticesHtml + msgsHtml +
     `<h3>Main drivers</h3>${mainHtml}<h3>Test &amp; Reserve</h3>${trHtml}<h3>🎓 Driver Academy</h3>${acHtml}${expiredHtml}`;
+  // v0.8.0: activities — one per driver per round (the server
+  // enforces it too; the select is hidden once it is used).
+  box.querySelectorAll("[data-act-do]").forEach(b => b.onclick = () => {
+    const sel = box.querySelector(`.act-select[data-act-driver="${b.dataset.actDo}"]`);
+    if(!sel || !sel.value){ showErr("game-err", "Pick an activity first."); return; }
+    send({type:"activity", driver_id: b.dataset.actDo, activity_id: sel.value});
+  });
   // Drop a main or T&R driver: confirm with the exact break fee.
   box.querySelectorAll("[data-drop-driver]").forEach(b => b.onclick = () => {
     const d = (t.drivers || []).concat(trs).find(x => x.id === b.dataset.dropDriver);
@@ -1850,7 +1986,18 @@ function renderCheats(){
   $("cheats-drivers").innerHTML = `<div class="table-scroll"><table><tr><th>Driver</th><th>Pts</th></tr>` +
     (d.drivers || []).map(dr => `<tr><td><button class="tap-name" data-cheat-driver="${dr.id}">${driverNameHtml(dr.name, dr.colour, 0, false, null, dr.gender)}</button>${dr.retire_at_season_end ? ` <span style="color:#f0883e;font-weight:700" title="Retires at season end">RET</span>` : ""}</td><td>${fmtPts(dr.points)}</td></tr>`).join("") + `</table></div>`;
   $("cheats-teams").innerHTML = `<div class="table-scroll"><table><tr><th>Team</th><th>Pts</th></tr>` +
-    (d.constructors || []).map(t => `<tr><td><button class="tap-name" data-cheat-team="${t.id}">${teamNameHtml({name: t.name, colour: t.colour})}</button></td><td>${fmtPts(t.points)}</td></tr>`).join("") + `</table></div>`;
+    (d.constructors || []).map(t => `<tr><td><button class="tap-name" data-cheat-team="${t.id}">${teamNameHtml(t)}</button></td><td>${fmtPts(t.points)}</td></tr>`).join("") + `</table></div>`;
+  // v0.8.0: the extra sections — T&R, free agents, academy and F2
+  // drivers, each tappable for the same driver pop-up (rating +
+  // retirement toggle).
+  const extra = d.extra || {};
+  const extraSections = [["tr", "Test & Reserve"], ["free", "Free agents"], ["academy", "Driver Academy"], ["f2", "F2"]];
+  $("cheats-extra").innerHTML = extraSections.map(([key, label]) => {
+    const rows = extra[key] || [];
+    if(!rows.length) return `<p class="note">${label}: none.</p>`;
+    return `<p><b>${label}</b></p><div class="table-scroll"><table><tr><th>Driver</th><th>Team</th><th>Pts</th></tr>` +
+      rows.map(dr => `<tr><td><button class="tap-name" data-cheat-driver="${dr.id}">${driverNameHtml(dr.name, dr.colour, 0, false, null, dr.gender)}</button>${dr.retire_at_season_end ? ` <span style="color:#f0883e;font-weight:700" title="Retires at season end">RET</span>` : ""}</td><td>${esc(dr.team || "—")}</td><td>${fmtPts(dr.points)}</td></tr>`).join("") + `</table></div>`;
+  }).join("");
   document.querySelectorAll("#screen-cheats [data-cheat-team]").forEach(b => b.onclick = () => { pendingCheatTeam = b.dataset.cheatTeam; syncOverlays(); });
   document.querySelectorAll("#screen-cheats [data-cheat-driver]").forEach(b => b.onclick = () => { pendingCheatDriver = b.dataset.cheatDriver; syncOverlays(); });
   // The adjust pop-ups are overlay panels — keep them in sync with
@@ -1867,8 +2014,10 @@ function renderCheats(){
 // share and promotions. Relation changes happen in the winter break
 // only (v0.7.3: offering, accepting, breaking or ending a deal — a
 // break started in the winter break runs its 3-round notice into
-// the season); donations, WANTED marks, promotions and donation
-// requests work any time. v0.6.6: the research cap is gone entirely.
+// the season); donations, WANTED marks and promotions work any
+// time. v0.6.6: the research cap is gone entirely. v0.8.0: donation
+// requests are gone — asking another team for money was too easy to
+// abuse (a customer could drain its supplier dry).
 // The same render fills the tab AND the winter-break card's
 // Relationships section (renderGame calls it for the winter box), so
 // both stay in sync.
@@ -1926,7 +2075,7 @@ function renderRelationsTab(box){
     if(p.kind === "renew") return `Renew the ${sn}–${cn} deal for ${p.years} more years`;
     return p.kind;
   };
-  let html = `<p class="note">Supplier deals, donations, WANTED drivers, junior promotions and donation requests — team relationships change over time. Relation contracts — offering, accepting, breaking or ending a deal — happen in the winter break only (a break started in the winter break runs its 3-round notice into the season); donations, WANTED marks, promotions and donation requests work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
+  let html = `<p class="note">Supplier deals, donations, WANTED drivers and junior promotions — team relationships change over time. Relation contracts — offering, accepting, breaking or ending a deal — happen in the winter break only (a break started in the winter break runs its 3-round notice into the season); donations, WANTED marks and promotions work any time. A relation gives no car performance boost — it is money, contracts and micromanagement.</p>`;
   // Your relation.
   html += `<h3>Your relation</h3>`;
   if(supplier){
@@ -1953,32 +2102,9 @@ function renderRelationsTab(box){
   } else {
     html += `<p class="note">Donations go to teams you supply (or to your supplier) — propose a relation in the winter break to start one.</p>`;
   }
-  // v0.6.6: donation requests — ask a team on your supply tie for a
-  // donation of a set amount, any time; the other side accepts or
-  // declines. A bot team answers on the spot (it accepts when it can
-  // pay and still keep $5M in the bank).
-  html += `<h3>Donation requests</h3>`;
-  const dreqs = c.donation_requests || [];
-  const dIncoming = dreqs.filter(r => r.target_team_id === myTeamId);
-  const dOutgoing = dreqs.filter(r => r.requester_team_id === myTeamId);
-  if(donateTargets.length){
-    html += `<p class="note">Ask a team on your supply tie for a donation — they can accept or decline it.</p><select class="rel-dreq-team">${donateTargets.map(x => `<option value="${x.id}">${x.label}</option>`).join("")}</select> <input class="rel-dreq-amount" type="number" min="0.1" step="0.1" value="1.0" style="width:90px"> $M <button data-rel-dreq>Request donation</button>`;
-  }
-  if(dIncoming.length){
-    html += dIncoming.map(r => {
-      const req = teamById(r.requester_team_id);
-      return `<div class="bar-row"><b>${req ? esc(req.name) : "?"}</b> asks you for a <b>${money(r.amount)}</b> donation <button data-rel-dreq-respond="accept" data-request-id="${r.id}">Accept</button> <button class="secondary" data-rel-dreq-respond="decline" data-request-id="${r.id}">Decline</button></div>`;
-    }).join("");
-  }
-  if(dOutgoing.length){
-    html += dOutgoing.map(r => {
-      const tgt = teamById(r.target_team_id);
-      return `<div class="bar-row">Waiting for <b>${tgt ? esc(tgt.name) : "?"}</b>: your request for a <b>${money(r.amount)}</b> donation</div>`;
-    }).join("");
-  }
-  if(!donateTargets.length && !dIncoming.length && !dOutgoing.length){
-    html += `<p class="note">Donation requests go along a supply tie — propose a relation in the winter break to start one.</p>`;
-  }
+  // v0.8.0: donation requests are gone — asking another team for
+  // money was too easy to abuse (a customer could drain its
+  // supplier dry). Voluntary donations above still work any time.
   // Propose a new relation (winter break only). v0.6.5: a team that
   // already HAS a supplier (customer or junior) cannot offer supply
   // contracts to other teams — the propose controls are hidden and
@@ -2158,17 +2284,6 @@ function renderRelationsTab(box){
   });
   box.querySelectorAll("[data-rel-wanted-remove]").forEach(b => b.onclick = () =>
     send({type:"remove_wanted", driver_id: b.dataset.driverId, target_team_id: b.dataset.targetTeam}));
-  // v0.6.6: donation requests.
-  const dreqBtn = box.querySelector("[data-rel-dreq]");
-  if(dreqBtn) dreqBtn.onclick = () => {
-    const sel = box.querySelector(".rel-dreq-team");
-    const amt = box.querySelector(".rel-dreq-amount");
-    const amount = amt ? parseFloat(amt.value) : NaN;
-    if(!sel || !sel.value || !amount || amount <= 0){ showErr("game-err", "Pick a team and an amount over $0M."); return; }
-    send({type:"request_donation", target_team_id: sel.value, amount});
-  };
-  box.querySelectorAll("[data-rel-dreq-respond]").forEach(b => b.onclick = () =>
-    send({type:"respond_donation", request_id: b.dataset.requestId, accept: b.dataset.relDreqRespond === "accept"}));
   // v0.6.6: promote a junior driver into the parent team.
   const promoteBtn = box.querySelector("[data-rel-promote]");
   if(promoteBtn) promoteBtn.onclick = () => {
@@ -2255,6 +2370,10 @@ function renderTabs(){
     return `<div class="market-seat">${btn}<span class="note">${breakdown}</span></div>`;
   };
   const signBtns = d => {
+    // v0.8.0: a failed secret meeting means a cooldown — no signing
+    // buttons until it lifts (the server refuses a new meeting too).
+    const cdLeft = ((room.career && room.career.my_cooldowns) || {})[d.id];
+    if(cdLeft) return `<div class="market-seats"><span class="note">🤫 Secret meeting failed — try again in ${cdLeft} round${cdLeft === 1 ? "" : "s"}.</span></div>`;
     const verb = isWB ? "Offer" : "Seat";
     const trVerb = isWB ? "Offer T&R" : "T&R";
     // v0.4.2: academy — any unsigned driver aged 25 or under with no
@@ -2304,7 +2423,17 @@ function renderTabs(){
         if(wantedBadge) break;
       }
     }
-    return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}${wantedBadge}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
+    // v0.8.0: secret-meeting state for poaches — another team's
+    // main/T&R driver, or another team's academy junior. The
+    // meeting is per target; the sign pop-up handles each seat/T&R.
+    const myMeetings = (c.my_meetings || {});
+    const isPoachRow = ((d.status === "f1" || d.status === "tr") && d.team_id && d.team_id !== myTeamId)
+      || ((d.status === "free" || d.status === "f2") && d.academy_team_id && d.academy_team_id !== myTeamId);
+    const meet = myMeetings[d.id];
+    let meetTag = "";
+    if(meet) meetTag = ` <span class="pill adv">🤫 Meeting agreed — ${meet.target === "tr" ? "T&R" : "Seat " + meet.seat}${meet.bribe ? ` · ${money(meet.bribe)} bribe promised` : ""}</span>`;
+    else if(isPoachRow) meetTag = ` <span class="note">🤫 Poaching needs a secret meeting first</span>`;
+    return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}${wantedBadge}${meetTag}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
   };
   // v0.7.1: an ill driver sitting in T&R while they recover does not
   // count toward the fine the market warns about (the server counts
@@ -2323,7 +2452,7 @@ function renderTabs(){
     freeAgents.map(marketRow).join("") + `</table></div>` +
     `<h3 class="market-group">F2 (${f2List.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
     f2List.map(marketRow).join("") + `</table></div>` +
-    (isWB ? "" : `<h3 class="market-group">Other teams' drivers — poaching</h3><p class="note">Signing one of these costs their break fee (shown), on top of any seat break fee.</p><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Team</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    (isWB ? "" : `<h3 class="market-group">Other teams' drivers — poaching</h3><p class="note">Signing one of these costs their break fee (shown), on top of any seat break fee. Poaching needs a secret meeting first ($0.5M to set up) — tap a seat to request one; once the driver agrees, the signing goes through with the usual costs. A driver may also want a bribe — the amount is shown when you request the meeting.</p><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Team</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
     poachable.map(marketRow).join("") + `</table></div>`);
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => {
     pendingSign = { driver_id: b.dataset.sign, target: b.dataset.target, seat: b.dataset.seat ? parseInt(b.dataset.seat) : null, wb: isWB };
@@ -2394,12 +2523,14 @@ function renderTabs(){
   // v0.5: F2 drivers are coloured by their academy F1 team
   // (academy_team_id); juniors with no academy team stay neutral,
   // like free agents in the F1 table. Same sort and listing as before.
+  // v0.8.0: a T&R driver still racing in F2 (f2_tr) takes their T&R
+  // team's colour instead, with a small T&R badge.
   $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; const v = f1Val(d); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") + "</table></div>" +
     `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td><td>${t.season_wins || 0}</td></tr>`).join("") + "</table></div>" +
     `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const nameColour = atm ? atm.colour : null; const trTag = d.f2_tr ? ` <span class="pill adv" title="Also holds an F1 Test & Reserve contract — still racing F2">T&R</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!atm, atm ? atm.colour : null)}${trTag}</td><td>${atm ? teamNameHtml(atm) : "—"}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
+    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const trTeam = d.f2_tr ? teamById(d.team_id) : null; const nameColour = trTeam ? trTeam.colour : (atm ? atm.colour : null); const barTeam = trTeam || atm; const trTag = d.f2_tr ? ` <span class="f2-tr-badge" title="Also holds an F1 Test & Reserve contract — still racing F2">T&R</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!barTeam, barTeam ? barTeam.colour : null)}${trTag}</td><td>${atm ? teamNameHtml(atm) : (trTeam ? teamNameHtml(trTeam) : "—")}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
   // Chart
   if(room.chart_on){
     const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
@@ -2481,7 +2612,19 @@ function renderTabs(){
   // (The full-GP view is an overlay pop-up now — clicking a cell
   // sets viewingGP and syncOverlays opens the panel; the "Back to
   // history" button inside it is wired by the #ov-root delegation.)
-  $("history-box").innerHTML = `<h3>Race history</h3>${hist}<h3>Champion history</h3>${champs}<h3>Transfers</h3>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}<h3>Retirement rumours</h3><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance starts at age 30 and rises gently with age — but a driver in a better position is less likely to go: performing well, scoring a big share of the team's points, in a frontrunning car, with a high reputation, or in a team on the way up. There is no maximum retirement age — a driver still performing at 50+ stays.</p></div>`;
+  // v0.8.0: History keeps race + champion history; transfers,
+  // retirement rumours and the new media feed live in Media &
+  // Rumours. Every section is collapsible.
+  $("history-box").innerHTML = `<details open><summary>Race history</summary>${hist}</details><details open><summary>Champion history</summary>${champs}</details>`;
+  // v0.8.0: the media feed — newest first, PlanetF1-style rumours
+  // (some true, some not), plus transfers and retirement rumours.
+  const media = [...(c.media_rumours || [])].reverse();
+  const mediaHtml = media.length
+    ? media.map(m => `<div>${esc(m.text)} <span class="note">(${m.year ? `R${m.round} ${m.year}` : ""}${m.kind && m.kind !== "rumour" ? ` · ${esc(m.kind)}` : ""})</span></div>`).join("")
+    : `<p class="note">No media rumours yet — the press starts talking once the season gets going.</p>`;
+  $("media-box").innerHTML = `<details open><summary>Media rumours</summary>${mediaHtml}</details>` +
+    `<details><summary>Driver transfers</summary>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}</details>` +
+    `<details><summary>Retirement rumours</summary><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance starts at age 30 and rises gently with age — but a driver in a better position is less likely to go: performing well, scoring a big share of the team's points, in a frontrunning car, with a high reputation, or in a team on the way up. There is no maximum retirement age — a driver still performing at 50+ stays.</p></div></details>`;
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
   // v0.7.0: clicking a champion year asks the server for that
   // season's full standings (see the season_detail message).
@@ -2536,8 +2679,8 @@ $("btn-save").onclick = () => send({type:"save_career", name: $("save-name").val
 $("btn-note-add").onclick = () => { const v = $("note-text").value; if(!v.trim()){ showErr("game-err", "Write something first."); return; } send({type:"save_note", text: v}); };
 $("btn-cheats-back").onclick = () => { cheatsOpen = false; renderAll(); const nb = document.querySelector('[data-tab="notes"]'); if(nb) nb.click(); };
 $("btn-leave").onclick = () => { sessionStorage.removeItem("f1code"); sessionStorage.removeItem("f1player"); location.href = "/"; };
-document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
-  document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("sel"));
+document.querySelectorAll(".tab-group button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tab-group button").forEach(x => x.classList.remove("sel"));
   b.classList.add("sel");
   document.querySelectorAll(".tab").forEach(t => t.classList.add("hidden"));
   $("tab-" + b.dataset.tab).classList.remove("hidden");
