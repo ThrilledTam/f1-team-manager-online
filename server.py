@@ -1,5 +1,5 @@
 """
-F1 Team Manager Online — v0.7.3 (beta)
+F1 Team Manager Online — v0.8.0 (beta)
 ===================================
 A clean online rebuild of Matthew's PyCharm F1 team-manager simulator
 (Main.py is the source of truth; MainMod.py is ignored).
@@ -67,8 +67,26 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
                                                      # contract_years 1-4,
                                                      # picked by the signer;
                                                      # may poach another
-                                                     # team's driver
-    sign_tr      {driver_id, contract_years}  # sign a T&R driver (1-4 yrs)
+                                                     # team's driver — a
+                                                     # poach needs an agreed
+                                                     # secret meeting first
+                                                     # (see request_meeting)
+    sign_tr      {driver_id, contract_years}  # sign a T&R driver (1-4 yrs);
+                                              # a poach needs an agreed
+                                              # secret meeting first
+    request_meeting {driver_id, target, bribe?}  # v0.8.0: a secret meeting
+                                              # with a driver under contract
+                                              # (or in an academy) with
+                                              # another team, before poaching
+                                              # them — $0.5M to set up;
+                                              # target {kind: "seat"|"tr",
+                                              # seat?}; bribe is the upfront
+                                              # signing cost offered, paid
+                                              # on signing if they agree
+    activity     {driver_id, activity_id}    # v0.8.0: do an activity with
+                                              # one of your at-least-happy
+                                              # drivers (one per driver per
+                                              # round, costs money)
     release_driver {driver_id}            # v0.4.3: release a main or T&R
                                           # driver — break fee = main-driver
                                           # formula, shown upfront, round only
@@ -80,10 +98,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
     promote_tr   {tr_driver_id, seat}  # promote a T&R driver to an empty seat
     donate       {recipient_team_id, amount}  # any time, to a team you supply
                                               # (v0.6.5: either way along a tie)
-    request_donation {target_team_id, amount}  # v0.6.6: ask a team on your
-                                              # supply tie for a donation
-    respond_donation {request_id, accept}      # v0.6.6: answer a donation
-                                              # request sent to your team
+                                              # v0.8.0: donation requests are
+                                              # gone — a gift is the only way
+                                              # money moves between teams
     propose_relation {target_team_id, kind, supplier_team_id, years}
                                           # winter break: customer / junior /
                                           # upgrade / downgrade / end / renew
@@ -100,8 +117,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
                                           # into a main seat or T&R, any time;
                                           # target {kind: "seat"|"tr", seat?}
     winter_offers {offers}             # winter break: [{driver_id, target,
-                                       # seat, years}] — max 3, max 2 main,
-                                       # max 1 T&R
+                                       # seat, years, bribe?}] — max 3, max 2
+                                       # main, max 1 T&R; bribe is the
+                                       # optional upfront signing cost
     winter_next  {}                    # winter break: ready for the round
     advance      {}
     start_next_season {}                  # winter break, when the 3 rounds
@@ -137,6 +155,9 @@ Protocol (JSON over one WebSocket per player, endpoint /ws):
                                           # season, on request
     cheat_state  {cheat}                  # v0.7.4: the menu data, on request
                                           # or after a change
+    gate         {message}                # v0.8.0: the advance gate refused
+                                          # (an empty main seat) — the client
+                                          # shows it as a pop-up, not a toast
     pong         {}
 """
 import asyncio
@@ -154,6 +175,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from f1 import game
 from f1.models import CUSTOM_COLOURS
+from f1.rules import happiness_word
 from f1.saves import (
     delete_save, import_save, list_saves, load_save, save_career, save_meta,
 )
@@ -325,6 +347,19 @@ def my_team_public(room, player_id):
         return None
     career = room["career"]
     out = {k: v for k, v in team.items() if k != "perf"}
+    # v0.8.0: a driver's happiness/loyalty with their OWN team — the
+    # private channel only (public_state strips these from the
+    # broadcast). The per-team dicts never leave the server: only
+    # the current values for this team, plus the level word.
+    def _with_relation(d):
+        d["happiness"] = game.happiness_with(d, team["id"])
+        d["loyalty"] = game.loyalty_with(d, team["id"])
+        d["happiness_word"] = happiness_word(d["happiness"])
+        d.pop("happiness_by_team", None)
+        d.pop("loyalty_by_team", None)
+        d.pop("tuning_against_streak", None)
+        d.pop("tr_bench_races", None)
+        return d
     # v0.7.4: the team's Notes travel here — the private channel.
     # public_state strips them, so no other team's browser ever
     # receives them (see game.public_state).
@@ -354,6 +389,8 @@ def my_team_public(room, player_id):
             # Drivers tab can show the Drop cost upfront (same
             # formula as a main-driver replacement).
             d["break_fee"] = game.break_fee_for_driver(career, d)
+            # v0.8.0: happiness/loyalty with their own team (private).
+            _with_relation(d)
             # v0.5: development contribution (same helper do_develop
             # uses) — the Drivers tab shows it per driver.
             d["dev_contrib"] = game.driver_dev_contrib(d)
@@ -370,6 +407,8 @@ def my_team_public(room, player_id):
         # v0.4.3: same break fee — releasing a T&R driver costs
         # exactly what breaking a main driver's contract costs.
         d["break_fee"] = game.break_fee_for_driver(career, d)
+        # v0.8.0: happiness/loyalty with their own team (private).
+        _with_relation(d)
         # v0.5: development contribution (same helper do_develop
         # uses) — the Drivers tab shows it per driver.
         d["dev_contrib"] = game.driver_dev_contrib(d)
@@ -383,7 +422,18 @@ def my_team_public(room, player_id):
         d.pop("rep", None)
         d.pop("qual_time", None)
         d.pop("race_time", None)
+        # v0.8.0: happiness/loyalty with their own team (private).
+        _with_relation(d)
         out["academy_drivers"].append(d)
+    # v0.8.0: the activity catalogue (one source of truth — the
+    # client renders the Drivers-tab select from this), the team's
+    # notices (poach notifications for the Drivers tab) and the
+    # happy-driver messages for this team.
+    out["activities"] = [dict(a) for a in game.ACTIVITIES]
+    out["notices"] = [n for n in career.get("team_notices") or []
+                      if n.get("team_id") == team["id"]]
+    out["driver_messages"] = [m for m in career.get("driver_messages") or []
+                              if m.get("team_id") == team["id"]]
     # v0.5: the team's driver development factor (1 + main 2 + T&R
     # contributions) — the Research tab shows it near Develop, and
     # do_develop uses the same helper, so display and mechanic agree.
@@ -496,7 +546,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.7.5"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.8.0"}
 
 
 @app.get("/api/saves")
@@ -928,16 +978,27 @@ async def ws_endpoint(ws: WebSocket):
                 # has advanced. The escape hatch when a human has
                 # disconnected and is not coming back (the advance
                 # itself waits for ALL humans, connected or not).
+                # v0.8.0: the advance gate blocks the host too — an
+                # empty main seat anywhere stops the weekend, and
+                # the refusal goes out as a pop-up, not a toast.
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
                 else:
-                    ok, _raced, why = game.host_skip_advance(
-                        career, player["player_id"], is_host, rng=rng)
-                    if not ok:
-                        await send_error(ws, why)
+                    blockers = game.advance_blockers(career)
+                    if blockers:
+                        await ws.send_json({
+                            "type": "gate",
+                            "message": ("Cannot advance yet — "
+                                        + ", ".join(blockers)
+                                        + " is empty. Fill the seat first.")})
                     else:
-                        await ws.send_json({"type": "action", "action": "host_advance",
-                                            "ok": True, "message": why})
+                        ok, _raced, why = game.host_skip_advance(
+                            career, player["player_id"], is_host, rng=rng)
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": "host_advance",
+                                                "ok": True, "message": why})
                     await broadcast(room)
 
             elif mtype in ("add_academy", "release_academy"):
@@ -967,16 +1028,15 @@ async def ws_endpoint(ws: WebSocket):
 
             elif mtype in ("donate", "propose_relation", "respond_relation",
                            "break_relation", "set_wanted", "remove_wanted",
-                           "promote_junior_driver", "request_donation",
-                           "respond_donation"):
-                # v0.6: team relationships. Donations, WANTED marks,
-                # junior promotions and donation requests work any
-                # time (round or winter break); relation proposals /
-                # answers are winter-break only, and unilateral
-                # breaks are any time with a 3-round notice (v0.6.6)
-                # — the game functions enforce that and return a
-                # clear message otherwise. (v0.6.6: the research cap
-                # is gone entirely — no set_research_cap any more.)
+                           "promote_junior_driver"):
+                # v0.6: team relationships. Donations, WANTED marks and
+                # junior promotions work any time (round or winter
+                # break); relation proposals / answers are winter-break
+                # only, and unilateral breaks are any time with a
+                # 3-round notice (v0.6.6) — the game functions enforce
+                # that and return a clear message otherwise. (v0.8.0:
+                # donation requests are gone — donate is the only way
+                # money moves between teams now.)
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
                 elif not team:
@@ -1016,14 +1076,6 @@ async def ws_endpoint(ws: WebSocket):
                             msg.get("junior_driver_id"),
                             (target.get("kind"), target.get("seat")),
                             msg.get("swap_driver_id"))
-                    elif mtype == "request_donation":
-                        ok, why = game.request_donation(
-                            career, team["id"], msg.get("target_team_id"),
-                            msg.get("amount"), rng=rng)
-                    elif mtype == "respond_donation":
-                        ok, why = game.respond_donation(
-                            career, team["id"], msg.get("request_id"),
-                            msg.get("accept"))
                     if not ok:
                         await send_error(ws, why)
                     else:
@@ -1034,7 +1086,7 @@ async def ws_endpoint(ws: WebSocket):
             elif mtype in ("research", "develop", "tuning", "reg_research",
                            "reg_adapt", "sign_driver", "sign_tr",
                            "swap_driver", "promote_tr", "release_driver",
-                           "advance",
+                           "advance", "request_meeting", "activity",
                            "winter_offers", "winter_next"):
                 if not room["started"] or not career:
                     await send_error(ws, "The career has not started yet.")
@@ -1077,6 +1129,22 @@ async def ws_endpoint(ws: WebSocket):
                         ok, why = game.sign_tr_driver(career, team["id"],
                                                       msg.get("driver_id"),
                                                       msg.get("contract_years", 2))
+                    elif mtype == "request_meeting":
+                        # v0.8.0: a secret meeting before a poach —
+                        # $0.5M to set up, the driver accepts or
+                        # declines on the spot.
+                        target = msg.get("target") or {}
+                        ok, why = game.request_meeting(
+                            career, team["id"], msg.get("driver_id"),
+                            (target.get("kind"), target.get("seat")),
+                            msg.get("bribe", 0.0), rng=rng)
+                    elif mtype == "activity":
+                        # v0.8.0: an activity with one of your
+                        # at-least-happy drivers (one per driver per
+                        # round, costs money).
+                        ok, why = game.do_activity(
+                            career, team["id"], msg.get("driver_id"),
+                            msg.get("activity_id"))
                     elif mtype == "release_driver":
                         # v0.4.3: release (drop) a main or T&R driver —
                         # break fee = main-driver formula. v0.6.5: round
@@ -1101,6 +1169,18 @@ async def ws_endpoint(ws: WebSocket):
                         # human team is ready (bots are always ready).
                         ok, _advanced, why = game.winter_next(career, team["id"], rng=rng)
                     elif mtype == "advance":
+                        # v0.8.0: the advance gate — an empty main seat
+                        # stops the weekend, and the refusal goes out
+                        # as a pop-up (not a toast) naming the seat.
+                        blockers = game.advance_blockers(career, team["id"])
+                        if blockers:
+                            await ws.send_json({
+                                "type": "gate",
+                                "message": ("Cannot advance yet — "
+                                            + ", ".join(blockers)
+                                            + " is empty. Fill the seat first.")})
+                            await broadcast(room)
+                            continue
                         ok, _raced, why = game.advance_team(
                             career, team["id"], rng=rng)
                     if not ok:
