@@ -129,6 +129,28 @@ def make_driver(data, status="free", team_id=None):
         # v0.7.5: the cheats-menu 'Retire at season end' toggle
         # (only settable while the master is on).
         "retire_at_season_end": False,
+        # v0.8.0: driver happiness + loyalty, per (driver, team)
+        # relation — floats 1.0-5.0 (level = rounded value: 1 very
+        # unhappy, 2 unhappy, 3 neutral, 4 happy, 5 very happy).
+        # "happiness" / "loyalty" are the CURRENT values (with the
+        # driver's current or last team); the *_by_team dicts keep
+        # the value for every team the driver has been at, so a
+        # re-signing can average the current value with the value
+        # from the last stint there. A free agent or unaffiliated F2
+        # driver sits at neutral (3.0) until newly signed. Loyalty
+        # starts low (1.0) on a brand-new relation and grows with
+        # tenure, faster when happy. tuning_against_streak counts
+        # consecutive races the driver has been disadvantaged by
+        # tuning; tr_bench_races counts consecutive races benched
+        # as T&R; activity_round is the round key of the last
+        # activity done with the driver (one per driver per round).
+        "happiness": 3.0,
+        "loyalty": 3.0,
+        "happiness_by_team": {},
+        "loyalty_by_team": {},
+        "tuning_against_streak": 0,
+        "tr_bench_races": 0,
+        "activity_round": None,
         # v0.7.1: the slot the driver last held on a team ("seat1" /
         # "seat2" / "tr") — set when they leave a team slot so the
         # winter-break Drivers tab can offer expired drivers for
@@ -278,12 +300,23 @@ def new_career_dict(name, host_nickname, chart_on=True):
         # years}. Proposals are winter-break only and expire when the
         # next season starts (see start_next_season).
         "relation_proposals": [],
-        # v0.6.6: pending donation requests — {id, requester_team_id,
-        # target_team_id, amount}. Either side of a supply tie may
-        # ask the other for a donation of a set amount, any time; the
-        # other side accepts or declines (see game.respond_donation).
-        # Requests expire when the next season starts.
-        "donation_requests": [],
+        # v0.8.0: secret meetings before poaching — meetings is the
+        # list of AGREED meetings [{requester_team_id, driver_id,
+        # target, seat, bribe, year, round}] (consumed on signing,
+        # cleared at season end); meeting_cooldowns maps
+        # "team_id:driver_id" -> rounds left before that team may
+        # try that driver again after a declined meeting.
+        # media_rumours is the PlanetF1-style rumour feed
+        # [{text, kind, year, round}] for the Media & Rumours tab;
+        # driver_messages is the happy-driver messages to their own
+        # manager [{driver, team_id, text, year, round}]; team_notices
+        # is the per-team notices shown in the losing team's Drivers
+        # tab after a poach [{team_id, text, year, round}].
+        "meetings": [],
+        "meeting_cooldowns": {},
+        "media_rumours": [],
+        "driver_messages": [],
+        "team_notices": [],
         "last_season": None,
         # v0.7.0: one snapshot per completed season, for the clickable
         # champion years (see game.get_season_detail) — {year,

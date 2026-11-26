@@ -73,8 +73,6 @@ TEAM_REP_MAX = 100.0
 TEAM_REP_WIN_BONUS = 0.3       # per race win, at race time
 TEAM_REP_DONATION_RATE = 0.2   # rep points per $M given / received
 TEAM_REP_DONATION_CAP = 1.0    # max rep gain per single donation
-TEAM_REP_ACCEPT_BASE = 0.25    # bot donation acceptance at rep 0
-TEAM_REP_ACCEPT_PER_POINT = 0.01  # acceptance grows this much per rep point
 TEAM_REP_PROPOSAL_FLOOR = 25.0    # below this, bots cool on proposals
 TEAM_REP_PROPOSAL_MAX_CUT = 0.6   # at rep 0 a bot's acceptance is x0.4
 TEAM_REP_QUIET_DROP_STEP = 15.0   # rep points below 50 per +1 offer drop
@@ -118,20 +116,6 @@ def adjust_team_rep(team, delta):
         return
     team["team_rep"] = min(TEAM_REP_MAX,
                            max(TEAM_REP_MIN, team_rep_of(team) + delta))
-
-
-def donation_accept_probability(requester_rep):
-    """v0.7.0: a bot donor's chance of accepting a donation request,
-    layered on top of the keep-$5M hard gate: 0.25 at rep 0, 0.75 at
-    rep 50, 0.95 at rep 100 (clamped to [0.10, 0.95])."""
-    return min(0.95, max(0.10, TEAM_REP_ACCEPT_BASE
-                         + TEAM_REP_ACCEPT_PER_POINT * requester_rep))
-
-
-def donation_amount_factor(requester_rep):
-    """v0.7.0: how much of the requested amount a bot donor actually
-    gives — the full amount at rep >= 50, half at rep 0."""
-    return min(1.0, max(0.5, 0.5 + requester_rep / 100.0))
 
 
 def wb_rep_drop(team_rep):
@@ -236,6 +220,22 @@ def build_new_career(name, host_nickname, chart_on=True):
         d["mv"] = float(entry["salary"])
         d["perf"] = float(entry["perf"])
         d["academy_team_id"] = team["id"]
+    # v0.8.0: seed the happiness/loyalty relations for the 2026
+    # grid — every driver with a team (main, T&R) or an academy
+    # starts neutral (3.0) with medium loyalty (3.0: these are
+    # established relations, not fresh signings — a brand-new
+    # signing starts at loyalty 1.0 instead). Free agents and
+    # unaffiliated F2 drivers keep empty relation maps and sit at
+    # neutral until signed.
+    for d in career["drivers"]:
+        rel_team = (d.get("team_id")
+                    if d.get("status") in ("f1", "tr")
+                    else d.get("academy_team_id"))
+        if rel_team:
+            d["happiness_by_team"][rel_team] = 3.0
+            d["loyalty_by_team"][rel_team] = 3.0
+            d["happiness"] = 3.0
+            d["loyalty"] = 3.0
     # v0.5: career Grand Prix totals — real totals at the end of the
     # 2025 season (data.CAREER_STATS). These persist across seasons
     # and team changes, and drive the development contribution.
@@ -930,6 +930,10 @@ def _sign_driver_common(career, team, d, contract_years, as_tr=False):
     # junior and a contracted driver at the same time, and the
     # academy slot frees up.
     d["academy_team_id"] = None
+    # v0.8.0: the happiness/loyalty relation with the new team —
+    # reset to neutral for a brand-new team, averaged with the last
+    # stint for a team the driver has been at before.
+    apply_signing_relation(career, d, team["id"])
 
 
 def _release_driver(career, driver, team):
@@ -1027,6 +1031,27 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     cost = quote["total"]
     if cost > team["money"]:
         return False, f"Need ${cost:.2f}M to sign {d['name']}."
+    # v0.8.0: poaching needs a secret meeting first — an agreed
+    # meeting for this team, driver and seat. The meeting's bribe is
+    # paid on signing, on top of the poaching costs.
+    meeting = None
+    bribe = 0.0
+    if is_poach(career, team_id, d):
+        meeting = agreed_meeting(career, team_id, driver_id, ("seat", seat))
+        if meeting is None:
+            return False, (f"You need a secret meeting with {d['name']} "
+                           f"before you can sign them — request one from "
+                           f"the Driver Market.")
+        bribe = float(meeting.get("bribe") or 0.0)
+        if cost + bribe > team["money"]:
+            return False, (f"Need ${cost + bribe:.2f}M to sign {d['name']} "
+                           f"(${cost:.2f}M fees + ${bribe:.2f}M bribe).")
+    # The losing team: the driver's current team (a main/T&R poach)
+    # or their academy team (an academy poach — _sign_driver_common
+    # clears the academy link, so it is captured here).
+    academy_team = None
+    if d.get("academy_team_id") and d["academy_team_id"] != team["id"]:
+        academy_team = get_team(career, d["academy_team_id"])
     # Poaching: the driver leaves their current team first (their
     # points scored FOR that team stay there, banked — real F1).
     source_team = None
@@ -1041,6 +1066,10 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
             _recompute_team_points(career, source_team)
             career["transfers"].append(
                 f"{d['name']} left {source_team['name']} (poached by {team['name']})")
+    if academy_team is not None:
+        career["transfers"].append(
+            f"{d['name']} left {academy_team['name']}'s academy "
+            f"(poached by {team['name']})")
     team["money"] -= cost
     if current:
         _release_driver(career, current, team)
@@ -1058,10 +1087,29 @@ def sign_driver(career, team_id, driver_id, seat, contract_years=2):
     career["transfers"].append(f"{d['name']} signed for {team['name']}")
     # v0.6: a WANTED signing pays the parent's reward to the junior team.
     _pay_wanted_reward(career, team, d)
-    if cost > 0:
+    # v0.8.0: the agreed meeting is consumed, the bribe is paid, and
+    # the losing team is notified in three places — the Transfers
+    # feed (above), a Media entry, and a notice in their Drivers tab.
+    if meeting is not None:
+        career["meetings"] = [m for m in career.get("meetings") or []
+                              if m is not meeting]
+        if bribe > 0:
+            team["money"] = round(team["money"] - bribe, 2)
+        losing_team = source_team or academy_team
+        if losing_team is not None:
+            add_media_entry(
+                career,
+                f"{d['name']} has left {losing_team['name']} for "
+                f"{team['name']} — a secret meeting sealed the move.",
+                "transfer")
+            add_team_notice(
+                career, losing_team["id"],
+                f"{d['name']} left your team for {team['name']}.")
+    if cost > 0 or bribe > 0:
+        extra = (f" + ${bribe:.2f}M bribe" if bribe > 0 else "")
         return True, (f"{d['name']} signed for {team['name']} ✓ "
                       f"(Seat {seat}, {contract_years}-year contract) "
-                      f"— ${cost:.2f}M break fee")
+                      f"— ${cost:.2f}M break fee{extra}")
     return True, (f"{d['name']} signed for {team['name']} ✓ "
                   f"(Seat {seat}, {contract_years}-year contract) — Free")
 
@@ -1105,6 +1153,29 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
     cost = quote["total"]
     if cost > team["money"]:
         return False, f"Need ${cost:.2f}M to sign {d['name']}."
+    # v0.8.0: poaching needs a secret meeting first — an agreed
+    # meeting for this team, driver and the T&R slot (this is also
+    # the mutual-exclusion gate: an academy junior of another team
+    # cannot be signed as T&R without a meeting). The meeting's
+    # bribe is paid on signing, on top of the poaching costs.
+    meeting = None
+    bribe = 0.0
+    if is_poach(career, team_id, d):
+        meeting = agreed_meeting(career, team_id, driver_id, ("tr", None))
+        if meeting is None:
+            return False, (f"You need a secret meeting with {d['name']} "
+                           f"before you can sign them — request one from "
+                           f"the Driver Market.")
+        bribe = float(meeting.get("bribe") or 0.0)
+        if cost + bribe > team["money"]:
+            return False, (f"Need ${cost + bribe:.2f}M to sign {d['name']} "
+                           f"(${cost:.2f}M fees + ${bribe:.2f}M bribe).")
+    # The losing team: the driver's current team (a main/T&R poach)
+    # or their academy team (an academy poach — _sign_driver_common
+    # clears the academy link, so it is captured here).
+    academy_team = None
+    if d.get("academy_team_id") and d["academy_team_id"] != team["id"]:
+        academy_team = get_team(career, d["academy_team_id"])
     source_team = None
     if d.get("status") in ("f1", "tr") and d.get("team_id"):
         source_team = get_team(career, d["team_id"])
@@ -1117,6 +1188,10 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
             _recompute_team_points(career, source_team)
             career["transfers"].append(
                 f"{d['name']} left {source_team['name']} (poached by {team['name']})")
+    if academy_team is not None:
+        career["transfers"].append(
+            f"{d['name']} left {academy_team['name']}'s academy "
+            f"(poached by {team['name']})")
     team["money"] -= cost
     _sign_driver_common(career, team, d, contract_years, as_tr=True)
     d["status"] = "tr"
@@ -1125,11 +1200,799 @@ def sign_tr_driver(career, team_id, driver_id, contract_years=2):
         f"{d['name']} signed for {team['name']} as Test & Reserve")
     # v0.6: a WANTED signing pays the parent's reward to the junior team.
     _pay_wanted_reward(career, team, d)
-    if cost > 0:
+    # v0.8.0: the agreed meeting is consumed, the bribe is paid, and
+    # the losing team is notified in three places — the Transfers
+    # feed (above), a Media entry, and a notice in their Drivers tab.
+    if meeting is not None:
+        career["meetings"] = [m for m in career.get("meetings") or []
+                              if m is not meeting]
+        if bribe > 0:
+            team["money"] = round(team["money"] - bribe, 2)
+        losing_team = source_team or academy_team
+        if losing_team is not None:
+            add_media_entry(
+                career,
+                f"{d['name']} has left {losing_team['name']} for "
+                f"{team['name']} — a secret meeting sealed the move.",
+                "transfer")
+            add_team_notice(
+                career, losing_team["id"],
+                f"{d['name']} left your team for {team['name']}.")
+    if cost > 0 or bribe > 0:
+        extra = (f" + ${bribe:.2f}M bribe" if bribe > 0 else "")
         return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
-                      f"({contract_years}-year contract) — ${cost:.2f}M break fee")
+                      f"({contract_years}-year contract) — ${cost:.2f}M break fee{extra}")
     return True, (f"{d['name']} signed for {team['name']} as Test & Reserve ✓ "
                   f"({contract_years}-year contract) — Free")
+
+
+# ---------------------------------------------------------------------------
+# v0.8.0: driver happiness + loyalty, activities, bribes, secret
+# meetings, media rumours (Matthew's locked answers, 2026-11-25).
+# Happiness and loyalty are floats 1.0-5.0 per (driver, team)
+# relation (rules.happiness_level: 1 very unhappy .. 5 very happy).
+# They are HIDDEN — never in the public broadcast, never in the
+# Driver Market; a team's own drivers carry their current values
+# in the private my_team message only (server.py).
+# ---------------------------------------------------------------------------
+
+# v0.8.0: a secret meeting costs $0.5M to set up, deducted when
+# requested (whether the driver accepts or declines).
+MEETING_COST = 0.5
+# v0.8.0: the leak chance on any meeting (accepted or declined).
+MEETING_LEAK_CHANCE = 0.15
+# v0.8.0: the leak's costs — the approaching team's hidden rep
+# drops 2.0, the driver's hidden rep drops 0.1, the leaking
+# driver's happiness/loyalty with their current team drop 0.5 each,
+# and the OTHER driver's loyalty to that team rises 0.3.
+MEETING_LEAK_TEAM_REP_LOSS = 2.0
+MEETING_LEAK_DRIVER_REP_LOSS = 0.1
+MEETING_LEAK_HAPPINESS_DROP = 0.5
+MEETING_LEAK_LOYALTY_DROP = 0.5
+MEETING_LEAK_OTHER_LOYALTY_GAIN = 0.3
+# v0.8.0: re-signing declines — an unhappy driver turns down their
+# own team's re-signing offer 70% of the time, a very unhappy one
+# 90% (re-signing only; seat swaps are the team's call).
+RESIGN_DECLINE_UNHAPPY = 0.70
+RESIGN_DECLINE_VERY_UNHAPPY = 0.90
+# v0.8.0: a happy driver messages their manager after a race with
+# a 15% chance per race (at most 2 messages per team per race).
+DRIVER_MESSAGE_CHANCE = 0.15
+# v0.8.0: loyalty growth per race — +0.04 base, x2 when happy,
+# x3 when very happy.
+LOYALTY_GROWTH_PER_RACE = 0.04
+# v0.8.0: long T&R benching — happiness starts eroding after 12
+# races benched (-0.02/race), faster after 24 races (-0.05/race,
+# about two seasons).
+TR_BENCH_EROSION_START = 12
+TR_BENCH_EROSION_FAST = 24
+TR_BENCH_EROSION_SLOW = 0.02
+TR_BENCH_EROSION_FAST_RATE = 0.05
+
+# v0.8.0: the activities a manager can do with an at-least-happy
+# driver (level >= 4) — one per driver per round. Realistic F1-team
+# activities, each with a money cost and a happiness/loyalty effect.
+# (Max's design, correctable by Matthew.)
+ACTIVITIES = [
+    {"id": "simulator", "name": "Simulator session", "cost": 0.3,
+     "happiness": 0.15, "loyalty": 0.05},
+    {"id": "team_dinner", "name": "Team dinner", "cost": 0.2,
+     "happiness": 0.15, "loyalty": 0.10},
+    {"id": "media_day", "name": "Media day together", "cost": 0.1,
+     "happiness": 0.10, "loyalty": 0.05},
+    {"id": "fitness_camp", "name": "Fitness camp", "cost": 0.4,
+     "happiness": 0.10, "loyalty": 0.10},
+    {"id": "factory_tour", "name": "Factory tour with the engineers",
+     "cost": 0.2, "happiness": 0.15, "loyalty": 0.05},
+    {"id": "sponsor_event", "name": "Sponsor event", "cost": 0.1,
+     "happiness": 0.05, "loyalty": 0.10},
+    {"id": "karting", "name": "Karting day", "cost": 0.3,
+     "happiness": 0.20, "loyalty": 0.05},
+    {"id": "charity", "name": "Charity visit", "cost": 0.2,
+     "happiness": 0.15, "loyalty": 0.10},
+    {"id": "principal_chat", "name": "One-on-one with the team principal",
+     "cost": 0.1, "happiness": 0.20, "loyalty": 0.15},
+    {"id": "home_gp", "name": "Home Grand Prix hospitality", "cost": 0.5,
+     "happiness": 0.25, "loyalty": 0.15},
+    {"id": "esports", "name": "Esports / sim-racing night", "cost": 0.1,
+     "happiness": 0.10, "loyalty": 0.05},
+    {"id": "altitude_camp", "name": "Altitude training camp", "cost": 0.6,
+     "happiness": 0.15, "loyalty": 0.20},
+    {"id": "photoshoot", "name": "Team photoshoot", "cost": 0.2,
+     "happiness": 0.10, "loyalty": 0.05},
+    {"id": "golf", "name": "Golf day", "cost": 0.3,
+     "happiness": 0.15, "loyalty": 0.10},
+]
+
+# v0.8.0: happy-driver messages to their own manager (shown at
+# the top of the dashboard and in the Drivers tab, own team only).
+DRIVER_MESSAGES = [
+    "Really enjoying my time with the team — the atmosphere in the garage is brilliant.",
+    "I love working with this group. The car is coming to me more every weekend.",
+    "The team has been fantastic with me. I want to repay them on track.",
+    "I feel at home here. Let's keep pushing — there's more in this car.",
+    "The support from the factory has been unreal. I'm proud to drive for this team.",
+    "Every weekend I feel more part of this team. The belief is there.",
+]
+
+# v0.8.0: PlanetF1-style media rumour templates. {d} = driver,
+# {t} = their team, {r} = a rival team. Grounded rumours are drawn
+# from the real state (an unhappy driver, a very happy driver, a
+# team on the move); the "linked with" rumours are random pairings
+# and may be true or false.
+MEDIA_TRANSFER_TEMPLATES = [
+    "{d} is understood to be unsettled at {t} — {r} are said to be monitoring the situation.",
+    "Sources close to {d} insist they are happy at {t}, despite links to {r}.",
+    "{t} are braced for an approach for {d} after another difficult weekend.",
+    "{d} has been linked with a shock move to {r} — though {t} insist they are going nowhere.",
+    "Paddock whispers: {r} have asked about {d}'s availability at {t}.",
+]
+MEDIA_PERFORMANCE_TEMPLATES = [
+    "{t} have turned a corner — the garage is buzzing after their recent run.",
+    "Questions are being asked at {t} after a run of weekends without points.",
+    "The pressure is mounting on {t} — the board wants results, and fast.",
+    "{t} are the team on the move — rivals are starting to take notice.",
+]
+MEDIA_HAPPY_TEMPLATES = [
+    "{d} has praised {t}: 'I love it here — the team feels like family.'",
+    "{d} says {t} are 'the best group I have ever worked with'.",
+]
+MEDIA_UNHAPPY_TEMPLATES = [
+    "Tensions are said to be growing between {d} and {t} behind closed doors.",
+    "{d} was spotted deep in conversation with {t}'s team principal after the race.",
+    "All is not well at {t} — {d} cut a frustrated figure in the paddock.",
+]
+
+
+def happiness_with(d, team_id):
+    """v0.8.0: a driver's stored happiness (1.0-5.0) with one team —
+    3.0 (neutral) when there is no relation with that team."""
+    if not d or not team_id:
+        return 3.0
+    return float((d.get("happiness_by_team") or {}).get(team_id, 3.0))
+
+
+def loyalty_with(d, team_id):
+    """v0.8.0: a driver's stored loyalty (1.0-5.0) with one team —
+    3.0 (medium) when there is no relation with that team."""
+    if not d or not team_id:
+        return 3.0
+    return float((d.get("loyalty_by_team") or {}).get(team_id, 3.0))
+
+
+def _bump_relation(d, team_id, dh, dl):
+    """v0.8.0: move a driver's happiness/loyalty with one team by
+    the deltas, clamped to [1.0, 5.0]. The stored relation moves;
+    when this is the driver's current team, the current value moves
+    too."""
+    hb = d.setdefault("happiness_by_team", {})
+    lb = d.setdefault("loyalty_by_team", {})
+    cur_h = float(hb.get(team_id, d.get("happiness", 3.0)))
+    cur_l = float(lb.get(team_id, d.get("loyalty", 3.0)))
+    new_h = max(1.0, min(5.0, cur_h + dh))
+    new_l = max(1.0, min(5.0, cur_l + dl))
+    hb[team_id] = round(new_h, 2)
+    lb[team_id] = round(new_l, 2)
+    if d.get("team_id") == team_id or d.get("academy_team_id") == team_id:
+        d["happiness"] = round(new_h, 2)
+        d["loyalty"] = round(new_l, 2)
+
+
+def apply_signing_relation(career, d, team_id):
+    """v0.8.0: set a driver's happiness/loyalty when they sign with
+    a team. A team they have never been at: reset to neutral (3.0)
+    with fresh loyalty (1.0 — they just arrived). A team they were
+    at before: average the current happiness with the happiness
+    from the last stint there (.5 rounds to nearest, halves up);
+    loyalty the same way. Called from _sign_driver_common (every
+    market / winter-break / auto-fill signing) and _attach_driver
+    (junior promotions). Same-team moves never call it."""
+    hb = d.setdefault("happiness_by_team", {})
+    lb = d.setdefault("loyalty_by_team", {})
+    if team_id in hb:
+        cur_h = float(d.get("happiness", 3.0))
+        cur_l = float(d.get("loyalty", 3.0))
+        new_h = float(int((cur_h + float(hb[team_id])) / 2.0 + 0.5))
+        new_l = float(int((cur_l + float(lb.get(team_id, 3.0))) / 2.0 + 0.5))
+    else:
+        new_h, new_l = 3.0, 1.0
+    d["happiness"] = new_h
+    d["loyalty"] = new_l
+    hb[team_id] = new_h
+    lb[team_id] = new_l
+    # A fresh relation starts with no tuning streak / bench time.
+    d["tuning_against_streak"] = 0
+    d["tr_bench_races"] = 0
+
+
+def is_poach(career, team_id, d):
+    """v0.8.0: True when signing this driver means taking them from
+    another team — a main/T&R driver under contract elsewhere, or
+    an academy junior of another team. Your own academy junior,
+    free agents and F2 drivers are NOT poaches."""
+    if d.get("status") in ("f1", "tr") and d.get("team_id") \
+            and d["team_id"] != team_id:
+        return True
+    if d.get("academy_team_id") and d["academy_team_id"] != team_id:
+        return True
+    return False
+
+
+def bribe_want_for(career, offering_team_id, d):
+    """v0.8.0: the bribe ($M) this driver wants from the offering
+    team (rules.bribe_want). For a poach it is based on the
+    happiness/loyalty with the driver's CURRENT team (or academy
+    team); for a free agent / own academy junior, on the relation
+    with the offering team."""
+    if d.get("status") in ("f1", "tr") and d.get("team_id") \
+            and d["team_id"] != offering_team_id:
+        rel = d["team_id"]
+    elif d.get("academy_team_id") \
+            and d["academy_team_id"] != offering_team_id:
+        rel = d["academy_team_id"]
+    else:
+        rel = offering_team_id
+    return rules_mod.bribe_want(happiness_with(d, rel),
+                                loyalty_with(d, rel))
+
+
+def agreed_meeting(career, team_id, driver_id, target):
+    """v0.8.0: the team's AGREED meeting with this driver for this
+    target (("seat", 1|2) or ("tr", None)), or None. A meeting for
+    Seat 1 does not cover Seat 2 — the driver agreed to a seat."""
+    for m in career.get("meetings") or []:
+        if m.get("requester_team_id") != team_id:
+            continue
+        if m.get("driver_id") != driver_id:
+            continue
+        if m.get("target") != target[0]:
+            continue
+        if target[0] == "seat" and m.get("seat") != target[1]:
+            continue
+        return m
+    return None
+
+
+def meeting_cooldown_left(career, team_id, driver_id):
+    """v0.8.0: rounds left before this team may try this driver
+    again after a declined meeting (0 = free to try)."""
+    return int((career.get("meeting_cooldowns") or {}).get(
+        f"{team_id}:{driver_id}", 0))
+
+
+def tick_meeting_cooldowns(career):
+    """v0.8.0: one round passes — every meeting cooldown ticks
+    down by 1 (winter-break rounds count as rounds)."""
+    cds = career.get("meeting_cooldowns") or {}
+    for key in list(cds):
+        cds[key] = int(cds[key]) - 1
+        if cds[key] <= 0:
+            del cds[key]
+
+
+def meeting_accept_probability(career, team, d, target, bribe=0.0):
+    """v0.8.0: the driver's chance of accepting a secret meeting
+    (and the move it leads to). Base 0.5, then:
+      happiness with their current team: very unhappy +0.30,
+        unhappy +0.20, neutral +0.05, happy -0.20, very happy -0.30
+      competitiveness: the approaching team's constructors' place
+        vs the current team's, +0.05 per place better (cap +0.25),
+        -0.05 per place worse (cap -0.25); a star (rep >= 4) will
+        not join a bottom-3 team (-0.15)
+      seat: a main seat +0.15, a T&R slot -0.15 (drivers always
+        prefer a main seat over a T&R role)
+      loyalty with their current team: -0.08 per point above 3,
+        +0.08 per point below 3
+      team reputation: (approaching rep - current rep) x 0.002,
+        clamped to +/-0.10
+      bribe: if the driver is happy and the bribe is below their
+        want, the chance halves (a happy driver without a bribe is
+        much harder to lure); at or above the want, no penalty.
+    Clamped to [0.02, 0.98]. A happy driver approached by an
+    ADJACENT team refuses outright before this roll — see
+    request_meeting."""
+    rel_team_id = d.get("team_id") or d.get("academy_team_id")
+    cur_team = get_team(career, rel_team_id) if rel_team_id else None
+    hap = happiness_with(d, rel_team_id)
+    loy = loyalty_with(d, rel_team_id)
+    lvl = rules_mod.happiness_level(hap)
+    p = 0.5
+    p += {1: 0.30, 2: 0.20, 3: 0.05, 4: -0.20, 5: -0.30}[lvl]
+    if cur_team is not None:
+        cur_pos = constructor_pos(career, cur_team["id"])
+        app_pos = constructor_pos(career, team["id"])
+        p += max(-0.25, min(0.25, 0.05 * (cur_pos - app_pos)))
+        if d.get("rep", 2.5) >= 4.0 and app_pos >= len(career["teams"]) - 2:
+            p -= 0.15
+    p += 0.15 if target[0] == "seat" else -0.15
+    p += -0.08 * (loy - 3.0)
+    if cur_team is not None:
+        p += max(-0.10, min(0.10,
+                            (team_rep_of(team) - team_rep_of(cur_team)) * 0.002))
+    want = bribe_want_for(career, team["id"], d)
+    if lvl >= 4 and want > 0 and (bribe or 0.0) < want:
+        p *= 0.5
+    return max(0.02, min(0.98, p))
+
+
+def _meeting_leak(career, team, d, rel_team_id):
+    """v0.8.0: a secret meeting leaked — a Media entry, reputation
+    loss for the approaching team (-2.0) and the driver (-0.1 rep),
+    the leaking driver's happiness/loyalty with their current team
+    drop 0.5 each, the OTHER driver's loyalty to that team rises
+    0.3, and a BOT current team shifts its tuning in favour of the
+    other driver automatically (a human team sees the leak in Media
+    and sets tuning themselves)."""
+    cur_team = get_team(career, rel_team_id) if rel_team_id else None
+    cur_name = cur_team["name"] if cur_team else "their team"
+    add_media_entry(
+        career,
+        f"LEAKED: {team['name']} held a secret meeting with {d['name']} "
+        f"({cur_name}) — the paddock is talking.", "leak")
+    adjust_team_rep(team, -MEETING_LEAK_TEAM_REP_LOSS)
+    race_mod.adjust_driver_rep(d, -MEETING_LEAK_DRIVER_REP_LOSS)
+    if cur_team is None:
+        return
+    _bump_relation(d, rel_team_id, -MEETING_LEAK_HAPPINESS_DROP,
+                   -MEETING_LEAK_LOYALTY_DROP)
+    mains = [x for x in team_drivers(career, cur_team)
+             if x and x["id"] != d["id"]]
+    if not mains:
+        return
+    other = mains[0]
+    _bump_relation(other, rel_team_id, 0.0, MEETING_LEAK_OTHER_LOYALTY_GAIN)
+    if cur_team.get("is_ai"):
+        cur = int(cur_team.get("tuning") or 0)
+        if other["id"] == cur_team.get("driver1_id"):
+            cur_team["tuning"] = min(3, cur + 1)
+        elif other["id"] == cur_team.get("driver2_id"):
+            cur_team["tuning"] = max(-3, cur - 1)
+
+
+def request_meeting(career, team_id, driver_id, target, bribe=0.0, rng=None):
+    """v0.8.0: request a secret meeting with a driver under contract
+    (or in an academy) with another team, BEFORE poaching them.
+    Costs $0.5M to set up, deducted when requested. The driver
+    accepts or declines on RNG (see meeting_accept_probability). A
+    happy driver approached by an ADJACENT team (immediately above
+    or below in the constructors' standings) refuses outright — no
+    meeting, no charge. Any meeting (either outcome) may leak (15%):
+    a Media entry + reputation loss + the current-team reaction
+    (see _meeting_leak). A failed meeting means a 1-5 round
+    cooldown before that team may try that driver again (happier /
+    more loyal -> longer). An agreed meeting is stored until the
+    signing consumes it (or the season ends)."""
+    rng = rng or random
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    # v0.8.0: meetings are allowed in the winter break too — the
+    # break is the only window where an academy junior can be
+    # poached (main/T&R drivers under contract cannot be offered
+    # at all), so the meeting that gates the poach must be
+    # requestable there. A meeting agreed in the break is consumed
+    # by the signing, like any other.
+    d = get_driver(career, driver_id)
+    if not d:
+        return False, "No such driver."
+    if not is_poach(career, team_id, d):
+        return False, (f"{d['name']} is not under contract with another "
+                       f"team — no meeting needed, just sign them.")
+    if not (isinstance(target, (tuple, list)) and len(target) == 2):
+        return False, "Pick a main seat or a T&R slot for the meeting."
+    if target[0] == "seat":
+        if target[1] not in (1, 2):
+            return False, "A main-seat meeting needs seat 1 or 2."
+    elif target[0] != "tr":
+        return False, "A meeting must target a main seat or a T&R slot."
+    left = meeting_cooldown_left(career, team_id, driver_id)
+    if left > 0:
+        return False, (f"{d['name']} is not taking your calls — try again "
+                       f"in {left} round{'s' if left != 1 else ''}.")
+    if agreed_meeting(career, team_id, driver_id, target):
+        return False, (f"You already have an agreed meeting with "
+                       f"{d['name']} — sign them.")
+    try:
+        bribe = float(bribe or 0.0)
+    except (TypeError, ValueError):
+        return False, "The bribe must be a number."
+    if bribe < 0:
+        return False, "The bribe cannot be negative."
+    if bribe > team["money"]:
+        return False, (f"Not enough money for a ${bribe:.2f}M bribe — "
+                       f"you have ${team['money']:.2f}M.")
+    rel_team_id = d.get("team_id") or d.get("academy_team_id")
+    # A happy driver turns down an approach from a neighbouring team
+    # outright — the meeting never takes place, so nothing is charged.
+    if rel_team_id and rules_mod.happiness_level(
+            happiness_with(d, rel_team_id)) >= 4:
+        cur_pos = constructor_pos(career, rel_team_id)
+        app_pos = constructor_pos(career, team_id)
+        if abs(cur_pos - app_pos) == 1:
+            cur_team = get_team(career, rel_team_id)
+            return False, (f"{d['name']} is happy at "
+                           f"{cur_team['name'] if cur_team else 'their team'} "
+                           f"and will not even take a meeting with a "
+                           f"neighbouring team.")
+    if team["money"] < MEETING_COST:
+        return False, (f"Not enough money for a secret meeting — it costs "
+                       f"${MEETING_COST:.2f}M.")
+    team["money"] = round(team["money"] - MEETING_COST, 2)
+    p = meeting_accept_probability(career, team, d, target, bribe)
+    if rng.random() < p:
+        career.setdefault("meetings", []).append({
+            "requester_team_id": team_id, "driver_id": driver_id,
+            "target": target[0],
+            "seat": target[1] if target[0] == "seat" else None,
+            "bribe": round(bribe, 2),
+            "year": career.get("year"), "round": career.get("round")})
+        outcome = (f"{d['name']} agreed to the secret meeting ✓ — "
+                   f"you can sign them now")
+        if bribe > 0:
+            outcome += (f" (a ${bribe:.2f}M bribe will be paid on "
+                        f"signing)")
+    else:
+        hap = happiness_with(d, rel_team_id)
+        loy = loyalty_with(d, rel_team_id)
+        wait = 1 + int(round(2.0 * (hap - 1.0) / 4.0
+                             + 2.0 * (loy - 1.0) / 4.0))
+        wait = max(1, min(5, wait))
+        career.setdefault("meeting_cooldowns", {})[
+            f"{team_id}:{driver_id}"] = wait
+        outcome = (f"{d['name']} turned the meeting down — you cannot "
+                   f"try them again for {wait} "
+                   f"round{'s' if wait != 1 else ''}.")
+    if rng.random() < MEETING_LEAK_CHANCE:
+        _meeting_leak(career, team, d, rel_team_id)
+        outcome += " (The meeting leaked — the paddock is talking.)"
+    return True, outcome
+
+
+def _activity_round_key(career):
+    """v0.8.0: the round key for the one-activity-per-driver-per-round
+    limit — a racing round is "2029R3", a winter-break round is
+    "2029WB2" (so the break's three rounds each allow an activity)."""
+    if career.get("phase") == "winter_break":
+        return f"{career.get('year')}WB{career.get('wb_round', 1)}"
+    return f"{career.get('year')}R{career.get('round', 1)}"
+
+
+def do_activity(career, team_id, driver_id, activity_id):
+    """v0.8.0: do an activity with one of your drivers (main, T&R or
+    academy). Only an at-least-happy driver (level >= 4), one
+    activity per driver per round, and the team must afford the
+    cost. Raises that driver's happiness and loyalty with the team."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    d = get_driver(career, driver_id)
+    if not d:
+        return False, "No such driver."
+    if d.get("team_id") != team_id and d.get("academy_team_id") != team_id:
+        return False, f"{d['name']} is not one of your drivers."
+    act = next((a for a in ACTIVITIES if a["id"] == activity_id), None)
+    if not act:
+        return False, "No such activity."
+    if rules_mod.happiness_level(happiness_with(d, team_id)) < 4:
+        return False, (f"{d['name']} is not happy enough for activities "
+                       f"yet — they need to be at least Happy.")
+    key = _activity_round_key(career)
+    if d.get("activity_round") == key:
+        return False, (f"You already did an activity with {d['name']} "
+                       f"this round.")
+    if act["cost"] > team["money"]:
+        return False, (f"Not enough money — {act['name']} costs "
+                       f"${act['cost']:.2f}M.")
+    team["money"] = round(team["money"] - act["cost"], 2)
+    _bump_relation(d, team_id, act["happiness"], act["loyalty"])
+    d["activity_round"] = key
+    return True, (f"{act['name']} with {d['name']} ✓ — they are happier "
+                  f"({rules_mod.happiness_word(happiness_with(d, team_id))})")
+
+
+def add_media_entry(career, text, kind="rumour"):
+    """v0.8.0: append one entry to the Media & Rumours feed (newest
+    last in storage, newest first in the UI). Kept to the newest 40."""
+    entries = career.setdefault("media_rumours", [])
+    entries.append({"text": text, "kind": kind,
+                    "year": career.get("year"), "round": career.get("round")})
+    if len(entries) > 40:
+        del entries[:len(entries) - 40]
+
+
+def add_team_notice(career, team_id, text):
+    """v0.8.0: a notice for one team's Drivers tab (the losing team
+    after a poach). Kept to the newest 40 across all teams."""
+    notes = career.setdefault("team_notices", [])
+    notes.append({"team_id": team_id, "text": text,
+                  "year": career.get("year"), "round": career.get("round")})
+    if len(notes) > 40:
+        del notes[:len(notes) - 40]
+
+
+def _constructors_positions_by_round(career):
+    """v0.8.0: per-round constructors' positions, derived from
+    race_history — for each race entry (in order), the cumulative
+    team points within that season, ranked (points desc, team name
+    for stability). Returns one {team_id: pos} dict per race, in
+    chronological order. Short history = short list (the trend uses
+    whatever is available)."""
+    series = []
+    cum = {}
+    cur_year = None
+    for entry in career.get("race_history") or []:
+        year = entry.get("year")
+        if year != cur_year:
+            cur_year = year
+            cum = {}
+        for row in entry.get("race") or []:
+            tid = row.get("team_id")
+            if not tid:
+                continue
+            cum[tid] = cum.get(tid, 0) + (row.get("points") or 0)
+        ranked = sorted(career["teams"],
+                        key=lambda t: (-cum.get(t["id"], 0), t["name"]))
+        series.append({t["id"]: i + 1 for i, t in enumerate(ranked)})
+    return series
+
+
+def _teammate_gap_12(career, d, team):
+    """v0.8.0: (points_gap, finish_gap) for a main driver vs their
+    teammate over the last 12 races — positive means the driver is
+    BEHIND (teammate scored more / finished better on average).
+    From race_history: per-round points and finish positions by
+    driver id. The teammate is the driver's CURRENT teammate (their
+    points over the window count wherever they raced them)."""
+    entries = (career.get("race_history") or [])[-12:]
+    if not entries:
+        return (0, 0.0)
+    mate_id = team["driver2_id"] if team.get("driver1_id") == d["id"] \
+        else team.get("driver1_id")
+    if not mate_id:
+        return (0, 0.0)
+    my_pts = mate_pts = 0
+    my_fin = mate_fin = 0
+    my_n = mate_n = 0
+    for entry in entries:
+        for row in entry.get("race") or []:
+            if row.get("driver_id") == d["id"]:
+                my_pts += row.get("points") or 0
+                if isinstance(row.get("pos"), int):
+                    my_fin += row["pos"]
+                    my_n += 1
+            elif row.get("driver_id") == mate_id:
+                mate_pts += row.get("points") or 0
+                if isinstance(row.get("pos"), int):
+                    mate_fin += row["pos"]
+                    mate_n += 1
+    finish_gap = 0.0
+    if my_n and mate_n:
+        finish_gap = (my_fin / my_n) - (mate_fin / mate_n)
+    return (mate_pts - my_pts, finish_gap)
+
+
+def generate_media_rumours(career, rng=None):
+    """v0.8.0: two PlanetF1-style rumours after every race — one
+    grounded in the real state, one random pairing (which may be
+    true or false). Grounded: an unhappy driver (a transfer rumour
+    about them), else a very happy driver (praise), else a team on
+    the move over the last 3 races (a performance rumour)."""
+    rng = rng or random
+    drivers = [d for d in career["drivers"]
+               if d.get("status") in ("f1", "tr") and d.get("team_id")]
+    teams = career["teams"]
+    if not drivers or not teams:
+        return
+    by_id = {d["id"]: d for d in drivers}
+
+    def _team_name(tid):
+        t = get_team(career, tid)
+        return t["name"] if t else "a rival team"
+
+    def _rival_of(tid):
+        others = [t for t in teams if t["id"] != tid]
+        return rng.choice(others)["name"] if others else "a rival team"
+
+    # (a) grounded: an unhappy driver first, then a very happy one,
+    # then a team on the move.
+    unhappy = [d for d in drivers
+               if rules_mod.happiness_level(
+                   happiness_with(d, d.get("team_id"))) <= 2]
+    very_happy = [d for d in drivers
+                  if rules_mod.happiness_level(
+                      happiness_with(d, d.get("team_id"))) >= 5]
+    if unhappy:
+        d = rng.choice(unhappy)
+        add_media_entry(career, rng.choice(MEDIA_TRANSFER_TEMPLATES).format(
+            d=d["name"], t=_team_name(d["team_id"]),
+            r=_rival_of(d["team_id"])))
+    elif very_happy:
+        d = rng.choice(very_happy)
+        add_media_entry(career, rng.choice(MEDIA_HAPPY_TEMPLATES).format(
+            d=d["name"], t=_team_name(d["team_id"])))
+    else:
+        series = _constructors_positions_by_round(career)
+        mover = None
+        if len(series) >= 2:
+            moves = {}
+            for tid in series[-1]:
+                moves[tid] = series[-4].get(tid, series[-1][tid]) \
+                    - series[-1][tid] if len(series) >= 4 \
+                    else series[0].get(tid, series[-1][tid]) - series[-1][tid]
+            best = max(moves.values()) if moves else 0
+            worst = min(moves.values()) if moves else 0
+            if best >= 1:
+                mover = max(moves, key=lambda k: moves[k])
+            elif worst <= -1:
+                mover = min(moves, key=lambda k: moves[k])
+        if mover:
+            add_media_entry(career, rng.choice(
+                MEDIA_PERFORMANCE_TEMPLATES).format(t=_team_name(mover)))
+        else:
+            t = rng.choice(teams)
+            add_media_entry(career, rng.choice(
+                MEDIA_PERFORMANCE_TEMPLATES).format(t=t["name"]))
+    # (b) random pairing — a transfer link that may be true or false.
+    d = rng.choice(drivers)
+    add_media_entry(career, rng.choice(MEDIA_TRANSFER_TEMPLATES).format(
+        d=d["name"], t=_team_name(d["team_id"]),
+        r=_rival_of(d["team_id"])))
+
+
+def update_driver_happiness(career, rng=None):
+    """v0.8.0: after every race, every driver associated with a team
+    updates their happiness (and loyalty) with that team:
+      (a) performance trend — the team's constructors' position
+          change over 12 races (weight 0.75) and 48 races (0.25),
+          +/-0.03 per place, clamped to +/-0.15/race, rep-adjusted:
+          a high-rep team declining is an upset (x1.5), a low-rep
+          team improving is an upset (x1.5); the expected direction
+          is x0.5, the middle of the grid x1.0;
+      (b) tuning — the disadvantaged driver loses happiness, scaled
+          by |tuning| and by how long the disadvantage has run:
+          -0.03 x |tuning| x (1 + 0.12 x streak) per race, so tune 1
+          drifts slowly (about -0.64 over a full season, faster
+          after) and tune 3 makes a driver unhappy within ~6 races;
+          the favoured driver gains +0.015 x |tuning| per race;
+      (c) kept in a main seat despite poor performances — the points
+          + finishing gap to the teammate over 12 races, bigger gap
+          = happier (gratitude for being kept): up to +0.08/race,
+          rep-adjusted (a higher-rep driver behind their teammate
+          is an upset, so the gratitude is bigger);
+      (d) long T&R benching — after 12 races benched, -0.02/race;
+          after 24 races (about two seasons), -0.05/race.
+    Loyalty grows with tenure: +0.04/race, x2 when happy, x3 when
+    very happy. All values clamp to [1.0, 5.0]. Happy drivers (level
+    >= 4) may also message their manager (15% per race, at most 2
+    per team per race)."""
+    rng = rng or random
+    series = _constructors_positions_by_round(career)
+    n_teams = len(career["teams"])
+    # The "expected" constructors' order from the teams' main
+    # drivers' average hidden rep — for the rep adjustment.
+    rep_rank = {}
+    for team in career["teams"]:
+        mains = [d for d in team_drivers(career, team) if d]
+        rep_rank[team["id"]] = (sum(d.get("rep", 2.5) for d in mains)
+                                / len(mains)) if mains else 2.5
+    rep_order = sorted(career["teams"], key=lambda t: -rep_rank[t["id"]])
+    expected_pos = {t["id"]: i + 1 for i, t in enumerate(rep_order)}
+    raced_ids = {r.get("driver_id")
+                 for r in (career.get("last_race") or [])}
+    for team in career["teams"]:
+        team_id = team["id"]
+        # --- (a) trend delta for this team ---
+        trend_delta = 0.0
+        if series:
+            now = series[-1].get(team_id, n_teams)
+
+            def _pos_back(n):
+                idx = max(0, len(series) - 1 - n)
+                return series[idx].get(team_id, now)
+
+            t12 = _pos_back(12) - now  # positive = improved
+            t48 = _pos_back(48) - now
+            combined = 0.75 * t12 + 0.25 * t48
+            exp = expected_pos.get(team_id, now)
+            if combined > 0:
+                mult = 1.5 if exp >= n_teams - 2 else \
+                    (0.5 if exp <= 3 else 1.0)
+            elif combined < 0:
+                mult = 1.5 if exp <= 3 else \
+                    (0.5 if exp >= n_teams - 2 else 1.0)
+            else:
+                mult = 1.0
+            trend_delta = max(-0.15, min(0.15, combined * 0.03 * mult))
+        mains = [d for d in team_drivers(career, team) if d]
+        tuning = int(team.get("tuning") or 0)
+        assoc = list(mains)
+        assoc += team_tr_drivers(career, team)
+        assoc += team_academy_drivers(career, team)
+        messages_this_race = 0
+        for d in assoc:
+            hap = happiness_with(d, team_id)
+            loy = loyalty_with(d, team_id)
+            lvl = rules_mod.happiness_level(hap)
+            # Loyalty grows with tenure, faster when happy.
+            growth = LOYALTY_GROWTH_PER_RACE * (
+                3.0 if lvl >= 5 else (2.0 if lvl >= 4 else 1.0))
+            new_loy = max(1.0, min(5.0, loy + growth))
+            delta = trend_delta
+            if d in mains:
+                # --- (b) tuning ---
+                is_d1 = d["id"] == team.get("driver1_id")
+                disadvantaged = (tuning > 0 and not is_d1) or \
+                    (tuning < 0 and is_d1)
+                favoured = (tuning > 0 and is_d1) or \
+                    (tuning < 0 and not is_d1)
+                if disadvantaged:
+                    streak = int(d.get("tuning_against_streak") or 0) + 1
+                    d["tuning_against_streak"] = streak
+                    delta += -0.03 * abs(tuning) * (1 + 0.12 * streak)
+                else:
+                    d["tuning_against_streak"] = 0
+                    if favoured:
+                        delta += 0.015 * abs(tuning)
+                # --- (c) kept despite poor performances ---
+                mate = next((m for m in mains if m["id"] != d["id"]), None)
+                if mate is not None:
+                    points_gap, finish_gap = _teammate_gap_12(
+                        career, d, team)
+                    if points_gap > 0 or finish_gap > 0:
+                        rep_diff = d.get("rep", 2.5) - mate.get("rep", 2.5)
+                        mult = max(0.3, 1.0 + 0.3 * rep_diff)
+                        delta += min(0.08, 0.003 * points_gap
+                                     + 0.008 * finish_gap) * mult
+            if d.get("status") == "tr":
+                # --- (d) long T&R benching ---
+                if d["id"] in raced_ids:
+                    d["tr_bench_races"] = 0
+                else:
+                    bench = int(d.get("tr_bench_races") or 0) + 1
+                    d["tr_bench_races"] = bench
+                    if bench > TR_BENCH_EROSION_FAST:
+                        delta += -TR_BENCH_EROSION_FAST_RATE
+                    elif bench > TR_BENCH_EROSION_START:
+                        delta += -TR_BENCH_EROSION_SLOW
+            new_hap = max(1.0, min(5.0, hap + delta))
+            hb = d.setdefault("happiness_by_team", {})
+            lb = d.setdefault("loyalty_by_team", {})
+            hb[team_id] = round(new_hap, 2)
+            lb[team_id] = round(new_loy, 2)
+            d["happiness"] = round(new_hap, 2)
+            d["loyalty"] = round(new_loy, 2)
+            # Happy drivers sometimes message their manager.
+            if rules_mod.happiness_level(new_hap) >= 4 \
+                    and messages_this_race < 2 \
+                    and rng.random() < DRIVER_MESSAGE_CHANCE:
+                career.setdefault("driver_messages", []).append({
+                    "driver": d["name"], "team_id": team_id,
+                    "text": rng.choice(DRIVER_MESSAGES),
+                    "year": career.get("year"),
+                    "round": career.get("round")})
+                if len(career.get("driver_messages") or []) > 30:
+                    del career["driver_messages"][:len(
+                        career["driver_messages"]) - 30]
+                messages_this_race += 1
+
+
+def advance_blockers(career, team_id=None):
+    """v0.8.0: the advance gate — a team with fewer than 2 valid
+    main-seat drivers cannot advance to a race weekend. Returns the
+    list of blocker strings (empty = clear). With team_id, only that
+    team's seats are checked (the Advance button); without it, every
+    team is checked (the host override). A seat counts as filled
+    when a driver occupies it — an ill driver still occupies their
+    seat (a substitute covers it), so illness never blocks."""
+    out = []
+    teams = [get_team(career, team_id)] if team_id else list(career["teams"])
+    for team in teams:
+        if not team:
+            continue
+        for seat, slot in ((1, "driver1_id"), (2, "driver2_id")):
+            if not team.get(slot):
+                out.append(f"{team['name']} Seat {seat}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1209,128 +2072,14 @@ def donate(career, donor_team_id, recipient_team_id, amount):
     donor["money"] = round(donor["money"] - amount, 2)
     recipient["money"] = round(recipient["money"] + amount, 2)
     # v0.7.0: giving helps your reputation — +0.2 per $M, capped at
-    # +1.0 per transfer. (The recipient loses nothing here: this is
-    # a gift, not a request — only a donation RECEIVED through a
-    # request costs the requester reputation, see respond_donation.)
+    # +1.0 per transfer. (v0.8.0: donation REQUESTS are gone entirely
+    # — a gift is now the only way money moves between teams, so
+    # there is no requester-reputation cost any more.)
     adjust_team_rep(donor, min(TEAM_REP_DONATION_RATE * amount,
                                 TEAM_REP_DONATION_CAP))
     career["transfers"].append(
         f"{donor['name']} donated ${amount:.2f}M to {recipient['name']}")
     return True, f"Donated ${amount:.2f}M to {recipient['name']} ✓"
-
-
-def request_donation(career, requester_team_id, target_team_id, amount, rng=None):
-    """v0.6.6: ask a team on your supply tie for a donation of a set
-    amount, any time. The other side accepts or declines (see
-    respond_donation) — a bot target decides on the spot: it accepts
-    when it can pay and still keep $5M in the bank. One pending
-    request per (requester, target) pair. Requests expire when the
-    next season starts (see start_next_season), and die with the
-    relation (see _end_relation)."""
-    requester = get_team(career, requester_team_id)
-    target = get_team(career, target_team_id)
-    if not requester or not target:
-        return False, "No such team."
-    if requester["id"] == target["id"]:
-        return False, "A team cannot ask itself for a donation."
-    try:
-        amount = float(amount)
-    except (TypeError, ValueError):
-        return False, "Amount must be a number."
-    if amount <= 0:
-        return False, "The requested donation must be more than $0M."
-    if relation_between(career, requester["id"], target["id"]) is None:
-        return False, (f"{requester['name']} and {target['name']} have no "
-                       f"supply relation — donation requests only go "
-                       f"along a supply tie.")
-    reqs = career.setdefault("donation_requests", [])
-    if any(r["requester_team_id"] == requester["id"]
-           and r["target_team_id"] == target["id"] for r in reqs):
-        return False, "There is already a pending donation request between these teams."
-    req = {"id": "dr-" + uuid.uuid4().hex[:10],
-           "requester_team_id": requester["id"],
-           "target_team_id": target["id"],
-           "amount": round(amount, 2)}
-    reqs.append(req)
-    career["transfers"].append(
-        f"{requester['name']} asked {target['name']} for a "
-        f"${amount:.2f}M donation")
-    if target.get("is_ai"):
-        # A bot target decides on the spot (mirror relation
-        # proposals) — the requester hears the answer, not the
-        # responder's wording. v0.7.0: the keep-$5M rule is still
-        # the HARD gate, but a low-reputation requester may still
-        # be refused on probability alone — and when accepted, the
-        # bot gives only a rep-scaled share of what was asked
-        # (full at rep >= 50, half at rep 0). The granted amount is
-        # stored on the request, so respond_donation moves — and
-        # logs — exactly that.
-        rng = rng or random
-        accept = target["money"] - amount >= BOT_POOR_MONEY
-        if accept:
-            accept = rng.random() < donation_accept_probability(
-                team_rep_of(requester))
-        if accept:
-            granted = round(amount * donation_amount_factor(
-                team_rep_of(requester)), 2)
-            req["amount"] = granted
-        ok, _why = respond_donation(career, target["id"], req["id"], accept)
-        if ok and accept:
-            return True, (f"{target['name']} accepted — "
-                          f"${req['amount']:.2f}M received ✓")
-        return True, f"{target['name']} declined the donation request."
-    return True, f"Donation request sent to {target['name']} — waiting for their answer."
-
-
-def respond_donation(career, responder_team_id, request_id, accept):
-    """v0.6.6: answer a pending donation request — only the team the
-    request was sent to may answer, any time. Accepting moves the
-    money (blocked when the responder cannot afford it — the request
-    stays pending so they can accept later, once they can); declining
-    just drops the request."""
-    responder = get_team(career, responder_team_id)
-    if not responder:
-        return False, "No such team."
-    reqs = career.get("donation_requests") or []
-    req = next((r for r in reqs if r["id"] == request_id), None)
-    if not req:
-        return False, "That donation request is gone."
-    if req["target_team_id"] != responder["id"]:
-        return False, "Only the team the request was sent to can answer it."
-    requester = get_team(career, req["requester_team_id"])
-    amount = float(req["amount"])
-    if not accept:
-        career["donation_requests"] = [r for r in reqs if r["id"] != request_id]
-        career["transfers"].append(
-            f"{responder['name']} declined "
-            f"{requester['name'] if requester else 'that team'}'s request "
-            f"for a ${amount:.2f}M donation")
-        return True, (f"Declined the donation request from "
-                      f"{requester['name'] if requester else 'that team'}.")
-    if amount > responder["money"]:
-        return False, (f"Not enough money — you have "
-                       f"${responder['money']:.2f}M.")
-    career["donation_requests"] = [r for r in reqs if r["id"] != request_id]
-    responder["money"] = round(responder["money"] - amount, 2)
-    if requester:
-        requester["money"] = round(requester["money"] + amount, 2)
-    # v0.7.0: reputation on a granted request — the donor gains
-    # +0.2 per $M (capped at +1.0), and the REQUESTER loses 0.2
-    # per $M received. Repeatedly farming donations from a supplied
-    # team is exactly what this taxes: each grant quietly spends
-    # the requester's standing, until bots start refusing and give
-    # less. The amounts are the actual money moved (a bot donor
-    # may grant less than was asked — see request_donation).
-    adjust_team_rep(responder, min(TEAM_REP_DONATION_RATE * amount,
-                                    TEAM_REP_DONATION_CAP))
-    if requester:
-        adjust_team_rep(requester, -TEAM_REP_DONATION_RATE * amount)
-    career["transfers"].append(
-        f"{responder['name']} donated ${amount:.2f}M to "
-        f"{requester['name'] if requester else 'that team'} "
-        f"(donation request accepted)")
-    return True, (f"Donated ${amount:.2f}M to "
-                  f"{requester['name'] if requester else 'that team'} ✓")
 
 
 def _end_relation(career, customer):
@@ -1349,11 +2098,6 @@ def _end_relation(career, customer):
     customer["relation_years"] = 0
     customer["wanted"] = []
     customer["break_notice"] = None
-    if supplier_id:
-        career["donation_requests"] = [
-            r for r in (career.get("donation_requests") or [])
-            if {r.get("requester_team_id"), r.get("target_team_id")}
-            != {supplier_id, customer["id"]}]
 
 
 def _apply_relation_change(career, proposal):
@@ -2461,6 +3205,13 @@ def _attach_driver(career, d, team, slot):
         d["team_id"] = None
         d["last_team_id"] = team["id"]
         d["academy_team_id"] = team["id"]
+    # v0.8.0: a seat/T&R move is a team change (junior promotions
+    # move a driver between the parent and the junior team) — the
+    # happiness/loyalty relation with the new team resets or
+    # averages, like a signing. Academy moves are affiliations, not
+    # contracts, so they do not touch the relation.
+    if kind in ("seat", "tr"):
+        apply_signing_relation(career, d, team["id"])
 
 
 def promote_junior_driver(career, parent_team_id, junior_driver_id,
@@ -2690,7 +3441,8 @@ def ai_act(career, team, rng=None):
     for seat in (1, 2):
         slot = "driver1_id" if seat == 1 else "driver2_id"
         if not team[slot]:
-            best = _best_available_driver(career, statuses=("free",))
+            best = _best_available_driver(career, statuses=("free",),
+                                            team_id=team["id"])
             if best is not None:
                 # v0.6: a junior team prefers a WANTED driver when
                 # signing — the reward is a cash bounty, and the
@@ -2699,7 +3451,9 @@ def ai_act(career, team, rng=None):
                 # seat is free agents only mid-season, like the
                 # best-available pick above.
                 pool = [d for d in career["drivers"]
-                        if d["status"] == "free"]
+                        if d["status"] == "free"
+                        and not (d.get("academy_team_id")
+                                 and d["academy_team_id"] != team["id"])]
                 wanted = _wanted_pick(career, team, pool)
                 if wanted is not None:
                     best = wanted
@@ -2716,7 +3470,9 @@ def ai_act(career, team, rng=None):
             and career.get("round", 1) <= 6
             and team["money"] > salaries + charges + 10):
         young = [d for d in career["drivers"]
-                 if d["status"] in ("free", "f2") and d["age"] <= 25]
+                 if d["status"] in ("free", "f2") and d["age"] <= 25
+                 and not (d.get("academy_team_id")
+                          and d["academy_team_id"] != team["id"])]
         if young:
             # v0.6: a junior team prefers a WANTED driver as a T&R
             # signing too (same cash-bounty preference as above).
@@ -2818,13 +3574,19 @@ def _rep_weighted_pick(candidates, rng=None):
     return rng.choices(candidates, weights=weights, k=1)[0]
 
 
-def _best_available_driver(career, statuses=("free", "f2")):
+def _best_available_driver(career, statuses=("free", "f2"), team_id=None):
     """Best free-agent / F2 driver by reputation (bots may use rep;
     players never see it). Ties: cheaper salary, then name. None when
     nobody is available. v0.7.3: statuses limits the pool — a main
     seat mid-season is filled from free agents only (an F2 driver
-    can only join as T&R until the F2 season ends)."""
-    cands = [d for d in career["drivers"] if d["status"] in statuses]
+    can only join as T&R until the F2 season ends). v0.8.0: with
+    team_id, another team's academy junior is excluded — a bot
+    cannot hold the secret meeting a poach needs, so the signing
+    would fail and the seat would stay empty."""
+    cands = [d for d in career["drivers"]
+             if d["status"] in statuses
+             and not (team_id and d.get("academy_team_id")
+                      and d["academy_team_id"] != team_id)]
     if not cands:
         return None
     cands.sort(key=lambda d: (-d["rep"], d["salary"], d["name"]))
@@ -3180,6 +3942,13 @@ def advance_team(career, team_id, rng=None):
         return False, False, "No such team."
     if career["phase"] != "round":
         return False, False, "Not in a racing round right now."
+    # v0.8.0: the advance gate — a team with an empty main seat
+    # cannot advance (the server turns this into a pop-up naming
+    # the empty seat).
+    blockers = advance_blockers(career, team_id)
+    if blockers:
+        return False, False, ("Cannot advance yet — " + ", ".join(blockers)
+                              + " is empty. Fill the seat first.")
     if team["id"] not in career["advanced"]:
         career["advanced"].append(team["id"])
     if all_humans_advanced(career):
@@ -3193,11 +3962,17 @@ def host_skip_advance(career, player_id, is_host, rng=None):
     weekend now even though not every human has advanced. This is the
     escape hatch when a human has disconnected and is not coming
     back (the advance itself waits for ALL humans, connected or
-    not). Host-only, like host_skip_results."""
+    not). Host-only, like host_skip_results. v0.8.0: the advance
+    gate blocks the host too — no team with an empty main seat can
+    start a weekend."""
     if not is_host:
         return False, False, "Only the host can start the weekend."
     if career["phase"] != "round":
         return False, False, "Not in a racing round right now."
+    blockers = advance_blockers(career)
+    if blockers:
+        return False, False, ("Cannot advance yet — " + ", ".join(blockers)
+                              + " is empty. Fill the seat first.")
     run_race_weekend(career, rng=rng)
     return True, True, "Host started the race weekend — qualifying is in."
 
@@ -3287,6 +4062,8 @@ def complete_race_weekend(career, rng=None):
     v0.6.6: the just-finished race counts as a round for pending
     contract-break notices — the tick happens here, once per round."""
     _tick_relation_notices(career)
+    # v0.8.0: a finished round also ticks the secret-meeting cooldowns.
+    tick_meeting_cooldowns(career)
     career["advanced"] = []
     career["results_vote"] = []
     career["results_stage"] = None
@@ -3472,6 +4249,11 @@ def run_race_weekend(career, rng=None):
                       "team_id": r.get("team_id")} for r in top],
         })
     # To the qualifying results page — the NEXT votes take it from here.
+    # v0.8.0: after every race, driver happiness/loyalty update and
+    # the media rumours are written (both read the race_history that
+    # was just appended above).
+    update_driver_happiness(career, rng=rng)
+    generate_media_rumours(career, rng=rng)
     career["phase"] = "qual_results"
     career["results_stage"] = "qual"
     career["results_vote"] = []
@@ -3695,6 +4477,15 @@ def end_of_season(career, rng=None):
                 if d.get("retire_at_season_end"):
                     retired.append(d)
         for d in list(free_agents(career)):
+            if d.get("retire_at_season_end"):
+                retired.append(d)
+        # v0.8.0: F2 drivers retire too when toggled — the custom
+        # branch is the only retirement path that covers them
+        # (random retirements never touch F2; the cleanup below
+        # retires them through the same status/tallies reset).
+        # An f2_tr driver is status "tr", so they are already in
+        # the T&R loop above — this loop only adds plain F2 drivers.
+        for d in list(f2_drivers(career)):
             if d.get("retire_at_season_end"):
                 retired.append(d)
     else:
@@ -3923,6 +4714,11 @@ def end_of_season(career, rng=None):
             team["relation_years"] -= 1
     # Refill the F2 grid from queued / pool rookies.
     refill_f2(career, rng=rng)
+    # v0.8.0: agreed secret meetings expire at season end — a
+    # meeting is for this season's move, not next year's. Cooldowns
+    # expire too (a new season is a fresh start).
+    career["meetings"] = []
+    career["meeting_cooldowns"] = {}
     # v0.4: the regulation change into the new year is NOT applied
     # here — it waits for start_next_season(), after the winter
     # break's last-minute R&D. Record the new year and the NEXT
@@ -4191,6 +4987,19 @@ def start_winter_break_round(career, rng=None):
             bot_winter_relations(career, team, rng=rng)
 
 
+def _bot_offer_bribe(career, team, pick):
+    """v0.8.0: a bot bribes a happy driver up to the want, never an
+    unhappy one (the want is $0 then — bribing an unhappy driver is
+    wasted). Returns the bribe $M (0 when none), only when the team
+    keeps at least $1M after paying it."""
+    want = bribe_want_for(career, team["id"], pick)
+    if want <= 0:
+        return 0.0
+    if team["money"] - want < 1.0:
+        return 0.0
+    return want
+
+
 def bot_winter_offers(career, team, rng=None):
     """v0.4 bot parity: a bot team's winter-break offers for one
     round — up to 3 offers (max 2 main, max 1 T&R), from the best
@@ -4201,7 +5010,13 @@ def bot_winter_offers(career, team, rng=None):
     id, in the order the team made them (main seats first)."""
     rng = rng or random
     offers = []
-    pool = [d for d in career["drivers"] if d["status"] in ("free", "f2")]
+    # v0.8.0: bots cannot hold secret meetings, so they cannot poach
+    # another team's academy junior (a meeting gates every poach) —
+    # academy juniors of other teams are out of the bot pool.
+    pool = [d for d in career["drivers"]
+            if d["status"] in ("free", "f2")
+            and not (d.get("academy_team_id")
+                     and d["academy_team_id"] != team["id"])]
     # Main seats: offer for each empty seat, best available first.
     # A bot with a full lineup may still try to poach one better
     # driver for its weaker seat — only if it can afford the break
@@ -4241,7 +5056,8 @@ def bot_winter_offers(career, team, rng=None):
                 continue
             pick = affordable[0]
         offers.append({"driver_id": pick["id"], "target": "seat", "seat": seat,
-                       "years": ai_contract_years(pick, rng=rng)})
+                       "years": ai_contract_years(pick, rng=rng),
+                       "bribe": _bot_offer_bribe(career, team, pick)})
         pool.remove(pick)
     # T&R: one offer, youngest cheapest available. v0.4.2: no hard
     # cap any more — a bot may offer a 3rd (or further) T&R driver
@@ -4268,7 +5084,8 @@ def bot_winter_offers(career, team, rng=None):
                 quote = sign_cost(career, team["id"], pick["id"], ("tr", None))
                 if quote and quote["affordable"]:
                     offers.append({"driver_id": pick["id"], "target": "tr", "seat": None,
-                                   "years": ai_contract_years(pick, rng=rng)})
+                                   "years": ai_contract_years(pick, rng=rng),
+                                   "bribe": _bot_offer_bribe(career, team, pick)})
     career.setdefault("wb_offers", {})[team["id"]] = offers
 
 
@@ -4296,10 +5113,13 @@ def bot_winter_rd(career, team):
 def submit_winter_offers(career, team_id, offers):
     """A human team submits its offers for the current winter-break
     round. offers is a list of {driver_id, target: 'seat'|'tr',
-    seat: 1|2|null, years: 1-4}. At most 3 offers, at most 2 for
-    main seats, at most 1 for a T&R slot. A team with an empty main
-    seat MUST include at least one main-seat offer. Returns
-    (ok, message)."""
+    seat: 1|2|null, years: 1-4, bribe?: $M}. At most 3 offers, at
+    most 2 for main seats, at most 1 for a T&R slot. A team with an
+    empty main seat MUST include at least one main-seat offer.
+    v0.8.0: each offer may carry an optional bribe — an upfront
+    signing cost paid to the driver if they sign (see bribe_want).
+    A bribe must be >= 0 and the round's bribes together must fit
+    the team's money. Returns (ok, message)."""
     team = get_team(career, team_id)
     if not team:
         return False, "No such team."
@@ -4313,6 +5133,8 @@ def submit_winter_offers(career, team_id, offers):
     tr_seen = 0
     seen_drivers = set()
     cleaned = []
+    total_bribe = 0.0
+    total_poach = 0.0
     for off in offers:
         if not isinstance(off, dict):
             return False, "Each offer needs a driver and a target."
@@ -4328,6 +5150,48 @@ def submit_winter_offers(career, team_id, offers):
             return False, "Contract length must be 1–4 years."
         if not 1 <= years <= 4:
             return False, "Contract length must be 1–4 years."
+        # v0.8.0: the optional bribe on an offer — an upfront signing
+        # cost, paid only if the driver signs with this team.
+        try:
+            bribe = float(off.get("bribe") or 0.0)
+        except (TypeError, ValueError):
+            return False, "The bribe must be a number."
+        if bribe < 0:
+            return False, "The bribe cannot be negative."
+        total_bribe += bribe
+        if total_bribe > team["money"]:
+            return False, (f"Not enough money for ${total_bribe:.2f}M of "
+                           f"bribes — you have ${team['money']:.2f}M.")
+        # v0.8.0: poaching an academy junior of another team needs
+        # an agreed secret meeting for that target — the winter
+        # break is the only window where academy juniors can be
+        # poached, and the meeting gates it like a mid-season
+        # poach. The poach fee + the meeting's bribe must fit the
+        # team's money alongside this round's offer bribes.
+        if is_poach(career, team_id, d):
+            tgt = None
+            if off.get("target") == "seat" and off.get("seat") in (1, 2):
+                tgt = ("seat", off.get("seat"))
+            elif off.get("target") == "tr":
+                tgt = ("tr", None)
+            if tgt is not None:
+                meeting = agreed_meeting(career, team_id, d["id"], tgt)
+                if meeting is None:
+                    return False, (f"You need a secret meeting with {d['name']} "
+                                   f"before you can offer them — request one "
+                                   f"from the Driver Market.")
+                q = sign_cost(career, team_id, d["id"], tgt)
+                meeting_bribe = float(meeting.get("bribe") or 0.0)
+                poach_fee = (q or {}).get("poach_fee", 0.0)
+                if (total_bribe + total_poach + poach_fee + meeting_bribe
+                        > team["money"]):
+                    return False, (f"Not enough money to poach {d['name']} — "
+                                   f"the poach fee (${poach_fee:.2f}M) + the "
+                                   f"meeting bribe (${meeting_bribe:.2f}M) + "
+                                   f"this round's offer bribes "
+                                   f"(${total_bribe:.2f}M) exceed your "
+                                   f"${team['money']:.2f}M.")
+                total_poach += poach_fee + meeting_bribe
         target = off.get("target")
         if target == "seat":
             seat = off.get("seat")
@@ -4337,13 +5201,13 @@ def submit_winter_offers(career, team_id, offers):
                 return False, f"Seat {seat} already has an offer this round."
             seats_seen.append(seat)
             cleaned.append({"driver_id": d["id"], "target": "seat",
-                            "seat": seat, "years": years})
+                            "seat": seat, "years": years, "bribe": bribe})
         elif target == "tr":
             if tr_seen >= 1:
                 return False, "At most one T&R offer per round."
             tr_seen += 1
             cleaned.append({"driver_id": d["id"], "target": "tr",
-                            "seat": None, "years": years})
+                            "seat": None, "years": years, "bribe": bribe})
         else:
             return False, "An offer must target a main seat or a T&R slot."
     if empty_seats(career, team) and not seats_seen:
@@ -4381,6 +5245,9 @@ def winter_next(career, team_id, rng=None):
     # per winter-break round (even the last one, before the season
     # starts).
     _tick_relation_notices(career)
+    # v0.8.0: a winter-break round counts as a round for the
+    # secret-meeting cooldowns too.
+    tick_meeting_cooldowns(career)
     if career.get("wb_round", 1) >= WINTER_BREAK_ROUNDS:
         autofill_winter_break(career, rng=rng)
         career["wb_done"] = True
@@ -4391,7 +5258,7 @@ def winter_next(career, team_id, rng=None):
     return True, True, f"Winter-break round {career['wb_round']} — make your offers."
 
 
-def _wb_offer_winners(career, offers_by_team):
+def _wb_offer_winners(career, offers_by_team, exclude=None):
     """v0.4.2: for each driver with winter-break offers, the team
     they sign with — the lowest EFFECTIVE constructors' position,
     where an academy driver's own academy team counts as
@@ -4401,14 +5268,22 @@ def _wb_offer_winners(career, offers_by_team):
     2nd-place rival (effective 2nd, not academy) for its own junior,
     and a 1st-place academy team always wins its junior. A driver
     with no academy affiliation just goes to the best-placed team
-    that offered them. Returns {driver_id: team_id}."""
+    that offered them. Returns {driver_id: team_id}.
+    v0.8.0: a bribe that meets the driver's want counts as one
+    constructors' place better (a sweetener that can flip a close
+    call). exclude is a set of (driver_id, team_id) pairs to skip —
+    used when a driver declines their old team's re-signing offer
+    and the next-best offer wins instead."""
     order = wb_constructors_order(career)
     pos = {tid: i + 1 for i, tid in enumerate(order)}
     fallback = len(order) + 1
     winners = {}
+    exclude = exclude or set()
     for team_id, offers in (offers_by_team or {}).items():
         for off in offers:
             did = off.get("driver_id")
+            if (did, team_id) in exclude:
+                continue
             d = get_driver(career, did)
             if not d:
                 continue
@@ -4424,6 +5299,11 @@ def _wb_offer_winners(career, offers_by_team):
             is_academy_team = d.get("academy_team_id") == team_id
             if is_academy_team:
                 eff = max(1, eff - ACADEMY_LOYALTY_BOOST)
+            # v0.8.0: a bribe that meets the driver's want counts as
+            # one place better (the driver weighs the sweetener).
+            want = bribe_want_for(career, team_id, d)
+            if want > 0 and float(off.get("bribe") or 0.0) >= want:
+                eff = max(1, eff - 1)
             key = (eff, 0 if is_academy_team else 1, real)
             if did not in winners or key < winners[did][0]:
                 winners[did] = (key, team_id)
@@ -4443,6 +5323,33 @@ def resolve_winter_break_round(career, rng=None):
     rng = rng or random
     offers_by_team = career.get("wb_offers") or {}
     winners = _wb_offer_winners(career, offers_by_team)
+    # v0.8.0: re-signing declines — an unhappy driver mostly turns
+    # down their old team's offer (70% unhappy, 90% very unhappy).
+    # A declined driver falls to the next-best offer (or stays free
+    # this round when nobody else offered). The roll happens once
+    # per driver per round, before the signings run; a decline is
+    # logged in Transfers and in Media.
+    for did, team_id in list(winners.items()):
+        d = get_driver(career, did)
+        if not d or d.get("last_team_id") != team_id:
+            continue  # not a re-sign — nothing to decline
+        lvl = rules_mod.happiness_level(happiness_with(d, team_id))
+        if lvl >= 3:
+            continue
+        p = RESIGN_DECLINE_VERY_UNHAPPY if lvl == 1 \
+            else RESIGN_DECLINE_UNHAPPY
+        if rng.random() < p:
+            team = get_team(career, team_id)
+            team_name = team["name"] if team else "their old team"
+            career["transfers"].append(
+                f"{d['name']} turned down {team_name}'s offer")
+            add_media_entry(
+                career,
+                f"{d['name']} has rejected a new deal at {team_name} — "
+                f"the driver is understood to be unhappy there.",
+                "transfer")
+            winners = _wb_offer_winners(
+                career, offers_by_team, exclude={(did, team_id)})
     taken = set()
     for team_id in wb_constructors_order(career):
         team = get_team(career, team_id)
@@ -4459,6 +5366,24 @@ def resolve_winter_break_round(career, rng=None):
             d = get_driver(career, off["driver_id"])
             if not d or d["status"] not in ("free", "f2"):
                 continue
+            # v0.8.0: a winter-break academy poach pays the academy
+            # poach fee + the meeting's bribe BEFORE signing (the
+            # seat break fee is charged inside sign_driver_wb, as
+            # usual). If the team can no longer afford them, the
+            # signing is skipped this round — like a signing refused
+            # for an unaffordable seat fee.
+            academy_team = None
+            meeting = None
+            if d.get("academy_team_id") and d["academy_team_id"] != team["id"]:
+                academy_team = get_team(career, d["academy_team_id"])
+                tgt = ("seat", off["seat"]) if off["target"] == "seat" else ("tr", None)
+                meeting = agreed_meeting(career, team["id"], d["id"], tgt)
+                q = sign_cost(career, team["id"], d["id"], tgt)
+                poach_fee = (q or {}).get("poach_fee", 0.0)
+                meeting_bribe = float((meeting or {}).get("bribe") or 0.0)
+                if team["money"] < poach_fee + meeting_bribe:
+                    continue
+                team["money"] = round(team["money"] - poach_fee - meeting_bribe, 2)
             if off["target"] == "seat":
                 slot = "driver1_id" if off["seat"] == 1 else "driver2_id"
                 if team[slot]:
@@ -4468,6 +5393,33 @@ def resolve_winter_break_round(career, rng=None):
                 ok, _why = sign_tr_driver_wb(career, team, d, off["years"])
             if ok:
                 taken.add(d["id"])
+                # v0.8.0: the agreed meeting is consumed and the
+                # losing academy team is notified in three places —
+                # the Transfers feed, a Media entry, and a notice in
+                # their Drivers tab — like a mid-season poach.
+                if academy_team is not None:
+                    if meeting is not None:
+                        career["meetings"] = [
+                            m for m in career.get("meetings") or []
+                            if m is not meeting]
+                    career["transfers"].append(
+                        f"{d['name']} left {academy_team['name']}'s academy "
+                        f"(poached by {team['name']})")
+                    add_media_entry(
+                        career,
+                        f"{d['name']} has left {academy_team['name']} for "
+                        f"{team['name']} — a secret meeting sealed the move.",
+                        "transfer")
+                    add_team_notice(
+                        career, academy_team["id"],
+                        f"{d['name']} left your team for {team['name']}.")
+                # v0.8.0: the bribe on the winning offer is paid on
+                # signing — if the team can still afford it after the
+                # break fee (the submit check already capped the
+                # round's bribes at the team's money).
+                bribe = float(off.get("bribe") or 0.0)
+                if bribe > 0 and team["money"] >= bribe:
+                    team["money"] = round(team["money"] - bribe, 2)
     career["wb_offers"] = {}
 
 
@@ -4476,7 +5428,9 @@ def sign_driver_wb(career, team, d, seat, contract_years):
     same charges as sign_driver(), but allowed in winter break (the
     direct sign_driver() is blocked then so signings go through
     offers). The break fee for the seat's current occupant is
-    charged from the winter-break formula (contract x 12 rounds)."""
+    charged from the winter-break formula (contract x 12 rounds).
+    v0.8.0: an academy poach fee + the meeting's bribe are charged
+    by resolve_winter_break_round before this is called (see there)."""
     slot = "driver1_id" if seat == 1 else "driver2_id"
     current = get_driver(career, team[slot]) if team[slot] else None
     fee = 0.0
@@ -4603,7 +5557,6 @@ def start_next_season(career, rng=None):
         team["junior_share_last_race"] = 0.0
         team["junior_share_received_last_race"] = 0.0
     career["relation_proposals"] = []
-    career["donation_requests"] = []
     # v0.4: apply the pending reg change now — the winter break's
     # last-minute R&D is included because it ran before this point.
     pending = any(t.get("reg_pending") for t in career["teams"])
@@ -4896,7 +5849,70 @@ def cheat_state(career):
         "constructors": [{"id": t["id"], "name": t["name"],
                           "colour": t["colour"], "points": t["points"]}
                          for t in constructors],
+        # v0.8.0: the extra driver classes — T&R, free agents,
+        # academy juniors and F2 drivers — each tappable to open the
+        # same driver pop-up (rating editing + retirement toggle).
+        # Rows share the mini-standings shape. Drivers already in
+        # the mini standings are not repeated here.
+        "extra": _cheat_extra_rows(career, {d["id"] for d in drivers}),
     }
+
+
+def _cheat_extra_rows(career, standing_ids):
+    """v0.8.0: the cheats-menu extra sections — T&R, free agents,
+    academy juniors and F2 drivers, each as mini-standings-shaped
+    rows (name, team/affiliation, age, rating, rating bounds,
+    retirement toggle). Sorted by name within each section."""
+    def _row(d, kind):
+        tm = get_team(career, d.get("team_id")) \
+            or get_team(career, d.get("academy_team_id")) \
+            or get_team(career, d.get("last_team_id"))
+        lo, hi = rules_mod.rating_bounds(d.get("age") or 25)
+        return {
+            "id": d["id"], "name": d["name"], "kind": kind,
+            "team": tm["name"] if tm else "",
+            "team_id": tm["id"] if tm else None,
+            "colour": tm["colour"] if tm else None,
+            "gender": d.get("gender", "M"),
+            "points": race_mod.f1_tally(d)["points"],
+            "age": d.get("age"),
+            "rating": d.get("perf"),
+            "min_rating": lo, "max_rating": hi,
+            "retire_at_season_end": bool(d.get("retire_at_season_end", False)),
+        }
+
+    extra = {"tr": [], "free": [], "academy": [], "f2": []}
+    for d in career["drivers"]:
+        if d["id"] in standing_ids:
+            continue
+        if d.get("status") == "tr":
+            extra["tr"].append(_row(d, "tr"))
+        elif d.get("academy_team_id"):
+            extra["academy"].append(_row(d, "academy"))
+        elif d.get("status") == "free":
+            extra["free"].append(_row(d, "free"))
+        elif d.get("status") == "f2":
+            extra["f2"].append(_row(d, "f2"))
+        # Queued / pool / retired drivers are not in the game and
+        # cannot be edited.
+    for rows in extra.values():
+        rows.sort(key=lambda r: r["name"])
+    return extra
+
+
+def _cheat_editable(career, driver_id):
+    """v0.8.0: a driver is editable from the cheats menu when they
+    are in the mini drivers' standings (the registered F1 drivers)
+    OR in one of the extra classes — T&R, free agent, academy
+    junior or F2 driver. Queued / pool / retired drivers are not in
+    the game and cannot be edited."""
+    d = get_driver(career, driver_id)
+    if not d:
+        return False
+    if any(x["id"] == driver_id
+           for x in race_mod.driver_standings(career)):
+        return True
+    return d.get("status") in ("tr", "free", "f2")
 
 
 def cheat_adjust(career, team_id, perf_delta=None, money_delta=None):
@@ -4934,17 +5950,17 @@ def cheat_adjust(career, team_id, perf_delta=None, money_delta=None):
 
 def cheat_set_rating(career, driver_id, rating):
     """Set a driver's skill rating (d["perf"]) — the cheats-menu
-    driver pop-up. Only drivers in the mini drivers' standings (the
-    registered F1 drivers, driver_standings) are editable. The new
+    driver pop-up. v0.8.0: drivers in the mini drivers' standings
+    (the registered F1 drivers) AND the extra classes (T&R, free
+    agents, academy juniors, F2 drivers) are editable. The new
     rating is clamped to [min(age), max(age)] for the driver's
     current age (rules.rating_bounds); no log entry."""
     d = get_driver(career, driver_id)
     if not d:
         return False, "No such driver."
-    if not any(x["id"] == driver_id
-               for x in race_mod.driver_standings(career)):
-        return False, (f"{d['name']} is not in the drivers' standings — "
-                       "only listed drivers can be edited.")
+    if not _cheat_editable(career, driver_id):
+        return False, (f"{d['name']} cannot be edited from the cheats "
+                       f"menu — only listed drivers can be edited.")
     try:
         val = int(float(rating))
     except (TypeError, ValueError):
@@ -4982,19 +5998,19 @@ def set_custom_retirements(career, on):
 
 def set_retire_toggle(career, driver_id, on):
     """v0.7.5: the per-driver 'Retire at season end' toggle in the
-    driver pop-up. Only settable while the master is ON, and only
-    drivers in the mini drivers' standings (driver_standings) have
-    the toggle. No log entry."""
+    driver pop-up. Only settable while the master is ON, and v0.8.0:
+    drivers in the mini drivers' standings AND the extra classes
+    (T&R, free agents, academy juniors, F2 drivers) have the toggle.
+    No log entry."""
     d = get_driver(career, driver_id)
     if not d:
         return False, "No such driver."
     if not career.get("custom_retirements"):
         return False, ("Custom retirements are OFF — turn the master "
                        "toggle on at the top of the cheats menu first.")
-    if not any(x["id"] == driver_id
-               for x in race_mod.driver_standings(career)):
-        return False, (f"{d['name']} is not in the drivers' standings — "
-                       "only listed drivers can be toggled.")
+    if not _cheat_editable(career, driver_id):
+        return False, (f"{d['name']} cannot be toggled from the cheats "
+                       f"menu — only listed drivers can be toggled.")
     on = _coerce_bool(on)
     d["retire_at_season_end"] = on
     return True, (f"{d['name']} will retire at season end ✓" if on else
@@ -5021,6 +6037,18 @@ def public_state(career, chart_on, viewer_team_id=None):
     # reads it from there); only this broadcast copy is stripped.
     for d in state["drivers"]:
         d.pop("rep", None)
+        # v0.8.0: happiness and loyalty NEVER leave the server in the
+        # broadcast either — a driver's own team sees their current
+        # values in the private my_team message only (server.py);
+        # other teams see nothing, and the Driver Market never shows
+        # them (the bribe want below is computed server-side).
+        d.pop("happiness", None)
+        d.pop("loyalty", None)
+        d.pop("happiness_by_team", None)
+        d.pop("loyalty_by_team", None)
+        d.pop("tuning_against_streak", None)
+        d.pop("tr_bench_races", None)
+        d.pop("activity_round", None)
     # v0.4: winter-break offers NEVER leave the server in full — they
     # would reveal what the bot teams (and other humans) are bidding
     # on. Each client only gets its own team's offers, attached as
@@ -5069,12 +6097,30 @@ def public_state(career, chart_on, viewer_team_id=None):
                     tr_quote["fine_after"] = extra_driver_fine(
                         len(active_tr_drivers(career, viewer)) + 1, TR_FINE_FREE_COUNT)
                 out["tr"] = tr_quote
+                # v0.8.0: the bribe this driver wants from the viewer
+                # (computed server-side from their hidden happiness /
+                # loyalty — the market shows the want, never the
+                # happiness behind it).
+                out["bribe_want"] = bribe_want_for(career, viewer["id"], d)
                 return out
             state["market_costs"] = {
                 d["id"]: _costs_for(d)
                 for d in career["drivers"]
                 if d["status"] in ("free", "f2", "f1", "tr")
                 and not (d.get("team_id") == viewer["id"])}
+            # v0.8.0: the viewer's own secret meetings (agreed) and
+            # cooldowns, keyed by driver id — other teams' meetings
+            # are secret and never leave the server.
+            state["my_meetings"] = {
+                m["driver_id"]: {"target": m.get("target"),
+                                "seat": m.get("seat"),
+                                "bribe": m.get("bribe", 0.0)}
+                for m in career.get("meetings") or []
+                if m.get("requester_team_id") == viewer["id"]}
+            state["my_cooldowns"] = {
+                key.split(":", 1)[1]: rounds
+                for key, rounds in (career.get("meeting_cooldowns") or {}).items()
+                if key.split(":", 1)[0] == viewer["id"]}
             # v0.4: the viewer's own reg progress (percentages + cost
             # only) and their own winter-break offers for this round.
             state["reg_view"] = reg_view(career, viewer)

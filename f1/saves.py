@@ -14,7 +14,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 16  # v0.7.5: custom retirements (career flag + per-driver toggle)
+SAVE_VERSION = 17  # v0.8.0: happiness/loyalty/meetings/media (see migrate_save)
 # on every team, default empty; private — stripped from the broadcast
 # state, only ever sent to the owning team). v0.7.3: F2 promotions reworked (a T&R driver
 # still racing in F2 keeps their F2 tally in the plain fields and
@@ -36,10 +36,11 @@ SAVE_VERSION = 16  # v0.7.5: custom retirements (career flag + per-driver toggle
 # — the research cap is REMOVED entirely (setting, enforcement,
 # bot cap); WANTED works for customer teams too; the junior income
 # share (15% of race prize to the parent) + parent promotion/swap
-# of junior drivers + two-way donation requests + the 3-round
-# contract-break notice (break_notice on teams, donation_requests
-# on the career). v9 saves load fine: the removed cap fields are
-# dropped on load and the new fields backfill to their defaults.
+# of junior drivers + the 3-round contract-break notice
+# (break_notice on teams). v0.8.0: donation requests are REMOVED
+# entirely (donation_requests on the career is dropped on load).
+# v9 saves load fine: the removed cap fields are dropped on load
+# and the new fields backfill to their defaults.
 # v0.6: team relationships (supplier / customer / junior contracts,
 # WANTED drivers) — new fields on teams (relation_years, wanted)
 # + career-level relation_proposals; old saves backfill the 2026
@@ -231,6 +232,33 @@ def migrate_save(doc):
         # v0.7.5: the cheats-menu 'Retire at season end' toggle
         # (default OFF — only settable while the master is on).
         d.setdefault("retire_at_season_end", False)
+        # v0.8.0: driver happiness + loyalty, per (driver, team)
+        # relation. Older saves have none: every current relation
+        # starts neutral (happiness 3.0) with medium loyalty (3.0 —
+        # these drivers have tenure at their teams already, so they
+        # do not start at the fresh-signing 1.0). A driver with no
+        # current team keeps an empty relation map and sits at
+        # neutral until signed. The "current" value is the value for
+        # the driver's current team (or, for a free agent, the last
+        # team they were at).
+        d.setdefault("happiness", 3.0)
+        d.setdefault("loyalty", 3.0)
+        d.setdefault("happiness_by_team", {})
+        d.setdefault("loyalty_by_team", {})
+        d.setdefault("tuning_against_streak", 0)
+        d.setdefault("tr_bench_races", 0)
+        d.setdefault("activity_round", None)
+        _rel_team = (d.get("team_id")
+                     if d.get("status") in ("f1", "tr")
+                     else d.get("academy_team_id"))
+        if _rel_team:
+            d["happiness_by_team"].setdefault(_rel_team, 3.0)
+            d["loyalty_by_team"].setdefault(_rel_team, 3.0)
+            d["happiness"] = d["happiness_by_team"][_rel_team]
+            d["loyalty"] = d["loyalty_by_team"][_rel_team]
+        elif d.get("last_team_id") and d["last_team_id"] in d.get("happiness_by_team", {}):
+            d["happiness"] = d["happiness_by_team"][d["last_team_id"]]
+            d["loyalty"] = d["loyalty_by_team"].get(d["last_team_id"], 3.0)
     # v0.3: champion history. A save from before v0.3 has none, or only
     # in-game rows (v0.2 appended {year, driver, team, points} per
     # completed season). Either way it gains the real 2010–2025 table
@@ -344,7 +372,17 @@ def migrate_save(doc):
         team.setdefault("junior_share_received_season", 0.0)
     doc.setdefault("relation_proposals", [])
     # v0.6.6: pending donation requests between supplied teams.
-    doc.setdefault("donation_requests", [])
+    # v0.8.0: donation requests are REMOVED entirely (the cousin
+    # drained the Mercedes bot dry) — an old save carrying pending
+    # requests imports cleanly, the field is dropped.
+    doc.pop("donation_requests", None)
+    # v0.8.0: secret meetings, media rumours, driver messages and
+    # team notices — empty for an older save (nothing to backfill).
+    doc.setdefault("meetings", [])
+    doc.setdefault("meeting_cooldowns", {})
+    doc.setdefault("media_rumours", [])
+    doc.setdefault("driver_messages", [])
+    doc.setdefault("team_notices", [])
     # v0.7.5: the cheats-menu master toggle (default OFF).
     doc.setdefault("custom_retirements", False)
     for team in doc.get("teams") or []:

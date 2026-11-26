@@ -434,3 +434,59 @@ def finance_estimates(constructor_pos):
     eprg = (1.75 - (0.025 * (constructor_pos * 2))) + \
         (1.75 - (0.025 * ((constructor_pos * 2) - 1)))
     return {"epsci": round(epsci, 2), "eprg": round(eprg, 2)}
+
+
+# ---------------------------------------------------------------------------
+# v0.8.0: driver happiness + loyalty (Matthew's locked answers, 2026-11-25).
+# Happiness and loyalty are floats 1.0-5.0 per (driver, team) relation.
+# Level = the value rounded to the nearest integer (halves up):
+#   1 Very unhappy, 2 Unhappy, 3 Neutral, 4 Happy, 5 Very happy.
+# ---------------------------------------------------------------------------
+
+HAPPINESS_WORDS = {
+    1: "Very unhappy",
+    2: "Unhappy",
+    3: "Neutral",
+    4: "Happy",
+    5: "Very happy",
+}
+
+# v0.8.0: the per-race rating effect of happiness (applied per race
+# only, never accumulated): very unhappy -2, unhappy -1, neutral 0,
+# happy +1, very happy +2.
+HAPPINESS_RATING_ADJ = {1: -2, 2: -1, 3: 0, 4: 1, 5: 2}
+
+
+def happiness_level(value):
+    """v0.8.0: the happiness level (1-5) of a stored float value —
+    round to nearest, halves up, clamped to [1, 5]."""
+    v = float(value or 3.0)
+    lvl = int(v + 0.5)
+    return max(1, min(5, lvl))
+
+
+def happiness_word(value):
+    """v0.8.0: the level word for a stored happiness float."""
+    return HAPPINESS_WORDS[happiness_level(value)]
+
+
+def happiness_rating_adj(value):
+    """v0.8.0: the per-race rating adjustment for a stored happiness
+    float (see HAPPINESS_RATING_ADJ)."""
+    return HAPPINESS_RATING_ADJ[happiness_level(value)]
+
+
+def bribe_want(happiness_value, loyalty_value):
+    """v0.8.0: the bribe ($M) a driver wants before they will sign
+    happily. Base by happiness level with the team in question:
+    very happy $2M, happy $1M, neutral/unhappy $0 — multiplied by
+    loyalty: high (4-5) x2, medium (3) x1, low (1-2) x0.5. So a
+    very happy + high-loyalty driver wants ~$4M, a very happy +
+    low-loyalty driver ~$1M, and an unhappy driver wants $0 (do not
+    bribe an unhappy driver — it is wasted)."""
+    base = {5: 2.0, 4: 1.0}.get(happiness_level(happiness_value), 0.0)
+    if base <= 0.0:
+        return 0.0
+    lvl = happiness_level(loyalty_value)
+    mult = 2.0 if lvl >= 4 else (1.0 if lvl == 3 else 0.5)
+    return base * mult

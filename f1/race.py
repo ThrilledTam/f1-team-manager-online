@@ -175,6 +175,15 @@ SESSION_FORM_QUAL_SIGMA = 0.50   # seconds, one draw per driver per qual
 SESSION_FORM_RACE_SIGMA = 0.35   # seconds per lap, one draw per driver per race
 
 
+def _happiness_adj(d, team_id):
+    """v0.8.0: the per-race rating adjustment from the driver's
+    happiness with this team (very unhappy -2, unhappy -1, neutral
+    0, happy +1, very happy +2) — applied per race only, never
+    accumulated. A driver with no relation with the team is neutral."""
+    return rules_mod.happiness_rating_adj(
+        (d.get("happiness_by_team") or {}).get(team_id, 3.0))
+
+
 def simulate_qual(career, rng=None):
     """Sets qual_time / qual_pos on every F1 driver. Returns ordered list of
     (driver, team) from pole to last."""
@@ -192,8 +201,12 @@ def simulate_qual(career, rng=None):
                 continue
             d = drivers[did]
             # Tuning: +tuning for driver 1, -tuning for driver 2 (Race.py).
-            w = d["perf"] + (team["tuning"] * 1.0) if did == team["driver1_id"] \
-                else d["perf"] - (team["tuning"] * 1.0)
+            # v0.8.0: happiness adjusts the effective rating too
+            # (per race only, never accumulated).
+            w = d["perf"] + _happiness_adj(d, team["id"]) \
+                + (team["tuning"] * 1.0) if did == team["driver1_id"] \
+                else d["perf"] + _happiness_adj(d, team["id"]) \
+                - (team["tuning"] * 1.0)
             # v0.2: per-session form — one draw per driver per session.
             d["qual_time"] = lap_sim(w, t_perf, max_perf, min_perf, 1, 2.5, rng) \
                 + rng.gauss(0, SESSION_FORM_QUAL_SIGMA)
@@ -239,8 +252,12 @@ def simulate_race(career, laps=57, rng=None):
             is_d1 = did == team["driver1_id"]
             # v0.2: per-session form — one draw per driver per race, the
             # same offset every lap (a fresh draw, different from qual).
+            # v0.8.0: happiness adjusts the effective rating (per race
+            # only, never accumulated) — the tuning effect stays inside
+            # race_lap_time.
             form = rng.gauss(0, SESSION_FORM_RACE_SIGMA)
-            total = sum(race_lap_time(d["perf"], t_perf, team["tuning"],
+            total = sum(race_lap_time(d["perf"] + _happiness_adj(d, team["id"]),
+                                      t_perf, team["tuning"],
                                       is_d1, rng, session_offset=form)
                         for _ in range(laps))
             total += RACE_GRID_PENALTY_PER_POS * (d.get("qual_pos") or 0)
