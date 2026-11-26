@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.8.0</title>
+<title>F1 Team Manager Online — v0.8.1</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -182,7 +182,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.0 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.1 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -368,7 +368,7 @@
       <button id="btn-research">Invest in research</button>
       <button id="btn-develop" class="secondary">Develop Parts ($1M)</button>
       <h3>Tuning (−3 to 3)</h3>
-      <p class="note">Tuning boosts Driver 1 and hurts Driver 2 (or the reverse when negative).</p>
+      <p class="note" id="tuning-label">Tuning boosts Driver 1 and hurts Driver 2 (or the reverse when negative).</p>
       <input id="tuning-val" type="number" min="-3" max="3" step="1" value="0" style="width:70px">
       <button id="btn-tuning" class="secondary">Set tuning</button>
       <h3>Regulation Research</h3>
@@ -434,7 +434,7 @@
 
 <!-- ================= MENU (v0.7.4) ================= -->
 <div id="screen-cheats" class="hidden">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.0 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.1 beta</span></h1>
   <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
   <p><label><input type="checkbox" id="cheat-custom-retirements"> Custom retirements</label> <span class="note">When ON, only drivers you toggle retire at season end — normal retirements are off. Turning it OFF clears every driver toggle.</span></p>
   <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
@@ -1026,6 +1026,36 @@ function teamNameHtml(team){
     out += ` <span class="jr-badge" title="Junior team of ${supName}">JUNIOR</span>`;
   }
   return out;
+}
+/* v0.8.1: style driver surnames and team names inside a plain-text
+   feed line (media rumours, transfers) — surnames bold, uppercased,
+   in the driver's team colour (last team if they have none); team
+   names bold in the team colour. Longest names first, so "Racing
+   Bulls" wins over "Red Bull" and a full name wins over a bare
+   surname. */
+function styleNames(text){
+  const c = room && room.career;
+  if(!c) return esc(text);
+  const subs = [];
+  for(const d of (c.drivers || [])){
+    const tm = d.team_id ? teamById(d.team_id) : null;
+    const last = d.last_team_id ? teamById(d.last_team_id) : null;
+    const col = tm ? tm.colour : (last ? last.colour : null);
+    const f = splitName(d.name);
+    if(!f.last) continue;
+    const style = col ? ` style="color:${col}"` : "";
+    subs.push({name: d.name, html: `${esc(f.first)} <span class="surname"${style}>${esc(f.last.toUpperCase())}</span>`});
+    subs.push({name: f.last, html: `<span class="surname"${style}>${esc(f.last.toUpperCase())}</span>`});
+  }
+  for(const t of (c.teams || [])){
+    subs.push({name: t.name, html: `<span style="color:${t.colour}; font-weight:700">${esc(t.name)}</span>`});
+  }
+  if(!subs.length) return esc(text);
+  subs.sort((a, b) => b.name.length - a.name.length);
+  const byName = {};
+  for(const s of subs) if(!(s.name in byName)) byName[s.name] = s.html;
+  const re = new RegExp("(" + subs.map(s => s.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "g");
+  return esc(text).replace(re, m => byName[m] || esc(m));
 }
 /* v0.7.2 — HISTORY TEAM RESOLUTION. Every view that shows a PAST
    season or round must render the team relationships as of THAT
@@ -1757,14 +1787,14 @@ function renderDriversTab(){
     const word = d.happiness_word || ["", "Very unhappy", "Unhappy", "Neutral", "Happy", "Very happy"][lvl];
     return ` <span class="note">Mood:</span> <span class="hap"><i style="width:${(Math.max(0, Math.min(5, d.happiness)) / 5 * 100).toFixed(0)}%;background:${col}"></i></span> <b style="color:${col}">${esc(word)}</b>`;
   };
-  // v0.8.0: one activity per driver per round, only for drivers at
-  // least happy (level 4+). The round key matches the server's
-  // (_activity_round_key): "2029R3" in a season, "2029WB2" in the
-  // winter break.
+  // v0.8.1: one activity per driver per round, at ANY happiness
+  // level — unhappy drivers may turn it down (the server rolls
+  // that), neutral and above always accept unless ill. The round
+  // key matches the server's (_activity_round_key): "2029R3" in a
+  // season, "2029WB2" in the winter break.
   const actKey = isWB ? `${c.year}WB${(c.wb_status && c.wb_status.round) || c.wb_round || 1}` : `${c.year}R${c.round}`;
   const actHtml = d => {
     if(d.happiness === undefined || d.happiness === null) return "";
-    if(Math.round(d.happiness) < 4) return "";
     if(d.activity_round === actKey) return ` <span class="note">✓ Activity done this round</span>`;
     const acts = (myTeam && myTeam.activities) || [];
     if(!acts.length) return "";
@@ -2308,6 +2338,25 @@ function renderTabs(){
   // out. Research needs a fully adapted car.
   const rv = (c.reg_view || (myTeam && myTeam.reg_view) || null);
   const regBox = $("reg-progress");
+  // v0.8.1: the tuning input shows the team's ACTUAL current tuning
+  // (it used to hardcode 0), and the label names the driver it
+  // favours — tuning follows the driver, not the seat.
+  const tunBox = $("tuning-val");
+  const tunLabel = $("tuning-label");
+  if(tunBox){
+    const mt = myTeamId ? (c.teams || []).find(t => t.id === myTeamId) : null;
+    tunBox.value = mt ? (mt.tuning || 0) : 0;
+    if(tunLabel && mt){
+      const d1 = mt.driver1_id ? (c.drivers || []).find(d => d.id === mt.driver1_id) : null;
+      const d2 = mt.driver2_id ? (c.drivers || []).find(d => d.id === mt.driver2_id) : null;
+      const tun = mt.tuning || 0;
+      tunLabel.textContent = tun === 0
+        ? "Tuning 0 — no driver favoured."
+        : (tun > 0
+          ? `Tuning +${tun} — favours ${d1 ? d1.name : "Driver 1"}, hurts ${d2 ? d2.name : "Driver 2"}.`
+          : `Tuning ${tun} — favours ${d2 ? d2.name : "Driver 2"}, hurts ${d1 ? d1.name : "Driver 1"}.`);
+    }
+  }
   if(regBox){
     if(!rv){
       regBox.innerHTML = "";
@@ -2320,7 +2369,7 @@ function renderTabs(){
       const fully = rv.unadapted_pct <= 0;
       regBox.innerHTML = `<p><b>Next regulations (${esc(rv.kind)} ${rv.year || ""}): ${rv.adapted_pct}% fitted · ${rv.unadapted_pct}% still to adapt</b></p>` +
         `<div class="bar-track" style="max-width:420px"><div class="bar-fill" style="width:${rv.adapted_pct}%; background:#2ecc71"></div></div>` +
-        `<p class="note">${fully ? "Fully adapted ✓ — regulation research is open." : `Cost to adapt the rest: ${money(rv.adapt_cost)} ($0.25M per point).`} Regulation research so far: ${money(rv.research)}.</p>`;
+        `<p class="note">${fully ? "Fully adapted ✓ — regulation research is open." : `Cost to adapt the rest: ${money(rv.adapt_cost)} ($0.30M per point).`} Regulation research so far: ${money(rv.research)}.</p>`;
       $("btn-reg-research").disabled = !fully;
       $("btn-reg-adapt").disabled = fully;
       $("btn-reg-adapt-10").disabled = fully;
@@ -2341,10 +2390,11 @@ function renderTabs(){
   // team's driver (main or T&R) by paying that driver's break fee —
   // the poaching section lists them with their team. In the winter
   // break the same buttons make OFFERS instead (max 3 per round).
-  // v0.7.1: the market is grouped by source — F1 free agents, then
-  // F2 drivers, then other teams' drivers (poaching) — each group
-  // its own small table with a group header. The rows are unchanged
-  // (same columns, same buttons), only the layout is denser.
+  // v0.7.1: the market is grouped by source — each group its own
+  // small table with a group header. The rows are unchanged (same
+  // columns, same buttons), only the layout is denser. v0.8.1: the
+  // F1 grid (poaching) sits on top, free agents and F2 sit side by
+  // side beneath it in a heavily condensed form.
   const freeAgents = c.drivers.filter(d => d.status === "free");
   const f2List = c.drivers.filter(d => d.status === "f2");
   const poachable = c.drivers.filter(d => (d.status === "f1" || d.status === "tr") && d.team_id && d.team_id !== myTeamId);
@@ -2394,17 +2444,14 @@ function renderTabs(){
       : [1, 2].map(s => costCell(d, String(s), `${verb} ${s}`)).join("");
     return `<div class="market-seats">${seatBtns}${costCell(d, "tr", trVerb)}${academyBtn}</div>`;
   };
-  const marketRow = d => {
+  // v0.8.1: the driver-name cell shared by the full and condensed
+  // market rows — name, WANTED badge, and the "meeting agreed" pill
+  // when one exists. The per-row "poaching needs a secret meeting
+  // first" hint is gone (the section header still explains how
+  // meetings work); the meeting requirement itself stays.
+  const marketNameCell = d => {
     const tm = d.team_id ? teamById(d.team_id) : null;
-    // v0.4.2: academy badge — the affiliated team of an academy
-    // junior, so you can see at a glance whose junior they are
-    // (and whose offers they will weigh more heavily).
     const acTeam = d.academy_team_id ? teamById(d.academy_team_id) : null;
-    const academyBadge = acTeam ? ` 🎓 Academy — ${esc(acTeam.name)}` : "";
-    const status = d.status === "free" ? "Free agent" : d.status === "f2" ? "F2" : (d.status === "tr" ? `T&R — ${tm ? esc(tm.name) : ""}` : (tm ? esc(tm.name) : "F1"));
-    // v0.4.3: T&R drivers are already team-coloured (their team);
-    // academy juniors get their ACADEMY team's colour — they
-    // represent that team. Free agents / unaffiliated F2 stay neutral.
     const nameColour = (d.status === "f1" || d.status === "tr") && tm ? tm.colour : (acTeam ? acTeam.colour : null);
     // v0.6: WANTED badge — a parent marks a market driver WANTED for
     // a team they supply; the mark + reward is shown to that team
@@ -2427,18 +2474,44 @@ function renderTabs(){
     // main/T&R driver, or another team's academy junior. The
     // meeting is per target; the sign pop-up handles each seat/T&R.
     const myMeetings = (c.my_meetings || {});
-    const isPoachRow = ((d.status === "f1" || d.status === "tr") && d.team_id && d.team_id !== myTeamId)
-      || ((d.status === "free" || d.status === "f2") && d.academy_team_id && d.academy_team_id !== myTeamId);
     const meet = myMeetings[d.id];
-    let meetTag = "";
-    if(meet) meetTag = ` <span class="pill adv">🤫 Meeting agreed — ${meet.target === "tr" ? "T&R" : "Seat " + meet.seat}${meet.bribe ? ` · ${money(meet.bribe)} bribe promised` : ""}</span>`;
-    else if(isPoachRow) meetTag = ` <span class="note">🤫 Poaching needs a secret meeting first</span>`;
-    return `<tr><td>${driverNameHtml(d.name, nameColour, d.cha, false)}${wantedBadge}${meetTag}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
+    const meetTag = meet ? ` <span class="pill adv">🤫 Meeting agreed — ${meet.target === "tr" ? "T&R" : "Seat " + meet.seat}${meet.bribe ? ` · ${money(meet.bribe)} bribe promised` : ""}</span>` : "";
+    return `${driverNameHtml(d.name, nameColour, d.cha, false)}${wantedBadge}${meetTag}`;
   };
+  const marketRow = d => {
+    const tm = d.team_id ? teamById(d.team_id) : null;
+    // v0.4.2: academy badge — the affiliated team of an academy
+    // junior, so you can see at a glance whose junior they are
+    // (and whose offers they will weigh more heavily).
+    const acTeam = d.academy_team_id ? teamById(d.academy_team_id) : null;
+    const academyBadge = acTeam ? ` 🎓 Academy — ${esc(acTeam.name)}` : "";
+    const status = d.status === "free" ? "Free agent" : d.status === "f2" ? "F2" : (d.status === "tr" ? `T&R — ${tm ? esc(tm.name) : ""}` : (tm ? esc(tm.name) : "F1"));
+    return `<tr><td>${marketNameCell(d)}</td><td>${d.age}</td><td>${d.cha}</td><td>${status}${academyBadge}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
+  };
+  // v0.8.1: the condensed row for the free-agent / F2 lists — just
+  // name, age, salary and the cost to sign (no titles, no status;
+  // hidden ratings are never shown).
+  const marketRowCondensed = d =>
+    `<tr><td>${marketNameCell(d)}</td><td>${d.age}</td><td>${money(d.salary)}</td><td>${myTeam ? signBtns(d) : ""}</td></tr>`;
   // v0.7.1: an ill driver sitting in T&R while they recover does not
   // count toward the fine the market warns about (the server counts
   // FIT T&R drivers only).
   const activeTrCount = myTeam && myTeam.tr_drivers ? myTeam.tr_drivers.filter(d => !d.ill_until_round).length : 0;
+  // v0.8.1: the F1 grid (poaching) sits on top; free agents and F2
+  // sit side by side beneath it, heavily condensed. In the winter
+  // break the poaching section is hidden (offers for other teams'
+  // drivers go through the winter-break card), so the two condensed
+  // lists are all there is.
+  const poachHtml = isWB ? "" :
+    `<h3 class="market-group">F1 grid — other teams' drivers (poaching)</h3><p class="note">Signing one of these costs their break fee (shown), on top of any seat break fee. Poaching needs a secret meeting first ($0.5M to set up) — tap a seat to request one; once the driver agrees, the signing goes through with the usual costs. A driver may also want a bribe — the amount is shown when you request the meeting.</p><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Team</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    poachable.map(marketRow).join("") + `</table></div>`;
+  const sideBySideHtml =
+    `<div style="display:flex; gap:16px; flex-wrap:wrap">` +
+    `<div style="flex:1 1 320px; min-width:0"><h3 class="market-group">F1 free agents (${freeAgents.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    freeAgents.map(marketRowCondensed).join("") + `</table></div></div>` +
+    `<div style="flex:1 1 320px; min-width:0"><h3 class="market-group">F2 (${f2List.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
+    f2List.map(marketRowCondensed).join("") + `</table></div></div>` +
+    `</div>`;
   $("market-box").innerHTML =
     `<p class="note">${isWB
       ? "Winter break: tap a button to add an OFFER for this round (max 3 offers, max 2 main seats, max 1 T&R). Submit them from the winter-break card, then hit NEXT. A driver signs with the best-placed constructors' team that offered them."
@@ -2448,12 +2521,7 @@ function renderTabs(){
     // one more T&R driver would cost this team per race.
     (myTeam && activeTrCount >= 2
       ? `<p class="note">⚠ Your team already has ${activeTrCount} T&R drivers — signing another would add a ${money(0.5 * (Math.pow(2, activeTrCount + 1 - 2) - 1))}/race T&R fine (exponential beyond the first 2).</p>` : "") +
-    `<h3 class="market-group">F1 free agents (${freeAgents.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
-    freeAgents.map(marketRow).join("") + `</table></div>` +
-    `<h3 class="market-group">F2 (${f2List.length})</h3><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Status</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
-    f2List.map(marketRow).join("") + `</table></div>` +
-    (isWB ? "" : `<h3 class="market-group">Other teams' drivers — poaching</h3><p class="note">Signing one of these costs their break fee (shown), on top of any seat break fee. Poaching needs a secret meeting first ($0.5M to set up) — tap a seat to request one; once the driver agrees, the signing goes through with the usual costs. A driver may also want a bribe — the amount is shown when you request the meeting.</p><div class="table-scroll"><table class="market-table"><tr><th>Driver</th><th>Age</th><th>Titles</th><th>Team</th><th>Salary/yr</th><th>Cost to sign</th></tr>` +
-    poachable.map(marketRow).join("") + `</table></div>`);
+    poachHtml + sideBySideHtml;
   document.querySelectorAll("[data-sign]").forEach(b => b.onclick = () => {
     pendingSign = { driver_id: b.dataset.sign, target: b.dataset.target, seat: b.dataset.seat ? parseInt(b.dataset.seat) : null, wb: isWB };
     renderTabs();
@@ -2620,10 +2688,19 @@ function renderTabs(){
   // (some true, some not), plus transfers and retirement rumours.
   const media = [...(c.media_rumours || [])].reverse();
   const mediaHtml = media.length
-    ? media.map(m => `<div>${esc(m.text)} <span class="note">(${m.year ? `R${m.round} ${m.year}` : ""}${m.kind && m.kind !== "rumour" ? ` · ${esc(m.kind)}` : ""})</span></div>`).join("")
+    ? media.map(m => `<div>${styleNames(m.text)} <span class="note">(${m.year ? `R${m.round} ${m.year}` : ""}${m.kind && m.kind !== "rumour" ? ` · ${esc(m.kind)}` : ""})</span></div>`).join("")
     : `<p class="note">No media rumours yet — the press starts talking once the season gets going.</p>`;
+  // v0.8.1: transfers are structured dicts now ({text, label}) —
+  // old saves still carry plain strings, which render without a
+  // round label. Names are styled like the standings (bold
+  // uppercase coloured surnames, coloured team names).
+  const transfersHtml = (c.transfers || []).map(t => {
+    const text = typeof t === "string" ? t : (t.text || "");
+    const label = typeof t === "string" ? "" : (t.label || "");
+    return `<div>${styleNames(text)}${label ? ` <span class="note">(${esc(label)})</span>` : ""}</div>`;
+  }).join("");
   $("media-box").innerHTML = `<details open><summary>Media rumours</summary>${mediaHtml}</details>` +
-    `<details><summary>Driver transfers</summary>${(c.transfers || []).map(t => `<div>${esc(t)}</div>`).join("") || "<p class='note'>None yet.</p>"}</details>` +
+    `<details><summary>Driver transfers</summary>${transfersHtml || "<p class='note'>None yet.</p>"}</details>` +
     `<details><summary>Retirement rumours</summary><button class="secondary" id="btn-rumours">Check retirement rumours</button><div id="rumours-box"><p class="note">Retirement chance starts at age 30 and rises gently with age — but a driver in a better position is less likely to go: performing well, scoring a big share of the team's points, in a frontrunning car, with a high reputation, or in a team on the way up. There is no maximum retirement age — a driver still performing at 50+ stays.</p></div></details>`;
   document.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => { viewingGP = parseInt(b.dataset.gp); renderTabs(); });
   // v0.7.0: clicking a champion year asks the server for that
