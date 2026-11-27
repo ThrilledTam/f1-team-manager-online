@@ -215,6 +215,33 @@ PALETTE = [
 
 _NOTE_TRIGGER = "chmenU"
 
+# v0.8.5: server-scoped room music — the SAME 15-song playlist the
+# client plays (ids/titles/artists/gains must match static/index.html;
+# tests/test_f1.py checks the ids agree). The server holds the shared
+# shuffled queue per room, so every player hears the same song at
+# the same time. A test below pins the list; if a song is added or
+# removed, change both places.
+MUSIC_PLAYLIST = [
+    {"title": "You're The Best", "artist": "Joe Esposito", "id": "jeS3wzOt0fQ", "gain": 1.15},
+    {"title": "Move Your Body", "artist": "Öwnboss & Sevek", "id": "UfiYPq7-M3E", "gain": 0.85},
+    {"title": "Drugs from Amsterdam", "artist": "Mau P", "id": "juuIhW8V1Xw", "gain": 0.85},
+    {"title": "Levitate", "artist": "Maduk", "id": "y8ooi9tBI4I", "gain": 0.9},
+    {"title": "Kings & Queens", "artist": "Maduk", "id": "Fr4QKiyBnwA", "gain": 0.9},
+    {"title": "Eye of the Tiger", "artist": "Survivor", "id": "btPJPFnesV4", "gain": 1.0},
+    {"title": "We Are the Champions", "artist": "Queen", "id": "04854XqcfCY", "gain": 1.05},
+    {"title": "Don't Stop Me Now", "artist": "Queen", "id": "HgzGwKwLmgM", "gain": 1.05},
+    {"title": "Uptown Funk", "artist": "Mark Ronson ft. Bruno Mars", "id": "OPf0YbXqDm0", "gain": 0.9},
+    {"title": "Can't Stop the Feeling!", "artist": "Justin Timberlake", "id": "ru0K8uYEZWw", "gain": 0.9},
+    {"title": "Happy", "artist": "Pharrell Williams", "id": "ZbZSe6N_BXs", "gain": 0.95},
+    {"title": "Shut Up and Dance", "artist": "WALK THE MOON", "id": "6JCLY0Rlx6Q", "gain": 0.9},
+    {"title": "September", "artist": "Earth, Wind & Fire", "id": "Gs069dndIYk", "gain": 1.05},
+    {"title": "Lose Yourself", "artist": "Eminem", "id": "7YuAzR2XVAM", "gain": 1.0},
+    {"title": "Stronger", "artist": "Kanye West", "id": "PsO6ZnUZI0g", "gain": 0.9},
+]
+# v0.8.5: a skip vote stays open this long (seconds) — if not every
+# connected human has voted by then, the vote ends with no skip.
+MUSIC_SKIP_VOTE_SECONDS = 30
+
 
 def new_code():
     while True:
@@ -306,6 +333,129 @@ def team_takeable(room, team, now=None):
                    f"it becomes available in {left}s.")
 
 
+def music_shuffle_order(ids, last_played_id=None):
+    """v0.8.5: Fisher-Yates over a copy — the server-side mirror of
+    the client's musicShuffleOrder (same rule: a reshuffle never
+    puts the just-played song first, so nobody hears the same song
+    twice in a row across a reshuffle)."""
+    order = list(ids)
+    random.shuffle(order)
+    if len(order) > 1 and last_played_id is not None \
+            and order[0] == last_played_id:
+        order[0], order[1] = order[1], order[0]
+    return order
+
+
+def room_music(room):
+    """v0.8.5: per-room server music state — the shared shuffled
+    queue, the current track index, when the current track started
+    (epoch seconds, so each client can seek to the elapsed position),
+    and the skip-vote state (None when no vote is open). Created
+    lazily so rooms created before v0.8.5 gain it on first use.
+    Transient: room-only, never in the save (same precedent as the
+    championship celebration)."""
+    m = room.get("music")
+    if m is None:
+        m = {"queue": music_shuffle_order([t["id"] for t in MUSIC_PLAYLIST]),
+             "idx": 0, "started_at": time.time(), "skip_vote": None}
+        room["music"] = m
+    return m
+
+
+def music_current(room):
+    """The track the room is hearing now: {id, title, artist, gain}
+    plus started_at (epoch seconds)."""
+    m = room_music(room)
+    track_id = m["queue"][m["idx"]]
+    track = next((t for t in MUSIC_PLAYLIST if t["id"] == track_id),
+                 MUSIC_PLAYLIST[0])
+    return {"id": track["id"], "title": track["title"],
+            "artist": track["artist"], "gain": track["gain"],
+            "started_at": m["started_at"]}
+
+
+def music_advance(room):
+    """v0.8.5: skip to the next track in the room's shared queue —
+    reshuffling (without repeating the just-played song first) when
+    the queue runs out. Resets started_at and clears any skip vote."""
+    m = room_music(room)
+    last = m["queue"][m["idx"]]
+    m["idx"] += 1
+    if m["idx"] >= len(m["queue"]):
+        m["queue"] = music_shuffle_order(
+            [t["id"] for t in MUSIC_PLAYLIST], last)
+        m["idx"] = 0
+    m["started_at"] = time.time()
+    m["skip_vote"] = None
+
+
+def music_skip_vote_state(room, viewer_player_id=None):
+    """The skip-vote state for the broadcast: None when no vote is
+    open, else {deadline (epoch), votes, needed, you_voted}. "All
+    players" is every CONNECTED human in the room — bots do not
+    vote, disconnected humans do not count. A lone human's click
+    therefore skips immediately (needed == 1)."""
+    m = room_music(room)
+    vote = m.get("skip_vote")
+    if not vote:
+        return None
+    needed = sum(1 for p in room["players"] if p.get("connected"))
+    voters = vote.get("voters") or []
+    return {"deadline": vote["deadline"], "votes": len(voters),
+            "needed": max(needed, 1),
+            "you_voted": viewer_player_id in voters}
+
+
+def music_skip_vote(room, player_id):
+    """v0.8.5: cast (or join) a skip vote. Clicking opens a
+    30-second window; if every connected human has voted in time,
+    the server skips to the next track at once. Returns
+    (ok, message, advanced). A vote that already expired is
+    replaced by a fresh one; a second click from the same player
+    inside one window is refused."""
+    m = room_music(room)
+    now = time.time()
+    vote = m.get("skip_vote")
+    if vote and now > vote["deadline"]:
+        vote = None
+        m["skip_vote"] = None
+    if vote is None:
+        vote = {"deadline": now + MUSIC_SKIP_VOTE_SECONDS,
+                "voters": [player_id]}
+        m["skip_vote"] = vote
+    elif player_id in vote["voters"]:
+        return False, "You already voted to skip — waiting on the others.", False
+    else:
+        vote["voters"].append(player_id)
+    needed = sum(1 for p in room["players"] if p.get("connected"))
+    if len(vote["voters"]) >= max(needed, 1):
+        music_advance(room)
+        return True, "Everyone voted — skipping to the next song. ⏭", True
+    return True, (f"Skip vote: {len(vote['voters'])}/{max(needed, 1)} "
+                  f"voted — waiting on the others."), False
+
+
+def music_report_ended(room, track_id):
+    """v0.8.5: a player reports their player reached the end of a
+    track (or the track errored — a dead video is treated as ended
+    so the room never sits stuck on it). Advances the shared queue
+    only if the ended track is still the current one: every
+    player's player ends at about the same time, so later reports
+    for the old track are ignored. Returns True if it advanced."""
+    if track_id and track_id == music_current(room)["id"]:
+        music_advance(room)
+        return True
+    return False
+
+
+def music_public(room, viewer_player_id=None):
+    """The room's music state for the broadcast: the current track
+    (so a joining player can seek straight to the elapsed position)
+    and the skip-vote state, if a vote is open."""
+    return {"track": music_current(room),
+            "skip_vote": music_skip_vote_state(room, viewer_player_id)}
+
+
 def room_public(room, viewer_player_id=None):
     """Room state for broadcast. The career is the public state (perf
     stripped when the chart is off); each player's own team details go in a
@@ -335,6 +485,10 @@ def room_public(room, viewer_player_id=None):
         "career_mode": room["career_mode"],
         "started": room["started"],
         "chart_on": room["chart_on"],
+        # v0.8.5: server-scoped room music — every player hears the
+        # same song (see music_public). The lobby has no room music:
+        # it keeps local playback.
+        "music": music_public(room, viewer_player_id),
     }
 
 
@@ -440,6 +594,13 @@ def my_team_public(room, player_id):
     out["dev_factor"] = game.team_dev_factor(career, team)
     out["finances"] = game.finances_view(career, team)
     out["empty_seats"] = game.empty_seats(career, team)
+    # v0.8.5: the manager assistant toggle (per-team, persisted) and
+    # its top-3 suggestions + pick — only when the toggle is on
+    # (None otherwise, so the dashboard shows no assistant box).
+    out["manager_assistant"] = bool(team.get("manager_assistant"))
+    out["assistant_suggestions"] = (
+        game.assistant_suggestions(career, team)
+        if team.get("manager_assistant") else None)
     return out
 
 
@@ -527,6 +688,14 @@ async def cleanup_loop():
         now = time.time()
         for code in list(ROOMS):
             room = ROOMS[code]
+            # v0.8.5: an expired skip vote ends with no skip — clear
+            # it and tell the room (the clients count down from the
+            # deadline themselves, so they already show it ending).
+            m = room.get("music")
+            if m and m.get("skip_vote") \
+                    and now > m["skip_vote"]["deadline"]:
+                m["skip_vote"] = None
+                await broadcast(room)
             if not room["players"] or not any(p["connected"] for p in room["players"]):
                 if room["empty_since"] is None:
                     room["empty_since"] = now
@@ -546,7 +715,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "rooms": len(ROOMS), "version": "v0.8.4"}
+    return {"ok": True, "rooms": len(ROOMS), "version": "v0.8.5"}
 
 
 @app.get("/api/saves")
@@ -1193,9 +1362,33 @@ async def ws_endpoint(ws: WebSocket):
                                             "ok": True, "message": why})
                     await broadcast(room)
 
+            elif mtype in ("music_skip_vote", "music_ended"):
+                # v0.8.5: server-scoped room music. A skip vote opens
+                # (or joins) a 30-second window; unanimous votes skip
+                # at once. A track-ended report advances the room's
+                # shared queue — but only if the ended track is still
+                # the current one (every player's player ends at
+                # about the same time, so later reports for the old
+                # track are ignored). No team needed: any connected
+                # player in the room can vote or report.
+                if mtype == "music_skip_vote":
+                    ok, why, _advanced = music_skip_vote(
+                        room, player["player_id"])
+                    if not ok:
+                        await send_error(ws, why)
+                    else:
+                        await ws.send_json({"type": "action",
+                                            "action": mtype, "ok": True,
+                                            "message": why})
+                    await broadcast(room)
+                else:
+                    if music_report_ended(room, msg.get("track_id")):
+                        await broadcast(room)
+
             elif mtype in ("save_note", "delete_note", "cheat_state",
                            "cheat_adjust", "cheat_driver",
-                           "cheat_retirements", "cheat_retire_toggle"):
+                           "cheat_retirements", "cheat_retire_toggle",
+                           "assistant_toggle"):
                 # v0.7.4: Notes and the cheats menu. Notes work between
                 # races and in the winter break (the tab is on the
                 # dashboard in both); the cheats menu opens from the
@@ -1285,6 +1478,19 @@ async def ws_endpoint(ws: WebSocket):
                             await broadcast(room)
                             await ws.send_json({"type": "cheat_state",
                                                 "cheat": game.cheat_state(career)})
+                    elif mtype == "assistant_toggle":
+                        # v0.8.5: the manager assistant toggle — a
+                        # per-team persisted setting (Settings tab).
+                        # The broadcast carries the new toggle state
+                        # (and suggestions) in my_team.
+                        ok, why = game.set_manager_assistant(
+                            career, team["id"], msg.get("on"))
+                        if not ok:
+                            await send_error(ws, why)
+                        else:
+                            await ws.send_json({"type": "action", "action": mtype,
+                                                "ok": True, "message": why})
+                            await broadcast(room)
 
             elif mtype == "start_next_season":
                 if not room["started"] or not career:
