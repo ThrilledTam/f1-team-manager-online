@@ -2550,15 +2550,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v082():
-    """The live version string is v0.8.3 everywhere it is shown."""
+def test_health_reports_v084():
+    """The live version string is v0.8.4 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.8.3"
+    assert client.get("/api/health").json()["version"] == "v0.8.4"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.8.3</title>" in html
-    assert "Online · v0.8.3 beta" in html
+    assert "<title>F1 Team Manager Online — v0.8.4</title>" in html
+    assert "Online · v0.8.4 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -11214,21 +11214,21 @@ def test_v083_dominance_helpers_and_historic_colours():
             assert page.evaluate("""() => {
                 const f = window.F1UI.dominanceIntensity;
                 return [f(19, 20, 60), f(20, 20, 60), f(40, 20, 60),
-                        f(60, 20, 60), f(100, 20, 60), f(39, 40, 80),
-                        f(60, 40, 80), f(80, 40, 80), f(0, 20, 60)];
+                        f(60, 20, 60), f(100, 20, 60), f(29, 30, 90),
+                        f(60, 30, 90), f(90, 30, 90), f(0, 20, 60)];
             }""") == [0, 0, 0.5, 1, 1, 0, 0.5, 1, 0]
             assert page.evaluate("""() => {
                 const t = window.F1UI.dominanceTint;
                 return [t("#75F1D3", 60, 20, 60), t("#75F1D3", 40, 20, 60),
                         t("#75F1D3", 10, 20, 60), t(null, 60, 20, 60),
-                        t("#D52F38", 80, 40, 80)];
+                        t("#D52F38", 90, 30, 90)];
             }""") == ["#75F1D32e", "#75F1D317", None, None, "#D52F382e"]
             assert page.evaluate("""() => {
                 const g = window.F1UI.dominanceGradient;
-                return [g(60, "#D52F38", 80, "#75F1D3"),
+                return [g(60, "#D52F38", 90, "#75F1D3"),
                         g(10, "#D52F38", 10, "#75F1D3"),
                         g(60, "#D52F38", 10, "#75F1D3"),
-                        g(10, "#D52F38", 80, "#75F1D3")];
+                        g(10, "#D52F38", 90, "#75F1D3")];
             }""") == ["linear-gradient(90deg, #D52F382e, #75F1D32e)", None,
                       "linear-gradient(90deg, #D52F382e, #75F1D300)",
                       "linear-gradient(90deg, #D52F3800, #75F1D32e)"]
@@ -11330,6 +11330,63 @@ def test_v083_dominance_helpers_and_historic_colours():
         thread.join(timeout=10)
 
 
+def test_v084_single_gap_gradients_and_constructors_ramp():
+    """v0.8.4: one-gap tints are GRADIENTS — a drivers' colour from
+    the LEFT, a constructors' colour from the RIGHT, fading to the
+    same colour at alpha 00 on the other side (never "transparent",
+    never black). The constructors' ramp is now 30→90 (0 below 30,
+    half at 60, max at 90); drivers stay 20→60. The podium-cover
+    gradient is the full faint level, the winner's colour from the
+    left (winner-based, not gap-ramped)."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            # The live thresholds: drivers 20→60, constructors 30→90.
+            assert page.evaluate("""() => [window.F1UI.dominanceDrvStart,
+                window.F1UI.dominanceDrvFull, window.F1UI.dominanceConStart,
+                window.F1UI.dominanceConFull]""") == [20, 60, 30, 90]
+            # Constructors' ramp: 0 below 30, half at 60, max at 90.
+            assert page.evaluate("""() => {
+                const f = window.F1UI.dominanceIntensity;
+                return [f(29, 30, 90), f(30, 30, 90), f(60, 30, 90),
+                        f(90, 30, 90), f(120, 30, 90)];
+            }""") == [0, 0, 0.5, 1, 1]
+            # One-sided gradients: the colour on its side at the
+            # gradual intensity, the same colour at alpha 00 on the
+            # other side; nothing when the gap is below the start
+            # or there is no colour.
+            assert page.evaluate("""() => {
+                const g = window.F1UI.dominanceSideGradient;
+                return [g("#D52F38", 60, 20, 60, "left"),
+                        g("#75F1D3", 90, 30, 90, "right"),
+                        g("#D52F38", 40, 20, 60, "left"),
+                        g("#75F1D3", 60, 30, 90, "right"),
+                        g("#D52F38", 10, 20, 60, "left"),
+                        g(null, 60, 20, 60, "left")];
+            }""") == ["linear-gradient(90deg, #D52F382e, #D52F3800)",
+                      "linear-gradient(90deg, #75F1D300, #75F1D32e)",
+                      "linear-gradient(90deg, #D52F3817, #D52F3800)",
+                      "linear-gradient(90deg, #75F1D300, #75F1D317)",
+                      None, None]
+            # Full-faint cover gradient: winner's colour from the left.
+            assert page.evaluate("""() => {
+                const g = window.F1UI.dominanceSideGradientFull;
+                return [g("#D52F38", "left"), g("#75F1D3", "right"),
+                        g(null, "left")];
+            }""") == ["linear-gradient(90deg, #D52F382e, #D52F3800)",
+                      "linear-gradient(90deg, #75F1D300, #75F1D32e)",
+                      None]
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
 def _v083_rigged_career():
     """A real career, rigged for the tint renders: Hamilton
     (Ferrari) leads the drivers by 80, Mercedes leads the
@@ -11394,7 +11451,9 @@ def _v083_rigged_career():
 def test_v083_standings_tint_and_results_gradient_render():
     """The standings boxes wash into the leader's colour at the
     pop-up's faint level when the gap is at full (drivers 80,
-    constructors 100, F2 80); the results screen shows the
+    constructors 100, F2 80) — as one-sided GRADIENTS (v0.8.4):
+    drivers' + F2 in Ferrari red from the LEFT, constructors' in
+    Mercedes cyan from the RIGHT. The results screen shows the
     two-sided gradient (Ferrari red left, Mercedes cyan right);
     with small gaps everywhere there is no tint at all."""
     pytest.importorskip("playwright")
@@ -11415,10 +11474,23 @@ def test_v083_standings_tint_and_results_gradient_render():
             box = page.evaluate(
                 "document.querySelector('#standings-box').innerHTML")
             assert box.count('class="dom-tint"') == 3
-            # All three tables at full faint: drivers' + F2 in
-            # Ferrari red, constructors' in Mercedes cyan.
-            assert box.count("background:#D52F382e") == 2
-            assert box.count("background:#75F1D32e") == 1
+            wraps = page.evaluate(
+                "[...document.querySelectorAll('#standings-box .dom-tint')]"
+                ".map(el => el.style.background)")
+            assert len(wraps) == 3
+            # Drivers' (Ferrari red) from the LEFT at full faint,
+            # fading to the same red at alpha 0 on the right.
+            assert wraps[0].startswith(
+                "linear-gradient(90deg, rgba(213, 47, 56, 0.18),")
+            assert "rgba(213, 47, 56, 0))" in wraps[0]
+            # Constructors' (Mercedes cyan) from the RIGHT at full
+            # faint, fading to the same cyan at alpha 0 on the left.
+            assert wraps[1].startswith(
+                "linear-gradient(90deg, rgba(117, 241, 211, 0),")
+            assert "rgba(117, 241, 211, 0.18))" in wraps[1]
+            # F2 (Ferrari red, academy) from the LEFT, like drivers'.
+            assert wraps[2].startswith(
+                "linear-gradient(90deg, rgba(213, 47, 56, 0.18),")
             # The results screen: two-sided gradient.
             career["phase"] = "race_results"
             career["last_race"] = []
@@ -11461,12 +11533,14 @@ def test_v083_standings_tint_and_results_gradient_render():
 
 def test_v083_history_tints_overlays_and_picker():
     """Race history: the year row takes the most updated
-    constructors' gap (Mercedes cyan, full faint); each podium
-    cover takes its race winner's colour at the faint level. The
+    constructors' gap (Mercedes cyan, full faint) as a gradient
+    from the RIGHT; each podium cover takes its race winner's
+    colour at the faint level as a gradient from the LEFT. The
     GP overlay shows the two-sided gradient from the gaps after
     that race (nothing when both gaps are below their start). The
     season-detail overlay tints each table from that season's
-    final gaps and colours historic teams (Renault yellow). The
+    final gaps (drivers' from the left, constructors' from the
+    right) and colours historic teams (Renault yellow). The
     activity picker greys out an activity already used this season."""
     pytest.importorskip("playwright")
     from playwright.sync_api import sync_playwright
@@ -11485,15 +11559,28 @@ def test_v083_history_tints_overlays_and_picker():
             page.evaluate("renderTabs()")
             hist = page.evaluate(
                 "document.querySelector('#history-box').innerHTML")
-            assert '<tr style="background:#75F1D32e">' in hist
-            cell_r1 = page.evaluate(
+            # The 2026 year row: constructors' gap 100 (full) —
+            # Mercedes cyan as a gradient from the RIGHT.
+            row_bg = page.evaluate(
                 "document.querySelector('.hist-cell[data-gp=\"0\"]')"
-                ".outerHTML")
-            assert 'style="background:#D52F382e"' in cell_r1  # Hamilton won R1
-            cell_r5 = page.evaluate(
+                ".closest('tr').style.background")
+            assert row_bg.startswith(
+                "linear-gradient(90deg, rgba(117, 241, 211, 0),")
+            assert "rgba(117, 241, 211, 0.18))" in row_bg
+            # Podium covers: winner's colour from the LEFT at full
+            # faint, fading to the same colour at alpha 0.
+            cell_r1_bg = page.evaluate(
+                "document.querySelector('.hist-cell[data-gp=\"0\"]')"
+                ".style.background")
+            assert cell_r1_bg.startswith(
+                "linear-gradient(90deg, rgba(213, 47, 56, 0.18),")
+            assert "rgba(213, 47, 56, 0))" in cell_r1_bg  # Hamilton won R1
+            cell_r5_bg = page.evaluate(
                 "document.querySelector('.hist-cell[data-gp=\"4\"]')"
-                ".outerHTML")
-            assert 'style="background:#75F1D32e"' in cell_r5  # Russell won R5
+                ".style.background")
+            assert cell_r5_bg.startswith(
+                "linear-gradient(90deg, rgba(117, 241, 211, 0.18),")
+            assert "rgba(117, 241, 211, 0))" in cell_r5_bg  # Russell won R5
             # GP overlay: R1's gaps are below both starts — no gradient.
             page.evaluate("() => { viewingGP = 0; openOverlay('gp', 'R1'); }")
             assert page.evaluate(
@@ -11542,6 +11629,10 @@ def test_v083_history_tints_overlays_and_picker():
                 "'[data-overlay=\"season\"] .table-scroll')]"
                 ".map(el => el.style.background)")
             assert scrolls[0] == ""  # drivers' gap 4: no tint
+            # Constructors' gap 44 (past the 30 start): Red Bull
+            # navy as a gradient from the RIGHT, at partial faint.
+            assert scrolls[1].startswith(
+                "linear-gradient(90deg, rgba(20, 89, 132, 0),")
             assert "20, 89, 132" in scrolls[1]  # Red Bull, faint
             shtml = page.evaluate(
                 "document.querySelector('[data-overlay=\"season\"] .ov-body')"
