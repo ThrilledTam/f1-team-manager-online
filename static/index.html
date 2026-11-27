@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.8.2</title>
+<title>F1 Team Manager Online — v0.8.3</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -13,6 +13,10 @@
   h2 { font-size: 20px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
   h3 { font-size: 16px; margin: 14px 0 6px; }
   .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:14px; margin:12px 0; min-width: 0; }
+  /* v0.8.3: dominance tints — a wrapper that carries a standings
+     section's faint team-colour background (the tables inside stay
+     transparent, so the wash shows through). */
+  .dom-tint { border-radius:8px; padding:8px; margin:6px 0; }
   /* Tap targets: every button is at least 44px tall (mouse click and touch tap
      both fire the same standard click handler; touch-action avoids double-tap
      zoom / double-firing on mobile). */
@@ -210,7 +214,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.2 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.3 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -501,7 +505,7 @@
 
 <!-- ================= MENU (v0.7.4) ================= -->
 <div id="screen-cheats" class="hidden">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.2 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.3 beta</span></h1>
   <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
   <p><label><input type="checkbox" id="cheat-custom-retirements"> Custom retirements</label> <span class="note">When ON, only drivers you toggle retire at season end — normal retirements are off. Turning it OFF clears every driver toggle.</span></p>
   <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
@@ -667,6 +671,13 @@ function renderOverlayBody(p){
     // A race in the current season has no snapshot yet (snapMap is
     // null), and the live table it then renders is correct.
     const snapMap = snapshotTeamMap(r.year);
+    // v0.8.3: DOMINANCE GRADIENT — the same gradient as the
+    // results screens, from the title races as they stood right
+    // after THIS race (Q3). The panel takes the gradient; with no
+    // gap on either side it clears back to its default #161b22.
+    const gg = raceGapsAfter(room.career.race_history, viewingGP);
+    const ggrad = dominanceGradient(gg.drvGap, gg.drvColour, gg.conGap, gg.conColour);
+    p.el.style.background = ggrad || "";
     const tables = (r.qual && r.race)
       ? `<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true, teams: snapMap })}<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {teams: snapMap})}`
       : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
@@ -752,8 +763,24 @@ function renderOverlayBody(p){
     const relNote = d.source === "game" && !d.has_relations
       ? `<p class="note">Team relationships were not recorded for this season (snapshots from before v0.7.2 carry none) — so no supplier is shown, rather than today's.</p>` : "";
     const realTag = d.source === "real" ? " (real F1)" : "";
-    html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
-      `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>${relNote}`;
+    // v0.8.3: each standings table takes its own tint from that
+    // season's FINAL gaps — drivers' table from the drivers' final
+    // gap (20→60), constructors' from the constructors' final gap
+    // (40→80). The gaps come from the detail itself: the baked-in
+    // real standings for 2010–2025, the season snapshots for game
+    // years (get_season_detail builds the detail from either).
+    const fin = seasonFinalGaps(d);
+    const drvLead = d.drivers.length ? d.drivers[0] : null;
+    const conLead = d.constructors.length ? d.constructors[0] : null;
+    const drvLeadEntry = drvLead ? ((drvLead.team_id && snapById[drvLead.team_id]) || snapByName[drvLead.team] || null) : null;
+    const drvLeadTm = drvLeadEntry ? snapTeam(drvLeadEntry) : null;
+    const drvLeadColour = drvLeadTm ? drvLeadTm.colour : (drvLead ? historicTeamColour(drvLead.team) : null);
+    const conLeadTm = conLead ? snapTeam(conLead) : null;
+    const conLeadColour = conLeadTm ? conLeadTm.colour : (conLead ? historicTeamColour(conLead.name) : null);
+    const drvTint = dominanceTint(drvLeadColour, fin.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
+    const conTint = dominanceTint(conLeadColour, fin.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
+    html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${drvTint ? ` style="background:${drvTint}"` : ""}><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
+      `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${conTint ? ` style="background:${conTint}"` : ""}><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>${relNote}`;
   } else if(p.id === "cheat-team"){
     // v0.7.4: the team pop-up — add/subtract perf and money. The
     // bodyKey is the team's current perf/money, so typing in the
@@ -1153,7 +1180,9 @@ function historyTeamObj(entry){
   if(!entry) return null;
   const live = entry.id ? teamById(entry.id)
     : (room && room.career ? room.career.teams.find(t => t.name === entry.name) : null);
-  return { name: entry.name, colour: live ? live.colour : null,
+  // v0.8.3: a historic team has no live team — fall back to its
+  // real-world colour instead of rendering plain.
+  return { name: entry.name, colour: live ? live.colour : historicTeamColour(entry.name),
            supplier_name: entry.supplier_name || null,
            supplier_id: entry.supplier_id || null,
            sup_stage: entry.sup_stage || 0 };
@@ -1268,6 +1297,161 @@ function dismissCelebration(){
   if(ov) ov.classList.add("hidden");
 }
 
+/* v0.8.3: DOMINANCE TINTS — the "era of domination" colours. The
+   whole standings table (drivers', constructors', F2), the
+   qualifying / race results screens, the race-history recaps and
+   the champion-history standings all wash faintly into the leading
+   team's colour. The tint is TRUE GRADUAL: 0 below the start
+   threshold, a linear ramp to the champion pop-up's faint level at
+   the full threshold, clamped at max above it. The pop-up's faint
+   level is alpha "2e" (46/255 ≈ 18% — see syncCelebration), reused
+   here as DOMINANCE_MAX_ALPHA so every tint in the game peaks at
+   exactly the pop-up's faintness. Text stays legible at full tint
+   (a faint wash over the dark background, light text on top).
+   Thresholds: drivers (F1 + F2) start 20 / full 60; constructors
+   start 40 / full 80. Gap = the leader's points over P2. */
+const DOMINANCE_MAX_ALPHA = "2e";
+const DOMINANCE_DRV_START = 20, DOMINANCE_DRV_FULL = 60;
+const DOMINANCE_CON_START = 40, DOMINANCE_CON_FULL = 80;
+/* v0.8.3: HISTORIC TEAM COLOURS — the standard real-world colour
+   for every team that appears in the real 2010–2025 standings, so
+   old standings show coloured drivers/teams instead of plain text.
+   A name that still races today reuses its current grid colour
+   (Mercedes cyan, Ferrari red, McLaren papaya, Red Bull navy,
+   Williams blue, Aston Martin green, Alpine blue, Haas silver);
+   the rest are the well-known livery colours (Renault yellow, Alfa
+   Romeo dark red, AlphaTauri grey, Racing Point pink, Force India
+   pink from the BWT era, Toro Rosso navy, Lotus gold, Sauber Stake
+   green, Caterham green, Marussia red, Manor Marussia red, HRT
+   yellow, Virgin red). Correctable — Matthew asked for the standard
+   colours and will say if any look off. */
+const HISTORIC_TEAM_COLOURS = {
+  "Red Bull": "#145984", "Ferrari": "#D52F38", "McLaren": "#EF9B33",
+  "Mercedes": "#75F1D3", "Williams": "#3267D4", "Aston Martin": "#4B9774",
+  "Alpine": "#479FE2", "Alpine F1 Team": "#479FE2",
+  "Haas": "#D5D7D8", "Haas F1 Team": "#D5D7D8",
+  "Racing Bulls": "#7091F8", "RB F1 Team": "#7091F8", "RB": "#7091F8",
+  "Audi": "#EB4526", "Cadillac": "#AAAAAD",
+  "Sauber": "#52E252", "Renault": "#FFF500", "Alfa Romeo": "#9B0000",
+  "AlphaTauri": "#8B949E", "Toro Rosso": "#1B2A6B",
+  "Racing Point": "#F596C8", "Force India": "#F596C8",
+  "Lotus": "#C8A951", "Lotus F1": "#C8A951", "Caterham": "#006B3F",
+  "Marussia": "#D21034", "Manor Marussia": "#D21034",
+  "HRT": "#FFC300", "Virgin": "#D00000",
+};
+const historicTeamColours = HISTORIC_TEAM_COLOURS;
+function historicTeamColour(name){
+  if(!name) return null;
+  if(HISTORIC_TEAM_COLOURS[name]) return HISTORIC_TEAM_COLOURS[name];
+  const live = room && room.career
+    ? room.career.teams.find(t => t.name === name) : null;
+  return live ? live.colour : null;
+}
+function dominanceIntensity(gap, start, full){
+  if(!(gap > start)) return 0;
+  if(gap >= full) return 1;
+  return (gap - start) / (full - start);
+}
+function dominanceTint(colour, gap, start, full){
+  // One team's colour at the gradual intensity — an 8-digit hex
+  // background, or null when there is nothing to show.
+  const k = dominanceIntensity(gap, start, full);
+  if(!colour || k <= 0) return null;
+  const a = Math.round(k * parseInt(DOMINANCE_MAX_ALPHA, 16))
+    .toString(16).padStart(2, "0");
+  return hexWithAlpha(colour, a);
+}
+function dominanceGradient(drvGap, drvColour, conGap, conColour){
+  // Left = drivers' leader at the drivers' intensity, right =
+  // constructors' leader at the constructors' intensity, the middle
+  // the natural blend of the two (a plain CSS two-stop gradient).
+  // A side below its threshold still contributes its colour at
+  // alpha 00 — never the "transparent" keyword, which would blend
+  // through black and muddy the middle.
+  const left = dominanceTint(drvColour, drvGap,
+    DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
+  const right = dominanceTint(conColour, conGap,
+    DOMINANCE_CON_START, DOMINANCE_CON_FULL);
+  if(!left && !right) return null;
+  const leftStop = left || (drvColour ? hexWithAlpha(drvColour, "00") : "transparent");
+  const rightStop = right || (conColour ? hexWithAlpha(conColour, "00") : "transparent");
+  return `linear-gradient(90deg, ${leftStop}, ${rightStop})`;
+}
+function championshipGaps(c){
+  // The live title races from the career state: each leader's gap
+  // over P2 and their team colour. Only the top two point totals
+  // matter for a gap (a tie is a 0 gap), so a plain points sort is
+  // enough — the standings' finer tie-breaks never change a gap.
+  // F2: the leader's colour is the colour their name is shown in
+  // (T&R team first, else academy); no affiliation, no tint.
+  const out = {drvGap: 0, drvColour: null, conGap: 0, conColour: null,
+               f2Gap: 0, f2Colour: null};
+  if(!c) return out;
+  const f1Pts = d => d.f2_tr ? (d.f1_points || 0) : (d.points || 0);
+  const drv = [...(c.drivers || []).filter(d => d.status === "f1"
+    || (d.status === "free" && d.points > 0) || (d.f1_races || 0) > 0)]
+    .sort((a, b) => f1Pts(b) - f1Pts(a));
+  if(drv.length > 1) out.drvGap = f1Pts(drv[0]) - f1Pts(drv[1]);
+  if(drv.length){
+    const tm = standingTeamFor(drv[0]);
+    out.drvColour = (drv[0].team_id && tm) ? tm.colour : null;
+  }
+  const teams = [...(c.teams || [])].sort((a, b) => (b.points || 0) - (a.points || 0));
+  if(teams.length > 1) out.conGap = (teams[0].points || 0) - (teams[1].points || 0);
+  if(teams.length) out.conColour = teams[0].colour || null;
+  const f2 = [...(c.drivers || []).filter(d => d.status === "f2" || d.f2_tr)]
+    .sort((a, b) => (b.points || 0) - (a.points || 0));
+  if(f2.length > 1) out.f2Gap = (f2[0].points || 0) - (f2[1].points || 0);
+  if(f2.length){
+    const d0 = f2[0];
+    const barTeam = (d0.f2_tr ? teamById(d0.team_id) : null)
+      || teamById(d0.academy_team_id);
+    out.f2Colour = barTeam ? barTeam.colour : null;
+  }
+  return out;
+}
+function raceGapsAfter(history, uptoIdx){
+  // The title races as they stood right after race uptoIdx: the
+  // cumulative points per driver / team across race_history entries
+  // [0..uptoIdx]. Points follow the driver across teams; a team's
+  // points are the sum of its drivers' points that race.
+  const out = {drvGap: 0, drvColour: null, conGap: 0, conColour: null};
+  const dp = {}, tp = {}, dteam = {};
+  for(let i = 0; i <= uptoIdx && i < (history || []).length; i++){
+    for(const r of (history[i].race || [])){
+      if(!r) continue;
+      const pts = r.points || 0;
+      if(r.driver_id){
+        dp[r.driver_id] = (dp[r.driver_id] || 0) + pts;
+        if(r.team_id) dteam[r.driver_id] = r.team_id;
+      }
+      if(r.team_id) tp[r.team_id] = (tp[r.team_id] || 0) + pts;
+    }
+  }
+  const dOrd = Object.keys(dp).sort((a, b) => dp[b] - dp[a]);
+  if(dOrd.length > 1) out.drvGap = dp[dOrd[0]] - dp[dOrd[1]];
+  if(dOrd.length){
+    const tm = teamById(dteam[dOrd[0]]);
+    out.drvColour = tm ? tm.colour : null;
+  }
+  const tOrd = Object.keys(tp).sort((a, b) => tp[b] - tp[a]);
+  if(tOrd.length > 1) out.conGap = tp[tOrd[0]] - tp[tOrd[1]];
+  if(tOrd.length){
+    const tm = teamById(tOrd[0]);
+    out.conColour = tm ? tm.colour : null;
+  }
+  return out;
+}
+function seasonFinalGaps(detail){
+  // A season detail's FINAL gaps (drivers' + constructors') from
+  // its standings arrays, which arrive in position order.
+  const drv = detail.drivers || [], con = detail.constructors || [];
+  return {
+    drvGap: drv.length > 1 ? (drv[0].points || 0) - (drv[1].points || 0) : 0,
+    conGap: con.length > 1 ? (con[0].points || 0) - (con[1].points || 0) : 0,
+  };
+}
+
 /* v0.8.2: BACKGROUND MUSIC — YouTube IFrame API, hidden audio-only
    player. No audio files in the repo (a public GitHub repo must not
    carry copyrighted MP3s); the game already needs internet, so
@@ -1281,8 +1465,16 @@ function dismissCelebration(){
    100 = maximum; each track carries a gain (default 1.0) so loud
    and quiet masters play at a consistent level — an approximation,
    not a true loudness measurement. Effective volume = slider x gain,
-   clamped to 0-100. */
-const F1_THEME = { title: "Formula 1 Theme", artist: "Brian Tyler", id: "KTETwgQnbsQ", gain: 0.9 };
+   clamped to 0-100.
+   v0.8.3: the v0.8.2 theme video (KTETwgQnbsQ) is DEAD — YouTube
+   oEmbed returns 403 and the watch page is blank, so the pop-up
+   showed but nothing played. The ID below is the same theme on the
+   official FORMULA 1 channel, verified embeddable (oEmbed 200, the
+   embed page loads clean); fallbackId is Brian Tyler's own upload,
+   also verified (oEmbed 200). If the theme errors in the player,
+   musicHandlePlayerError falls back (theme fallback upload, then
+   the playlist) so a dead video can never fail silently again. */
+const F1_THEME = { title: "Formula 1 Theme", artist: "Brian Tyler", id: "52khlKOl1do", fallbackId: "U4AfqxGJl00", gain: 0.9 };
 const MUSIC_PLAYLIST = [
   { title: "You're The Best", artist: "Joe Esposito", id: "jeS3wzOt0fQ", gain: 1.15 },
   { title: "Move Your Body", artist: "Öwnboss & Sevek", id: "UfiYPq7-M3E", gain: 0.85 },
@@ -1392,6 +1584,39 @@ function musicNextTrack(){
   musicIdx++;
   if(track) musicPlayTrack(track);
 }
+/* v0.8.3: a dead video must never fail silently again (the v0.8.2
+   theme showed its pop-up but played nothing). The decision is a
+   pure function so the automated tests can drive it without
+   YouTube: a theme error first tries the theme's fallback upload,
+   then falls back to the playlist (the pop-up follows the fallback
+   song, since musicNextTrack shows it); a playlist-track error just
+   skips to the next song. themeBroken is session state — once the
+   theme (and its fallback) have failed, musicSyncScreen stays on
+   the playlist for the rest of the session instead of retrying the
+   dead video on every broadcast. */
+let themeFallbackTried = false, themeBroken = false;
+function musicErrorFallback(track, mode, fallbackTried){
+  if(!track) return null;
+  if(mode === "theme" && track === F1_THEME){
+    if(F1_THEME.fallbackId && !fallbackTried) return "theme-fallback";
+    return "playlist";
+  }
+  return "next";
+}
+function musicHandlePlayerError(){
+  const action = musicErrorFallback(musicCurrent, musicMode, themeFallbackTried);
+  if(action === "theme-fallback"){
+    themeFallbackTried = true;
+    try{ if(musicPlayer) musicPlayer.loadVideoById(F1_THEME.fallbackId); }catch(e){}
+  } else if(action === "playlist"){
+    themeFallbackTried = false;
+    themeBroken = true;
+    musicMode = "playlist";
+    musicNextTrack();
+  } else if(action === "next"){
+    musicNextTrack();
+  }
+}
 function musicSyncScreen(screen){
   // Results screens get the F1 Theme; everything else gets the
   // playlist. A mode change switches the track; staying on the same
@@ -1399,7 +1624,8 @@ function musicSyncScreen(screen){
   // broadcast). Returning to the playlist after results advances
   // to the next song in the queue (a fresh shuffle if it ran out)
   // rather than resuming the interrupted song mid-way.
-  const mode = screen === "results" ? "theme" : "playlist";
+  // v0.8.3: a broken theme stays broken for the session (see above).
+  const mode = screen === "results" && !themeBroken ? "theme" : "playlist";
   if(mode === musicMode) return;
   musicMode = mode;
   if(mode === "theme") musicPlayTrack(F1_THEME);
@@ -1415,11 +1641,17 @@ function musicCreatePlayer(){
       events: {
         onReady: () => { if(musicInteracted && musicCurrent) musicPlayTrack(musicCurrent); },
         onStateChange: e => {
-          if(e && e.data === YT.PlayerState.ENDED){
+          if(!e) return;
+          // v0.8.3: the theme playing cleanly clears the fallback
+          // flag (a fresh theme play may try its fallback again).
+          if(e.data === YT.PlayerState.PLAYING && musicCurrent === F1_THEME) themeFallbackTried = false;
+          if(e.data === YT.PlayerState.ENDED){
             if(musicMode === "theme") musicPlayTrack(F1_THEME);
             else musicNextTrack();
           }
         },
+        // v0.8.3: a dead video falls back instead of failing silent.
+        onError: () => { musicHandlePlayerError(); },
       },
     });
   }catch(e){ musicPlayer = null; }
@@ -1447,6 +1679,8 @@ document.addEventListener("keydown", musicFirstInteract);
 /* Exposed for the automated markup tests (see tests/test_f1.py). */
 window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor, driverInitials, styleNames,
   musicPlaylist: MUSIC_PLAYLIST, f1Theme: F1_THEME, musicEffectiveVolume, musicShuffleOrder, songPopupDurationMs,
+  musicErrorFallback, dominanceIntensity, dominanceTint, dominanceGradient, championshipGaps, historicTeamColours,
+  historicTeamColour, raceGapsAfter, seasonFinalGaps,
   setMusicVolume, musicVolume, showSongPopup, hideSongPopup, syncCelebration, celebrationSignature, celebrationHtml };
 
 function colourPicker(elId, current, onPick){
@@ -1641,6 +1875,17 @@ function renderResults(){
   $("results-table").innerHTML = rows.length
     ? classificationTable(rows, { showGL: !isQual })
     : "<p class='note'>No results yet.</p>";
+  // v0.8.3: DOMINANCE GRADIENT — the results screen washes into
+  // the era of domination: the drivers' leader's colour on the
+  // left, the constructors' leader's on the right, the blend in
+  // the middle. The screen takes the gradient and the results card
+  // goes transparent so the wash shows through the table; with no
+  // gap on either side both styles clear back to the defaults.
+  const gaps = championshipGaps(c);
+  const grad = dominanceGradient(gaps.drvGap, gaps.drvColour, gaps.conGap, gaps.conColour);
+  $("screen-results").style.background = grad || "";
+  const resCard = $("results-table").parentElement;
+  if(resCard) resCard.style.background = grad ? "transparent" : "";
   // v0.6.2: the repair bill for this race's DNFs, if any.
   const nDnf = isQual ? 0 : rows.filter(r => r.pos === "DNF").length;
   $("results-repairs").textContent = nDnf
@@ -2114,12 +2359,21 @@ function renderDriversTab(){
   // key matches the server's (_activity_round_key): "2029R3" in a
   // season, "2029WB2" in the winter break.
   const actKey = isWB ? `${c.year}WB${(c.wb_status && c.wb_status.round) || c.wb_round || 1}` : `${c.year}R${c.round}`;
+  // v0.8.3: each activity may be used only once per season per
+  // team — used ones render greyed out (disabled) in the picker
+  // for the whole team until next season. The server enforces it
+  // too (do_activity), so a stale page can never sneak one through.
   const actHtml = d => {
     if(d.happiness === undefined || d.happiness === null) return "";
     if(d.activity_round === actKey) return ` <span class="note">✓ Activity done this round</span>`;
     const acts = (myTeam && myTeam.activities) || [];
     if(!acts.length) return "";
-    return ` <select class="act-select" data-act-driver="${d.id}">${acts.map(a => `<option value="${a.id}">${esc(a.name)} — ${money(a.cost)} (+${a.happiness} mood, +${a.loyalty} loyalty)</option>`).join("")}</select> <button data-act-do="${d.id}">Do activity</button>`;
+    const used = new Set((myTeam && myTeam.activities_used) || []);
+    const opts = acts.map(a => used.has(a.id)
+      ? `<option value="${a.id}" disabled>${esc(a.name)} — used this season</option>`
+      : `<option value="${a.id}">${esc(a.name)} — ${money(a.cost)} (+${a.happiness} mood, +${a.loyalty} loyalty)</option>`).join("");
+    const allUsed = acts.every(a => used.has(a.id));
+    return ` <select class="act-select" data-act-driver="${d.id}">${opts}</select> <button data-act-do="${d.id}"${allUsed ? " disabled" : ""}>Do activity</button>${allUsed ? ` <span class="note">All activities used this season</span>` : ""}`;
   };
   const emptySeats = t.empty_seats || [];
   const trs = t.tr_drivers || [];
@@ -2915,12 +3169,20 @@ function renderTabs(){
   // like free agents in the F1 table. Same sort and listing as before.
   // v0.8.0: a T&R driver still racing in F2 (f2_tr) takes their T&R
   // team's colour instead, with a small T&R badge.
-  $("standings-box").innerHTML = `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; const v = f1Val(d); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") + "</table></div>" +
-    `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td><td>${t.season_wins || 0}</td></tr>`).join("") + "</table></div>" +
-    `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
-    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const trTeam = d.f2_tr ? teamById(d.team_id) : null; const nameColour = trTeam ? trTeam.colour : (atm ? atm.colour : null); const barTeam = trTeam || atm; const trTag = d.f2_tr ? ` <span class="f2-tr-badge" title="Also holds an F1 Test & Reserve contract — still racing F2">T&R</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!barTeam, barTeam ? barTeam.colour : null)}${trTag}</td><td>${atm ? teamNameHtml(atm) : (trTeam ? teamNameHtml(trTeam) : "—")}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>";
+  // v0.8.3: DOMINANCE TINTS — each standings table washes faintly
+  // into its leader's team colour (whole table, true gradual with
+  // the gap: drivers 20→60, constructors 40→80, F2 like drivers).
+  const gaps = championshipGaps(c);
+  const drvTint = dominanceTint(gaps.drvColour, gaps.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
+  const conTint = dominanceTint(gaps.conColour, gaps.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
+  const f2Tint = dominanceTint(gaps.f2Colour, gaps.f2Gap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
+  const tintWrap = (tint, inner) => `<div class="dom-tint"${tint ? ` style="background:${tint}"` : ""}>${inner}</div>`;
+  $("standings-box").innerHTML = tintWrap(drvTint, `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
+    drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; const v = f1Val(d); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") + "</table></div>") +
+    tintWrap(conTint, `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
+    teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td><td>${t.season_wins || 0}</td></tr>`).join("") + "</table></div>") +
+    tintWrap(f2Tint, `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
+    (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const trTeam = d.f2_tr ? teamById(d.team_id) : null; const nameColour = trTeam ? trTeam.colour : (atm ? atm.colour : null); const barTeam = trTeam || atm; const trTag = d.f2_tr ? ` <span class="f2-tr-badge" title="Also holds an F1 Test & Reserve contract — still racing F2">T&R</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!barTeam, barTeam ? barTeam.colour : null)}${trTag}</td><td>${atm ? teamNameHtml(atm) : (trTeam ? teamNameHtml(trTeam) : "—")}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>");
   // Chart
   if(room.chart_on){
     const max = Math.max(...c.teams.map(t => t.perf || 0), 1);
@@ -2944,7 +3206,25 @@ function renderTabs(){
   const firstYear = 2026;
   for(let y = firstYear; y <= c.year; y++) seasons.push(y);
   const gridHead = `<tr><th>Season</th>${Array.from({length: 12}, (_, i) => `<th>R${i + 1}</th>`).join("")}</tr>`;
+  // v0.8.3: each year's row takes the most updated constructors'
+  // gap as its background tint — the final gap for a completed
+  // season (from its snapshot), the latest gap for the current
+  // season (from the live teams). Each race's podium cover rests
+  // on that tinted row with its own background: the race winner's
+  // team colour at the pop-up's faint level.
+  const conForYear = y => {
+    const sorted = arr => [...arr].sort((a, b) => (b.points || 0) - (a.points || 0));
+    const snap = y === c.year ? null : snapshotForYear(y);
+    const t = y === c.year ? sorted(c.teams)
+      : (snap ? sorted(snap.teams || []) : []);
+    if(!t.length) return {gap: 0, colour: null};
+    const lt = teamById(t[0].id) || c.teams.find(tm => tm.name === t[0].name) || null;
+    return {gap: t.length > 1 ? (t[0].points || 0) - (t[1].points || 0) : 0,
+            colour: lt ? lt.colour : null};
+  };
   const gridRows = seasons.map(y => {
+    const yCon = conForYear(y);
+    const rowTint = dominanceTint(yCon.colour, yCon.gap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
     const cells = Array.from({length: 12}, (_, i) => {
       const idx = histByKey[y + "-" + (i + 1)];
       if(idx === undefined) return `<td><div class="hist-cell empty">—</div></td>`;
@@ -2954,9 +3234,12 @@ function renderTabs(){
         const col = tm ? tm.colour : "#8b949e";
         return `<div style="color:${col}; font-weight:700">${esc(driverInitials(x.driver))}</div>`;
       }).join("");
-      return `<td><div class="hist-cell" data-gp="${idx}" title="${esc(r.circuit || "")} — click for the full GP">${tops}</div></td>`;
+      const win = (r.top3 || [])[0];
+      const winTm = win ? (win.team_id ? teamById(win.team_id) : c.teams.find(t => t.name === win.team)) : null;
+      const winTint = winTm ? hexWithAlpha(winTm.colour, DOMINANCE_MAX_ALPHA) : null;
+      return `<td><div class="hist-cell" data-gp="${idx}"${winTint ? ` style="background:${winTint}"` : ""} title="${esc(r.circuit || "")} — click for the full GP">${tops}</div></td>`;
     }).join("");
-    return `<tr><td>${y}</td>${cells}</tr>`;
+    return `<tr${rowTint ? ` style="background:${rowTint}"` : ""}><td>${y}</td>${cells}</tr>`;
   }).join("");
   const hist = `<div class="table-scroll"><table class="hist-grid">${gridHead}${gridRows}</table></div>
     <p class="note">Tap a race to see its full qualifying + race tables.</p>`;
@@ -2989,7 +3272,10 @@ function renderTabs(){
             return entry ? historyTeamObj(entry) : null;
           }
           const live = c.teams.find(t => t.name === name);
-          return live ? { name: live.name, colour: live.colour } : null;
+          // v0.8.3: a real 2010–2025 team has no live team — use
+          // its historic colour instead of rendering plain.
+          return live ? { name: live.name, colour: live.colour }
+            : { name, colour: historicTeamColour(name) };
         };
         const tm = teamDisplay(h.team);
         const wt = teamDisplay(h.winning_team);
