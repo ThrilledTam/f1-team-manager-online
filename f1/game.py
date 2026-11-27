@@ -1698,7 +1698,12 @@ def do_activity(career, team_id, driver_id, activity_id, rng=None):
     always accept (unless ill). A declined activity costs nothing
     and does not use up the one-per-driver-per-round slot. One
     activity per driver per round, and the team must afford the
-    cost. Raises that driver's happiness and loyalty with the team."""
+    cost. Raises that driver's happiness and loyalty with the team.
+    v0.8.3: each activity may be used only once per season per team
+    (tracked on team["activities_used"], reset at the season
+    rollover); a winter-break use counts toward the outgoing
+    season's set, which the rollover then wipes, so it never blocks
+    the new season."""
     rng = rng or random
     team = get_team(career, team_id)
     if not team:
@@ -1718,6 +1723,16 @@ def do_activity(career, team_id, driver_id, activity_id, rng=None):
     if d.get("activity_round") == key:
         return False, (f"You already did an activity with {d['name']} "
                        f"this round.")
+    # v0.8.3: each activity may be used only ONCE per season per
+    # team — using it marks it used for the whole team until the
+    # next season (reset in start_next_season). A declined activity
+    # never marks anything (like the one-per-round slot, a decline
+    # costs nothing and burns nothing), and the check runs before
+    # any money is charged.
+    used = team.setdefault("activities_used", [])
+    if activity_id in used:
+        return False, (f"{act['name']} was already used this season — "
+                       f"it is available again next season.")
     if act["cost"] > team["money"]:
         return False, (f"Not enough money — {act['name']} costs "
                        f"${act['cost']:.2f}M.")
@@ -1731,6 +1746,9 @@ def do_activity(career, team_id, driver_id, activity_id, rng=None):
     team["money"] = round(team["money"] - act["cost"], 2)
     _bump_relation(d, team_id, act["happiness"], act["loyalty"])
     d["activity_round"] = key
+    # v0.8.3: mark the activity used for the team this season.
+    if activity_id not in used:
+        used.append(activity_id)
     return True, (f"{act['name']} with {d['name']} ✓ — they are happier "
                   f"({rules_mod.happiness_word(happiness_with(d, team_id))})")
 
@@ -4592,9 +4610,13 @@ def detect_championship_clinch(career):
     decided (the pre-race gap next race is this race's post-race
     gap, against a smaller maximum), a clinch can never fire twice.
     Returns the celebration dict, or None. The trophy count is the
-    driver's titles already in champion_history (real 2010-2025 +
-    game seasons) PLUS this one — the history row for this season is
-    only written at end_of_season."""
+    driver's cumulative career championships (d["cha"], seeded from
+    the real record and incremented at end_of_season) PLUS this one
+    — cha is still the count BEFORE this title when the clinch is
+    detected at race end, since the increment happens at the season
+    rollover. (v0.8.2 counted champion_history rows instead, which
+    only go back to 2010 — Hamilton showed 7 after winning his 8th
+    in 2026, because his 2008 title has no row.)"""
     race_rows = career.get("last_race") or []
     race_pts = {}
     team_race_pts = {}
@@ -4646,14 +4668,16 @@ def detect_championship_clinch(career):
         tm = get_team(career, d["team_id"]) if d and d.get("team_id") else None
         if not tm and d and d.get("last_team_id"):
             tm = get_team(career, d["last_team_id"])
-        past = sum(1 for h in (career.get("champion_history") or [])
-                   if h.get("driver") == d["name"])
+        # v0.8.3: trophies come from the driver's own cumulative
+        # count (d["cha"]) + this title — never by counting history
+        # rows, which start at 2010 and miss pre-2010 titles
+        # (Hamilton 2008, Alonso 2005/2006).
         cel["driver"] = {
             "name": d["name"],
             "team": tm["name"] if tm else "",
             "team_id": tm["id"] if tm else None,
             "colour": tm["colour"] if tm else None,
-            "trophies": past + 1,
+            "trophies": (d.get("cha") or 0) + 1,
         }
     if team_champ_id is not None:
         tm = get_team(career, team_champ_id)
@@ -5963,6 +5987,9 @@ def start_next_season(career, rng=None):
         team["junior_share_received_season"] = 0.0
         team["junior_share_last_race"] = 0.0
         team["junior_share_received_last_race"] = 0.0
+        # v0.8.3: the once-per-season activity uses reset with the
+        # new season — every activity is available again.
+        team["activities_used"] = []
     career["relation_proposals"] = []
     # v0.4: apply the pending reg change now — the winter break's
     # last-minute R&D is included because it ran before this point.
@@ -6477,6 +6504,9 @@ def public_state(career, chart_on, viewer_team_id=None):
         # server in the broadcast. Each client only gets its OWN
         # team's notes, attached in my_team_public (server.py).
         team.pop("notes", None)
+        # v0.8.3: the once-per-season activity uses are private to
+        # the team too (each client gets its own in my_team_public).
+        team.pop("activities_used", None)
     # v0.4: replacement / signing costs for the viewer's team,
     # computed server-side from the exact formula the signing
     # functions charge, so the Driver Market always shows the number

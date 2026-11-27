@@ -14,7 +14,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 18  # v0.8.1: structured transfers (see migrate_save)
+SAVE_VERSION = 19  # v0.8.3: once-per-season activity uses (see migrate_save)
 # on every team, default empty; private — stripped from the broadcast
 # state, only ever sent to the owning team). v0.7.3: F2 promotions reworked (a T&R driver
 # still racing in F2 keeps their F2 tally in the plain fields and
@@ -370,6 +370,9 @@ def migrate_save(doc):
         team.setdefault("junior_share_season", 0.0)
         team.setdefault("junior_share_received_last_race", 0.0)
         team.setdefault("junior_share_received_season", 0.0)
+        # v0.8.3: once-per-season activity uses — an older save has
+        # none recorded, so every activity is available.
+        team.setdefault("activities_used", [])
     doc.setdefault("relation_proposals", [])
     # v0.6.6: pending donation requests between supplied teams.
     # v0.8.2: the championship celebration is transient (derived at
