@@ -2550,15 +2550,15 @@ def test_v03_market_compact_no_rep_history_grid():
         proc.terminate()
 
 
-def test_health_reports_v080():
-    """The live version string is v0.8.1 everywhere it is shown."""
+def test_health_reports_v082():
+    """The live version string is v0.8.2 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.8.1"
+    assert client.get("/api/health").json()["version"] == "v0.8.2"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.8.1</title>" in html
-    assert "Online · v0.8.1 beta" in html
+    assert "<title>F1 Team Manager Online — v0.8.2</title>" in html
+    assert "Online · v0.8.2 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -9853,15 +9853,17 @@ def test_v080_media_rumours_generated_per_race():
 
 
 def test_v080_tab_groups_and_media_split_markup():
-    """v0.8.0 (3/5): the dashboard has 11 tabs in 4 groups (Team,
+    """v0.8.0 (3/5): the dashboard has 12 tabs in 4 groups (Team,
     Money & Deals, Results, System), each group titled and shaded;
     History and Media & Rumours are separate tabs; the tab bar never
-    scrolls horizontally."""
+    scrolls horizontally. v0.8.2 adds the 12th tab: Settings, in the
+    System group."""
     import re
     html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
     tabs = re.findall(r'<button data-tab="([^"]+)"', html)
     assert tabs == ["drivers", "research", "notes", "finances", "relations",
-                    "market", "standings", "chart", "history", "media", "saves"]
+                    "market", "standings", "chart", "history", "media",
+                    "saves", "settings"]
     for title in ("Team", "Money &amp; Deals", "Results", "System"):
         assert title in html
     assert 'id="tab-media"' in html and 'id="media-box"' in html
@@ -9974,7 +9976,7 @@ def test_v080_tab_groups_no_scroll_browser():
                                     return r.width > 0 && r.height > 0; }),
                                 titles};
                     }""")
-                    assert info["tabCount"] == 11, (label, info)
+                    assert info["tabCount"] == 12, (label, info)
                     assert info["allVisible"], (label, info)
                     assert info["scrollW"] <= info["clientW"], (label, info)
                     assert info["overflowX"] in ("visible", "clip"), (label, info)
@@ -10410,3 +10412,657 @@ def test_v081_transfers_structured_with_labels_and_migration():
     assert migrated["transfers"][1]["text"].startswith("Max Verstappen")
     assert not any("junior share" in t["text"]
                    for t in migrated["transfers"])
+
+
+# ---------------------------------------------------------------------------
+# v0.8.2 — Matthew's second playtest: market buttons, rumours polish,
+# driver-message cap, history ordering, championship celebration,
+# background music.
+# ---------------------------------------------------------------------------
+
+def _v082_rig_points(career, leader_name, leader_pts, second_name,
+                     second_pts, leader_scored, second_scored):
+    """Rig a two-driver title fight for detect_championship_clinch:
+    set the two drivers' points and fabricate the last_race rows for
+    the points they scored in the race just run."""
+    drv = {d["name"]: d for d in career["drivers"]}
+    leader, second = drv[leader_name], drv[second_name]
+    leader["points"] = leader_pts
+    second["points"] = second_pts
+    career["last_race"] = [
+        {"driver_id": leader["id"], "team_id": leader.get("team_id"),
+         "points": leader_scored},
+        {"driver_id": second["id"], "team_id": second.get("team_id"),
+         "points": second_scored},
+    ]
+    return leader, second
+
+
+def test_v082_clinch_detected_exactly_on_clinch_race():
+    """Driver title: the gap becomes unassailable at the end of THIS
+    race (it was not before). Round 10: leader 230 (scored 25) vs
+    P2 150 (scored 0) — pre-gap 55 <= 75, post-gap 80 > 50."""
+    career = two_human_career()
+    career["round"] = 10
+    # Teams rigged so no constructors' clinch fires at the same time.
+    for t in career["teams"]:
+        t["points"] = 300 if t["name"] == "Red Bull" else 280
+    leader, _ = _v082_rig_points(
+        career, "Max Verstappen", 230, "Lewis Hamilton", 150, 25, 0)
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"]["name"] == "Max Verstappen"
+    assert cel["team"] is None
+    past = sum(1 for h in career["champion_history"]
+               if h["driver"] == "Max Verstappen")
+    assert cel["driver"]["trophies"] == past + 1  # 4 real + this one
+    assert cel["driver"]["team"] == "Red Bull"
+    assert cel["year"] == 2026 and cel["round"] == 10
+
+
+def test_v082_clinch_not_when_already_decided_before_race():
+    """Same points but one race earlier in the fight: leader 260
+    (scored 25) vs P2 150 — pre-gap 85 > 75, so the title was
+    already decided before this race: no celebration."""
+    career = two_human_career()
+    career["round"] = 10
+    _v082_rig_points(career, "Max Verstappen", 260,
+                     "Lewis Hamilton", 150, 25, 0)
+    assert game.detect_championship_clinch(career) is None
+
+
+def test_v082_clinch_not_again_in_later_race():
+    """The race AFTER a clinch: round 11, leader 230 (scored 25) vs
+    P2 150 — pre-gap 55 > 50 (two races were left before round 11),
+    so it was decided before this race too: no second celebration."""
+    career = two_human_career()
+    career["round"] = 11
+    _v082_rig_points(career, "Max Verstappen", 230,
+                     "Lewis Hamilton", 150, 25, 0)
+    assert game.detect_championship_clinch(career) is None
+
+
+def test_v082_clinch_constructors_and_both_together():
+    """Team title: 43 points max per race (25+18). Round 10: Red
+    Bull 400 (scored 43) vs Mercedes 300 — pre-gap 57 <= 129,
+    post-gap 100 > 86. And when both titles clinch in the same
+    race, one celebration carries both, driver first."""
+    career = two_human_career()
+    career["round"] = 10
+    rb = next(t for t in career["teams"] if t["name"] == "Red Bull")
+    merc = next(t for t in career["teams"] if t["name"] == "Mercedes")
+    rb["points"] = 400
+    merc["points"] = 300
+    d1 = game.get_driver(career, rb["driver1_id"])
+    d2 = game.get_driver(career, rb["driver2_id"])
+    career["last_race"] = [
+        {"driver_id": d1["id"], "team_id": rb["id"], "points": 25},
+        {"driver_id": d2["id"], "team_id": rb["id"], "points": 18},
+    ]
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"] is None
+    assert cel["team"]["name"] == "Red Bull"
+    # Both together: add a driver clinch on top.
+    _v082_rig_points(career, "Max Verstappen", 230,
+                     "Lewis Hamilton", 150, 25, 0)
+    career["last_race"] = [
+        {"driver_id": d1["id"], "team_id": rb["id"], "points": 25},
+        {"driver_id": d2["id"], "team_id": rb["id"], "points": 18},
+        {"driver_id": next(d for d in career["drivers"]
+                           if d["name"] == "Lewis Hamilton")["id"],
+         "team_id": merc["id"], "points": 0},
+    ]
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"]["name"] == "Max Verstappen"
+    assert cel["team"]["name"] == "Red Bull"
+
+
+def test_v082_clinch_final_race_decides_tied_fight():
+    """The finale always decides the title if it was not decided
+    before it — even when the post-race gap is small. Round 12:
+    leader 200 (scored 0) vs P2 210 after the race (scored 25):
+    P2 leads 210-200 after the race, pre-gap was 15 <= 25, so P2
+    is celebrated."""
+    career = two_human_career()
+    career["round"] = 12
+    _v082_rig_points(career, "Max Verstappen", 200,
+                     "Lewis Hamilton", 210, 0, 25)
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"]["name"] == "Lewis Hamilton"
+
+
+def test_v082_clinch_fires_after_final_race_votes():
+    """End to end: play to the round-12 finale with a tight title
+    fight rigged before it, vote through the results screens, and
+    the celebration is still there on the winter-break dashboard —
+    naming the champion the season rollover just crowned."""
+    career = two_human_career()
+    rng = seeded(7)
+    for _ in range(11):
+        play_full_round(career, rng)
+    assert career["round"] == 12 and career["phase"] == "round"
+    standings = game.race_mod.driver_standings(career)
+    leader, second = standings[0], standings[1]
+    for d in career["drivers"]:
+        if d["id"] not in (leader["id"], second["id"]):
+            d["points"] = min(d["points"], 100)
+    leader["points"] = 200
+    second["points"] = 185
+    for t in career["teams"]:
+        t["points"] = min(t["points"], 250)
+    for d, pts in ((leader, 300), (second, 280)):
+        tm = game.get_team(career, d.get("team_id"))
+        if tm:
+            tm["points"] = pts
+    play_full_round(career, rng)
+    assert career["phase"] == "winter_break"
+    cel = career.get("celebration")
+    assert cel is not None
+    assert cel["driver"] is not None
+    # The rollover just crowned this driver in champion_history.
+    assert cel["driver"]["name"] == career["champion_history"][-1]["driver"]
+    assert cel["driver"]["trophies"] == career["champion_history"][-1]["trophies"]
+
+
+def test_v082_celebration_never_saved(tmp_path):
+    """SAVE_VERSION stays 18: the celebration is transient — a save
+    written mid-dashboard carries no celebration key, and an old
+    doc carrying one migrates cleanly without it."""
+    from f1.saves import SAVE_VERSION, load_save, migrate_save, save_career
+    assert SAVE_VERSION == 18
+    career = game.build_new_career("Test", "Matthew")
+    career["celebration"] = {
+        "year": 2026, "round": 11,
+        "driver": {"name": "Max Verstappen", "team": "Red Bull",
+                   "team_id": "x", "colour": "#0600EF", "trophies": 5},
+        "team": None}
+    meta = save_career(career, "Test save", str(tmp_path))
+    with open(tmp_path / f"{meta['save_id']}.json", encoding="utf-8") as f:
+        doc = json.load(f)
+    assert "celebration" not in doc
+    assert doc["version"] == 18
+    assert "celebration" not in load_save(str(tmp_path), meta["save_id"])
+    doc["celebration"] = {"year": 2026, "round": 11,
+                          "driver": None, "team": None}
+    assert "celebration" not in migrate_save(doc)
+
+
+def _v082_start_live_server():
+    """Start the app on a free localhost port (in-process uvicorn).
+    Returns (server, thread, port); caller must stop it."""
+    import socket
+    import threading
+    import time as _time
+    import urllib.request
+    import uvicorn
+    from server import app
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = _time.time() + 20
+    while True:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=2) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            if _time.time() > deadline:
+                raise
+            _time.sleep(0.2)
+    return server, thread, port
+
+
+def _v082_fake_room():
+    """A minimal fake room for render tests: one free-agent driver
+    (so the market renders buttons), two teams, one past GP, three
+    champion rows and two transfers (oldest first, as stored)."""
+    return {
+        "started": True, "chart_on": True, "code": "TEST",
+        "host_id": "p1", "is_host": True, "players": [],
+        "career": {
+            "phase": "round", "year": 2026, "round": 3,
+            "circuit": "Bahrain Grand Prix", "circuit_laps": 57,
+            "drivers": [
+                {"id": "d-nor", "name": "Lando Norris", "status": "free",
+                 "age": 26, "salary": 5.0, "points": 0, "season_wins": 0,
+                 "cha": 0, "perf": 85, "gender": "M"},
+            ],
+            "teams": [
+                {"id": "t-williams", "name": "Williams", "colour": "#00A0DE",
+                 "points": 10, "season_wins": 0, "best_pos": 5, "perf": 300.0},
+                {"id": "t-ferrari", "name": "Ferrari", "colour": "#E8002D",
+                 "points": 20, "season_wins": 1, "best_pos": 1, "perf": 350.0},
+            ],
+            "race_history": [
+                {"year": 2026, "round": 1, "circuit": "Bahrain Grand Prix",
+                 "laps": 57,
+                 "qual": [
+                     {"pos": 1, "driver": "Lewis Hamilton", "driver_id": "d-ham",
+                      "team": "Ferrari", "team_id": "t-ferrari", "cha": 6,
+                      "gap": "LEADER"},
+                     {"pos": 2, "driver": "Max Verstappen", "driver_id": "d-ver",
+                      "team": "Red Bull", "team_id": None, "cha": 4,
+                      "gap": "+0.123s"}],
+                 "race": [
+                     {"pos": 1, "driver": "Max Verstappen", "driver_id": "d-ver",
+                      "team": "Red Bull", "team_id": None, "cha": 4,
+                      "gap": "LEADER", "points": 25, "gl": 1},
+                     {"pos": 2, "driver": "Lewis Hamilton", "driver_id": "d-ham",
+                      "team": "Ferrari", "team_id": "t-ferrari", "cha": 6,
+                      "gap": "+1.234s", "points": 18, "gl": -1}],
+                 "top3": [
+                     {"driver": "Max Verstappen", "team": "Red Bull",
+                      "team_id": None},
+                     {"driver": "Lewis Hamilton", "team": "Ferrari",
+                      "team_id": "t-ferrari"}]},
+            ],
+            "champion_history": [
+                {"year": 2010, "driver": "Sebastian Vettel", "age": 23,
+                 "team": "Red Bull", "points": 256, "trophies": 1,
+                 "winning_team": "Red Bull"},
+                {"year": 2011, "driver": "Sebastian Vettel", "age": 24,
+                 "team": "Red Bull", "points": 392, "trophies": 2,
+                 "winning_team": "Red Bull"},
+                {"year": 2026, "driver": "Max Verstappen", "age": 29,
+                 "team": "Red Bull", "points": 300, "trophies": 5,
+                 "winning_team": "Red Bull"},
+            ],
+            "media_rumours": [],
+            "transfers": [
+                {"text": "Old move in round 1", "year": 2026, "round": 1,
+                 "label": "R1 2026"},
+                {"text": "New move in round 2", "year": 2026, "round": 2,
+                 "label": "R2 2026"},
+            ],
+            "season_snapshots": [], "prev_driver_order": [],
+            "prev_team_order": [],
+        },
+    }
+
+
+def test_v082_style_names_case_insensitive():
+    """The Williams bug: rumour text uppercases team names
+    ("WILLIAMS") while the data has "Williams" — the old
+    case-sensitive lookup never matched and the name stayed white.
+    Both casings now get the team-coloured span; so does an
+    uppercased driver surname. Plain text is untouched."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.evaluate("""(career) => { room = {career: career}; }""", {
+                "drivers": [{"id": "d-alb", "name": "Alex Albon",
+                             "team_id": "t-williams", "last_team_id": None,
+                             "status": "f1"}],
+                "teams": [{"id": "t-williams", "name": "Williams",
+                           "colour": "#00A0DE"}],
+            })
+            html = page.evaluate(
+                "window.F1UI.styleNames('WILLIAMS signed a new driver"
+                " and ALBON won')")
+            assert "#00A0DE" in html
+            assert ">Williams<" in html  # canonical casing, styled
+            assert ">ALBON<" in html
+            html2 = page.evaluate(
+                "window.F1UI.styleNames('Williams signed a new driver')")
+            assert "#00A0DE" in html2 and ">Williams<" in html2
+            assert page.evaluate(
+                "window.F1UI.styleNames('Hello world')") == "Hello world"
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v082_transfers_champion_history_newest_first_gp_race_first():
+    """Transfers render newest first (like Media Rumours); champion
+    history renders current year first (stored order untouched);
+    the full-GP overlay shows the Race table before Qualifying.
+    The market buttons in the narrow side-by-side columns are the
+    smaller v0.8.2 size (30px / 11px) so they fit on one line."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            page.evaluate("""(r) => { room = r; myTeam = null; }""",
+                          _v082_fake_room())
+            # The condensed market rows only render sign buttons for
+            # a team that exists — give the fake room a minimal one.
+            page.evaluate("""() => { myTeam = {id: 't-williams',
+                colour: '#00A0DE', money: 50.0, drivers: [],
+                tr_drivers: [], academy_drivers: [], expired_drivers: [],
+                empty_seats: [1, 2], driver_messages: [], notices: []}; }""")
+            page.evaluate("renderTabs()")
+            media = page.evaluate(
+                "document.querySelector('#media-box').innerHTML")
+            assert media.index("New move in round 2") < media.index(
+                "Old move in round 1")
+            hist = page.evaluate(
+                "document.querySelector('#history-box').innerHTML")
+            champs = hist.split("Champion history")[1]
+            assert champs.index(">2026<") < champs.index(">2011<")
+            assert champs.index(">2011<") < champs.index(">2010<")
+            # Market buttons: smaller, so they fit one line.
+            btn = page.evaluate("""() => {
+                const b = document.querySelector('.market-table button');
+                if(!b) return null;
+                const cs = getComputedStyle(b);
+                return {minHeight: cs.minHeight, fontSize: cs.fontSize};
+            }""")
+            assert btn is not None
+            assert btn["minHeight"] == "30px"
+            assert btn["fontSize"] == "11px"
+            # Full-GP overlay: race results first, qualifying second.
+            page.evaluate("() => { viewingGP = 0; syncOverlays(); }")
+            body = page.evaluate(
+                "document.querySelector('#ov-root .ov-body').innerHTML")
+            assert body.index("Race —") < body.index("Qualifying —")
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v082_driver_messages_capped_at_newest_five():
+    """The Drivers tab shows only the newest 5 driver messages
+    (newest first) — 8 stored messages render as 5, the oldest 3
+    dropped."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            msgs = [{"driver": f"Driver {i}", "text": f"message {i}",
+                     "round": i, "year": 2026} for i in range(1, 9)]
+            page.evaluate("""(data) => { room = data.room; myTeam = data.myTeam; }""", {
+                "room": {"started": True, "career": {
+                    "phase": "round", "year": 2026, "round": 8,
+                    "drivers": [], "teams": []}},
+                "myTeam": {"id": "t1", "colour": "#6600CC", "money": 10.0,
+                           "drivers": [], "tr_drivers": [],
+                           "academy_drivers": [], "expired_drivers": [],
+                           "empty_seats": [1, 2], "driver_messages": msgs,
+                           "notices": []},
+            })
+            page.evaluate("renderDriversTab()")
+            html = page.evaluate(
+                "document.querySelector('#drivers-box').innerHTML")
+            assert html.count("💬") == 5
+            assert "Driver 8" in html and "Driver 4" in html
+            assert "Driver 3" not in html and "Driver 1" not in html
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v082_music_playlist_data_shuffle_and_volume():
+    """Playlist data: 15 songs, each with title/artist/YouTube ID/
+    gain, IDs unique and 11 chars. Shuffle: a full cycle plays every
+    song once, and a reshuffle never repeats the just-played song
+    first. Volume: 50 = default, 0 = mute, 100 = max, gains clamp."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            data = page.evaluate("""() => ({
+                playlist: window.F1UI.musicPlaylist,
+                theme: window.F1UI.f1Theme,
+            })""")
+            assert data["theme"]["id"] == "KTETwgQnbsQ"  # F1 Theme
+            pl = data["playlist"]
+            assert len(pl) == 15
+            import re as _re
+            ids = [t["id"] for t in pl]
+            assert len(set(ids)) == 15
+            for t in pl:
+                assert t["title"] and t["artist"]
+                assert _re.fullmatch(r"[A-Za-z0-9_-]{11}", t["id"]), t
+                assert 0.5 <= t["gain"] <= 1.5
+            titles = {t["title"] for t in pl}
+            for want in ("You're The Best", "Move Your Body",
+                         "Drugs from Amsterdam", "Levitate",
+                         "Kings & Queens", "Eye of the Tiger",
+                         "We Are the Champions", "Don't Stop Me Now",
+                         "Uptown Funk", "Can't Stop the Feeling!",
+                         "Happy", "Shut Up and Dance", "September",
+                         "Lose Yourself", "Stronger"):
+                assert want in titles, want
+            assert page.evaluate("""() => {
+                const ids = window.F1UI.musicPlaylist.map(t => t.id);
+                for(let i = 0; i < 50; i++){
+                    const q1 = window.F1UI.musicShuffleOrder(ids, null);
+                    if(new Set(q1).size !== ids.length) return false;
+                    const q2 = window.F1UI.musicShuffleOrder(
+                        ids, q1[q1.length - 1]);
+                    if(q2[0] === q1[q1.length - 1]) return false;
+                }
+                return true;
+            }""")
+            vols = page.evaluate("""() => {
+                const f = window.F1UI.musicEffectiveVolume;
+                return [f(50, 1.0), f(0, 1.0), f(100, 1.0), f(100, 1.15),
+                        f(50, 0.9), f(0, 1.15), f(50, undefined)];
+            }""")
+            assert vols == [50, 0, 100, 100, 45, 0, 50]
+            assert page.evaluate(
+                "window.F1UI.songPopupDurationMs()") == 7000
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v082_music_settings_tab_and_sliders_sync():
+    """A Settings tab lives in the SYSTEM group (alongside Saves);
+    the main-menu slider and the Settings-tab slider control the
+    SAME persisted setting — setting one updates both and
+    localStorage."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            assert page.evaluate(
+                "!!document.querySelector('[data-tab=\"settings\"]')")
+            group = page.evaluate(
+                "document.querySelector('[data-tab=\"settings\"]')"
+                ".closest('.tab-group').querySelector('.tab-group-title')"
+                ".textContent")
+            assert group == "System"
+            assert page.evaluate(
+                "document.querySelector('#tab-settings')"
+                ".classList.contains('hidden')")
+            page.evaluate(
+                "document.querySelector('[data-tab=\"settings\"]').click()")
+            assert not page.evaluate(
+                "document.querySelector('#tab-settings')"
+                ".classList.contains('hidden')")
+            assert page.evaluate(
+                "document.querySelector('#tab-saves')"
+                ".classList.contains('hidden')")
+            assert page.evaluate(
+                "!!document.querySelector('#music-volume-home')")
+            assert page.evaluate(
+                "!!document.querySelector('#music-volume-settings')")
+            page.evaluate("window.F1UI.setMusicVolume(70)")
+            vals = page.evaluate("""() => ({
+                home: document.querySelector('#music-volume-home').value,
+                settings: document.querySelector(
+                    '#music-volume-settings').value,
+                homeLab: document.querySelector(
+                    '#music-volume-home-val').textContent,
+                stored: localStorage.getItem('f1-music-volume'),
+            })""")
+            assert vals == {"home": "70", "settings": "70",
+                            "homeLab": "70", "stored": "70"}
+            page.evaluate("window.F1UI.setMusicVolume(0)")
+            assert page.evaluate(
+                "document.querySelector('#music-volume-settings').value") == "0"
+            page.evaluate("window.F1UI.setMusicVolume(50)")
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v082_song_popup_shows_and_auto_dismisses():
+    """The song pop-up shows title + artist, closes on its button,
+    and auto-dismisses after 7 seconds — showing it again resets
+    the timer."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            assert page.evaluate(
+                "document.querySelector('#song-popup')"
+                ".classList.contains('hidden')")
+            page.evaluate(
+                "window.F1UI.showSongPopup({title: 'Test Song',"
+                " artist: 'Test Artist'})")
+            assert not page.evaluate(
+                "document.querySelector('#song-popup')"
+                ".classList.contains('hidden')")
+            text = page.evaluate(
+                "document.querySelector('#song-popup').innerText")
+            assert "Test Song" in text and "Test Artist" in text
+            page.click("#btn-song-close")
+            assert page.evaluate(
+                "document.querySelector('#song-popup')"
+                ".classList.contains('hidden')")
+            # Auto-dismiss: show, wait 5s, show again (timer resets),
+            # still there at 5s after the second show, gone by 7s.
+            page.evaluate(
+                "window.F1UI.showSongPopup({title: 'Song A',"
+                " artist: 'Artist A'})")
+            page.wait_for_timeout(5000)
+            page.evaluate(
+                "window.F1UI.showSongPopup({title: 'Song B',"
+                " artist: 'Artist B'})")
+            page.wait_for_timeout(5000)
+            assert not page.evaluate(
+                "document.querySelector('#song-popup')"
+                ".classList.contains('hidden')")
+            page.wait_for_timeout(2500)
+            assert page.evaluate(
+                "document.querySelector('#song-popup')"
+                ".classList.contains('hidden')")
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v082_celebration_overlay_shows_dismisses_and_stays_dismissed():
+    """The celebration overlay shows on the dashboard (not on
+    results screens), driver first then team, panel faintly
+    coloured by the winning team's colour; dismissing stores the
+    signature so the same celebration never re-shows, but a new
+    clinch does."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            assert page.evaluate(
+                "document.querySelector('#celebration-overlay')"
+                ".classList.contains('hidden')")
+            cel = {"year": 2029, "round": 11,
+                   "driver": {"name": "Max Verstappen", "team": "Red Bull",
+                              "team_id": "t-rb", "colour": "#0600EF",
+                              "trophies": 5},
+                   "team": {"name": "Red Bull", "team_id": "t-rb",
+                            "colour": "#0600EF"}}
+            page.evaluate(
+                "(c) => window.F1UI.syncCelebration('game', c)", cel)
+            assert not page.evaluate(
+                "document.querySelector('#celebration-overlay')"
+                ".classList.contains('hidden')")
+            body = page.evaluate(
+                "document.querySelector('#celebration-body').innerText")
+            assert "Max Verstappen" in body and "WORLD CHAMPION" in body
+            assert "x5" in body
+            assert "CONSTRUCTORS' CHAMPIONS" in body
+            assert body.index("WORLD CHAMPION") < body.index(
+                "CONSTRUCTORS' CHAMPIONS")
+            bg = page.evaluate(
+                "getComputedStyle(document.querySelector("
+                "'#celebration-panel')).backgroundColor")
+            assert "6, 0, 239" in bg  # #0600EF, faint
+            # Results screens never show it.
+            page.evaluate("(c) => window.F1UI.syncCelebration('results', c)",
+                          cel)
+            assert page.evaluate(
+                "document.querySelector('#celebration-overlay')"
+                ".classList.contains('hidden')")
+            page.evaluate(
+                "(c) => window.F1UI.syncCelebration('game', c)", cel)
+            page.click("#btn-celebration-close")
+            assert page.evaluate(
+                "document.querySelector('#celebration-overlay')"
+                ".classList.contains('hidden')")
+            assert page.evaluate(
+                "localStorage.getItem('f1-celebration-dismissed')") == \
+                page.evaluate(
+                    "(c) => window.F1UI.celebrationSignature(c)", cel)
+            # Same celebration: stays dismissed.
+            page.evaluate(
+                "(c) => window.F1UI.syncCelebration('game', c)", cel)
+            assert page.evaluate(
+                "document.querySelector('#celebration-overlay')"
+                ".classList.contains('hidden')")
+            # A new clinch (different round): shows again.
+            cel2 = dict(cel, round=12)
+            page.evaluate(
+                "(c) => window.F1UI.syncCelebration('game', c)", cel2)
+            assert not page.evaluate(
+                "document.querySelector('#celebration-overlay')"
+                ".classList.contains('hidden')")
+            # Driver-only celebration: no constructors' line.
+            page.evaluate(
+                "() => window.F1UI.syncCelebration('game', {year: 2029,"
+                " round: 12, driver: {name: 'Lando Norris',"
+                " team: 'McLaren', team_id: 't-mc', colour: '#FF8000',"
+                " trophies: 1}, team: null})")
+            body2 = page.evaluate(
+                "document.querySelector('#celebration-body').innerText")
+            assert "Lando Norris" in body2
+            assert "CONSTRUCTORS" not in body2
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
