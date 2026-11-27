@@ -1271,6 +1271,9 @@ MEDIA_SPECULATION_CHANCE = 0.25
 # nothing.
 ACTIVITY_DECLINE_UNHAPPY = 0.60
 ACTIVITY_DECLINE_VERY_UNHAPPY = 0.85
+# v0.8.5: the manager assistant costs $0.2M per race while it is on
+# for a human-owned team (charged after each race completed).
+ASSISTANT_COST_PER_RACE = 0.2
 # v0.8.0: loyalty growth per race — +0.04 base, x2 when happy,
 # x3 when very happy.
 LOYALTY_GROWTH_PER_RACE = 0.04
@@ -1695,10 +1698,13 @@ def do_activity(career, team_id, driver_id, activity_id, rng=None):
     """v0.8.1: do an activity with one of your drivers (main, T&R or
     academy) — at ANY happiness level. An unhappy driver turns it
     down 60% of the time, a very unhappy one 85%; neutral and above
-    always accept (unless ill). A declined activity costs nothing
-    and does not use up the one-per-driver-per-round slot. One
-    activity per driver per round, and the team must afford the
-    cost. Raises that driver's happiness and loyalty with the team.
+    always accept (unless ill). v0.8.5: a declined activity costs
+    nothing, but it DOES use up that driver's one-per-round slot —
+    they cannot try the same activity, or a different one, until
+    next round (the activity itself is NOT marked used for the
+    season, so it can be tried again next round). One activity per
+    driver per round, and the team must afford the cost. Raises that
+    driver's happiness and loyalty with the team.
     v0.8.3: each activity may be used only once per season per team
     (tracked on team["activities_used"], reset at the season
     rollover); a winter-break use counts toward the outgoing
@@ -1726,9 +1732,10 @@ def do_activity(career, team_id, driver_id, activity_id, rng=None):
     # v0.8.3: each activity may be used only ONCE per season per
     # team — using it marks it used for the whole team until the
     # next season (reset in start_next_season). A declined activity
-    # never marks anything (like the one-per-round slot, a decline
-    # costs nothing and burns nothing), and the check runs before
-    # any money is charged.
+    # never marks the activity used for the season, and the check
+    # runs before any money is charged — but v0.8.5: it DOES use up
+    # that driver's one-per-round slot (set below), so they cannot
+    # retry this round.
     used = team.setdefault("activities_used", [])
     if activity_id in used:
         return False, (f"{act['name']} was already used this season — "
@@ -1738,11 +1745,18 @@ def do_activity(career, team_id, driver_id, activity_id, rng=None):
                        f"${act['cost']:.2f}M.")
     lvl = rules_mod.happiness_level(happiness_with(d, team_id))
     if lvl <= 1 and rng.random() < ACTIVITY_DECLINE_VERY_UNHAPPY:
+        # v0.8.5: the decline uses up the driver's slot for this
+        # round (same key as a success) — no charge, and the
+        # activity is NOT marked used for the season.
+        d["activity_round"] = key
         return False, (f"{d['name']} turned the activity down — they "
-                       f"are very unhappy with the team right now.")
+                       f"are very unhappy with the team right now. "
+                       f"Try again next round.")
     if lvl == 2 and rng.random() < ACTIVITY_DECLINE_UNHAPPY:
+        d["activity_round"] = key
         return False, (f"{d['name']} turned the activity down — they "
-                       f"are unhappy with the team right now.")
+                       f"are unhappy with the team right now. "
+                       f"Try again next round.")
     team["money"] = round(team["money"] - act["cost"], 2)
     _bump_relation(d, team_id, act["happiness"], act["loyalty"])
     d["activity_round"] = key
@@ -3727,6 +3741,231 @@ def _ai_season_plan(career, team, kind):
     return zlib.crc32(key) % 10 < 4
 
 
+def bot_academy_step(career, team, rng=None, salaries=0.0, charges=0.0,
+                     plan_gated=True):
+    """v0.4.2 bot parity, extracted in v0.8.5 so the manager assistant
+    can use the same decision point: an AI team may add one young
+    unsigned driver to its Driver Academy per season (youngest
+    cheapest, rounds 1-6), when it can comfortably afford it
+    (salaries + charges + a $10M buffer). Bots never exceed 3
+    academy drivers — they avoid the exponential academy fine
+    entirely. v0.8.1: only ~40% of bot teams plan an academy signing
+    in a given season (see _ai_season_plan) — plan_gated=True keeps
+    that gate for bots; the assistant calls with plan_gated=False
+    (it acts every round, since the player is paying for it). Sets
+    ai_academy_signed on a successful signing, so at most one
+    academy signing happens per team per season either way."""
+    if (not team.get("ai_academy_signed")
+            and (not plan_gated
+                 or _ai_season_plan(career, team, "academy"))
+            and len(team_academy_drivers(career, team)) < ACADEMY_FINE_FREE_COUNT
+            and career.get("round", 1) <= 6
+            and team["money"] > salaries + charges + 10):
+        young = [d for d in career["drivers"]
+                 if d["status"] in ("free", "f2")
+                 and d["age"] <= ACADEMY_MAX_JOIN_AGE
+                 and not d.get("academy_team_id")]
+        if young:
+            young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
+            ok, _why = add_academy_driver(career, team["id"], young[0]["id"])
+            if ok:
+                team["ai_academy_signed"] = True
+
+
+def set_manager_assistant(career, team_id, on):
+    """v0.8.5: flip the manager assistant toggle for a team (per-team,
+    persisted). When on, the bot auto-manages the team's academy
+    (assistant_academy_step, at the same decision point bots use)
+    and suggests its three best next moves each round
+    (assistant_suggestions); it costs $0.2M per race, charged after
+    each race while it is on. When off: no charges, no auto-moves,
+    no suggestions. Never touches main seats or T&R."""
+    team = get_team(career, team_id)
+    if not team:
+        return False, "No such team."
+    team["manager_assistant"] = bool(on)
+    if on:
+        return True, ("Manager assistant ON — your academy is "
+                      "auto-managed and you will get its three best "
+                      "next moves each round ($0.2M/race).")
+    return True, "Manager assistant OFF — no more charges or auto-moves."
+
+
+def assistant_academy_step(career, team, rng=None):
+    """v0.8.5: the manager assistant's academy management for a
+    HUMAN-owned team with the toggle on, at the same decision point
+    bots use (once per round, before qualifying, in
+    run_race_weekend). It hires through bot_academy_step with the
+    season-plan gate OFF (the player is paying for it, so it acts
+    every round) and the same affordability checks — and it FIRES:
+    when the academy is full (3 drivers) and a strictly better young
+    unsigned driver exists (younger/cheaper than the team's worst
+    academy driver by the same (salary, age) order the bot hires
+    with), it releases the worst and hires the better one. It only
+    fires when the team can afford the hire that follows and has not
+    already signed an academy driver this season — so a firing is
+    never left unfilled. Never touches main seats or T&R."""
+    rng = rng or random
+    if not team.get("manager_assistant"):
+        return
+    salaries = salary_per_round(career, team)
+    charges = extra_charges_per_race(career, team)["total"]
+    academy = team_academy_drivers(career, team)
+    if (len(academy) >= ACADEMY_FINE_FREE_COUNT
+            and not team.get("ai_academy_signed")
+            and career.get("round", 1) <= 6
+            and team["money"] > salaries + charges + 10):
+        young = [d for d in career["drivers"]
+                 if d["status"] in ("free", "f2")
+                 and d["age"] <= ACADEMY_MAX_JOIN_AGE
+                 and not d.get("academy_team_id")]
+        if young:
+            young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
+            best = young[0]
+            worst = max(academy,
+                        key=lambda d: (d["salary"], d["age"]))
+            if (best["salary"], best["age"]) < (worst["salary"], worst["age"]):
+                release_academy_driver(career, team["id"], worst["id"])
+    bot_academy_step(career, team, rng=rng, salaries=salaries,
+                     charges=charges, plan_gated=False)
+
+
+def assistant_suggestions(career, team):
+    """v0.8.5: the manager assistant's TOP 3 candidate next moves for
+    a team, with its single recommended pick highlighted — the player
+    acts manually, these are suggestions only. Covers main-seat /
+    T&R management, R&D management, and finance tips from the team's
+    exact financial situation. Every candidate is built from
+    player-visible state only (money, contracts, happiness, pools,
+    reliability, reg progress, standings) — never hidden perf, rep
+    or ratings. Returns {"pick": {...} | None, "suggestions":
+    [{category, text}, ...]} (top 3 by urgency, pick = the first)."""
+    cands = []  # (score, category, text)
+
+    def add(score, category, text):
+        cands.append((score, category, text))
+
+    # Main seats — an empty seat scores nothing, so it outranks all.
+    for seat in (1, 2):
+        slot = "driver1_id" if seat == 1 else "driver2_id"
+        if not team.get(slot):
+            best = _best_available_driver(career, statuses=("free",),
+                                          team_id=team["id"])
+            if best is not None:
+                add(100, "seat",
+                    f"Seat {seat} is empty — sign {best['name']} "
+                    f"(the best free agent available) so the seat "
+                    f"scores points.")
+            else:
+                add(100, "seat",
+                    f"Seat {seat} is empty — sign a free agent so "
+                    f"the seat scores points.")
+    # Contracts ending this season.
+    for slot in ("driver1_id", "driver2_id"):
+        d = get_driver(career, team.get(slot)) if team.get(slot) else None
+        if d and (d.get("contract_left") or 0) <= 1:
+            add(80, "seat",
+                f"Re-sign {d['name']} — their contract ends this "
+                f"season.")
+    # Unhappy drivers — an activity lifts them (skip if one was
+    # already done with them this round).
+    act_key = _activity_round_key(career)
+    for d in [get_driver(career, team.get(s))
+              for s in ("driver1_id", "driver2_id")]:
+        if not d:
+            continue
+        lvl = rules_mod.happiness_level(happiness_with(d, team["id"]))
+        if lvl <= 2 and d.get("activity_round") != act_key:
+            add(75, "seat",
+                f"Do an activity with {d['name']} — they are "
+                f"{rules_mod.happiness_word(happiness_with(d, team['id']))} "
+                f"with the team.")
+    # Regulations — adapting outranks research (research only opens
+    # once fully adapted).
+    rv = reg_view(career, team)
+    if rv["open"] and rv["unadapted_pct"] > 0:
+        add(85, "reg",
+            f"Adapt the car to the {rv['kind']} {rv['year'] or ''} "
+            f"regulations — ${rv['adapt_cost']:.2f}M to finish adapting.")
+    elif rv["open"]:
+        add(55, "reg",
+            "Invest in regulation research for next season — your "
+            "car is fully adapted.")
+    # Reliability — the one car stat the player sees, with its DNF
+    # chance.
+    rel = team.get("rel")
+    if rel is not None and rel < 0.95:
+        add(70, "rd",
+            f"Invest in Reliability research — your reliability is "
+            f"{rel * 100:.1f}% ({(1 - rel) * 100:.1f}% DNF per car).")
+    # Money — tight or flush, from the team's exact funds.
+    money = team.get("money") or 0.0
+    if money < 5.0:
+        add(65, "finance",
+            f"Money is tight (${money:.2f}M) — hold off on big "
+            f"signings and bank the race prize money.")
+    # Banked research waiting to be converted.
+    banked = (team.get("perf_res") or 0.0) + (team.get("reli_res") or 0.0)
+    if banked > 2.0:
+        add(65, "rd",
+            f"Develop Parts ($1M) — you have {banked:.2f} banked "
+            f"research to convert into car pace.")
+    # Test & Reserve — each one adds +25% research.
+    if not team_tr_drivers(career, team):
+        young = [d for d in career["drivers"]
+                 if d["status"] in ("free", "f2") and d["age"] <= 25
+                 and not (d.get("academy_team_id")
+                          and d["academy_team_id"] != team["id"])]
+        pick = _rep_weighted_pick(young, rng=random) if young else None
+        if pick is not None:
+            add(60, "tr",
+                f"Sign {pick['name']} as a Test & Reserve driver — "
+                f"each T&R driver adds +25% research.")
+        else:
+            add(60, "tr",
+                "Sign a young Test & Reserve driver — each T&R "
+                "driver adds +25% research.")
+    # Fines — paying them every race is money out the door.
+    charges = extra_charges_per_race(career, team)
+    if charges["academy_fine"] > 0:
+        add(55, "finance",
+            f"You are paying ${charges['academy_fine']:.2f}M/race in "
+            f"academy fines — release an academy driver to stop it.")
+    if charges["tr_fine"] > 0:
+        add(55, "finance",
+            f"You are paying ${charges['tr_fine']:.2f}M/race in T&R "
+            f"fines — release a T&R driver to stop it.")
+    # Constructors' position — a backmarker needs pace.
+    pos = constructor_pos(career, team["id"])
+    if pos and pos >= 6:
+        add(50, "rd",
+            f"Invest in Performance research — you are P{pos} in "
+            f"the constructors' championship.")
+    if money > 20.0:
+        add(45, "finance",
+            f"You have ${money:.2f}M banked — put it to work in "
+            f"research or a signing.")
+    # Academy — cheap future talent.
+    if not team_academy_drivers(career, team):
+        young = [d for d in career["drivers"]
+                 if d["status"] in ("free", "f2")
+                 and d["age"] <= ACADEMY_MAX_JOIN_AGE
+                 and not d.get("academy_team_id")]
+        if young:
+            young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
+            add(40, "academy",
+                f"Add {young[0]['name']} to your Driver Academy — "
+                f"cheap future talent.")
+        else:
+            add(40, "academy",
+                "Add a young driver to your Driver Academy — cheap "
+                "future talent.")
+    cands.sort(key=lambda c: -c[0])
+    top = [{"category": cat, "text": text}
+           for _score, cat, text in cands[:3]]
+    return {"pick": top[0] if top else None, "suggestions": top}
+
+
 def ai_act(career, team, rng=None):
     """One AI turn for a round, from Main.py's AI block.
 
@@ -3806,25 +4045,11 @@ def ai_act(career, team, rng=None):
             sign_tr_driver(career, team["id"], pick["id"],
                            contract_years=ai_contract_years(pick))
     # v0.4.2 bot parity: an AI team may add one young unsigned
-    # driver to its Driver Academy per season (youngest cheapest,
-    # rounds 1-6), when it can comfortably afford it. Bots never
-    # exceed 3 academy drivers — they avoid the exponential academy
-    # fine entirely. v0.8.1: only ~40% of bot teams plan an academy
-    # signing in a given season (see _ai_season_plan).
-    if (not team.get("ai_academy_signed")
-            and _ai_season_plan(career, team, "academy")
-            and len(team_academy_drivers(career, team)) < ACADEMY_FINE_FREE_COUNT
-            and career.get("round", 1) <= 6
-            and team["money"] > salaries + charges + 10):
-        young = [d for d in career["drivers"]
-                 if d["status"] in ("free", "f2")
-                 and d["age"] <= ACADEMY_MAX_JOIN_AGE
-                 and not d.get("academy_team_id")]
-        if young:
-            young.sort(key=lambda d: (d["salary"], d["age"], d["name"]))
-            ok, _why = add_academy_driver(career, team["id"], young[0]["id"])
-            if ok:
-                team["ai_academy_signed"] = True
+    # driver to its Driver Academy per season — see bot_academy_step
+    # (v0.8.5: extracted so the manager assistant can use the same
+    # decision point). Bots keep the ~40% season-plan gate.
+    bot_academy_step(career, team, rng=rng, salaries=salaries,
+                     charges=charges, plan_gated=True)
     if temp_funds >= 10:
         round_funds = (temp_funds - 1) * (rng.random() * 0.35 + 0.2)
     else:
@@ -4431,6 +4656,11 @@ def run_race_weekend(career, rng=None):
     for team in career["teams"]:
         if team["is_ai"] or not team.get("owner_player_id"):
             ai_act(career, team, rng=rng)
+        elif team.get("manager_assistant"):
+            # v0.8.5: the manager assistant manages a human team's
+            # academy at the same decision point bots use (never
+            # main seats or T&R — see assistant_academy_step).
+            assistant_academy_step(career, team, rng=rng)
     # Constructor order at the start of the weekend (for EPRG).
     standings_before = race_mod.constructor_standings(career)
     pos_before = {t["id"]: i + 1 for i, t in enumerate(standings_before)}
@@ -4552,6 +4782,11 @@ def run_race_weekend(career, rng=None):
         team["money"] -= salary_per_round(career, team)
         team["money"] -= extra_charges_per_race(career, team)["total"]
         team["money"] += finance_estimates(pos_before[team["id"]])["eprg"]
+        # v0.8.5: the manager assistant costs $0.2M per race while it
+        # is on for a human-owned team (charged after each race
+        # completed, at race end).
+        if team.get("manager_assistant") and team.get("owner_player_id"):
+            team["money"] -= ASSISTANT_COST_PER_RACE
     # Sort drivers within each team by points scored FOR this team
     # (Main.py swaps D1/D2) and re-sort the team list into
     # constructor order. v0.2.1: team_points, not championship points
@@ -4661,7 +4896,12 @@ def detect_championship_clinch(career):
     team_champ_id = _clinch(con_ids, now_t, pre_t, 43)
     if drv_champ_id is None and team_champ_id is None:
         return None
+    # v0.8.5: how many rounds are left in the season AFTER the race
+    # just raced — stored at detection time, because career["round"]
+    # may already have advanced by the time the pop-up is shown.
+    # A clinch in the final race reads 0 left.
     cel = {"year": career["year"], "round": career["round"],
+           "rounds_left": rounds_left_after,
            "driver": None, "team": None}
     if drv_champ_id is not None:
         d = get_driver(career, drv_champ_id)

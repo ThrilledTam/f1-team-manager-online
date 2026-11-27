@@ -241,6 +241,12 @@ def make_team(data, team_id=None):
         # one academy driver per season (see game.py ai_act); reset
         # at season end.
         "ai_academy_signed": False,
+        # v0.8.5: the manager assistant — when ON for a human-owned
+        # team, part of the team's bot auto-manages the driver
+        # academy (hiring/firing) and suggests its three best next
+        # moves each round (see game.py assistant_suggestions).
+        # Costs $0.2M per race. Default OFF.
+        "manager_assistant": False,
         # v0.7.4: per-team Notes (post-it notes on the dashboard) —
         # [{id, text}]. Private: stripped from public_state, only
         # ever sent to the owning team via my_team_public.

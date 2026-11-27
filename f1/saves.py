@@ -14,7 +14,8 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-SAVE_VERSION = 19  # v0.8.3: once-per-season activity uses (see migrate_save)
+SAVE_VERSION = 20  # v0.8.5: manager assistant toggle on every team
+# (see migrate_save) + celebration rounds_left (transient, never saved)
 # on every team, default empty; private — stripped from the broadcast
 # state, only ever sent to the owning team). v0.7.3: F2 promotions reworked (a T&R driver
 # still racing in F2 keeps their F2 tally in the plain fields and
@@ -373,6 +374,9 @@ def migrate_save(doc):
         # v0.8.3: once-per-season activity uses — an older save has
         # none recorded, so every activity is available.
         team.setdefault("activities_used", [])
+        # v0.8.5: the manager assistant toggle — an older save has
+        # none recorded, so it starts OFF (no charges, no auto-moves).
+        team.setdefault("manager_assistant", False)
     doc.setdefault("relation_proposals", [])
     # v0.6.6: pending donation requests between supplied teams.
     # v0.8.2: the championship celebration is transient (derived at
