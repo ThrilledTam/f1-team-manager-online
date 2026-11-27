@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.8.1</title>
+<title>F1 Team Manager Online — v0.8.2</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -84,9 +84,12 @@
      other teams' drivers (poaching) — each with a small header, so
      the whole list scans in one glance. Market buttons stay tappable
      but are smaller than the global 44px action buttons, and the two
-     seat buttons sit side by side in one cell. */
+     seat buttons sit side by side in one cell. v0.8.2: the side-by-side
+     condensed columns made the buttons wrap — smaller still (30px,
+     11px) so the seat buttons fit on one line in the narrower columns;
+     30px is the smallest that stays reliably tappable on mobile. */
   .market-table td, .market-table th { padding:2px 6px; font-size:12px; }
-  .market-table button { min-height:34px; padding:4px 8px; font-size:12px; margin:2px 4px 2px 0; }
+  .market-table button { min-height:30px; padding:3px 6px; font-size:11px; margin:2px 3px 2px 0; }
   .market-group { margin:10px 0 3px; font-size:13px; color:#8b949e; text-transform:uppercase; letter-spacing:.5px; }
   .market-seats { display:flex; gap:6px; flex-wrap:wrap; }
   .market-seat { display:flex; flex-direction:column; align-items:flex-start; }
@@ -116,6 +119,31 @@
   @media (max-width: 600px) {
     .ov-panel { width:96vw; max-height:90vh; }
   }
+  /* v0.8.2: the championship celebration overlay (shown on the
+     dashboard after the race-results NEXT vote) and the song pop-up
+     (bottom-right, auto-dismisses after 7s). Both are dismissible
+     and never block play — the celebration overlay is deliberately
+     CLICK-THROUGH (pointer-events:none everywhere except its
+     Continue button), so a clinch never stops anyone advancing to
+     the next round; the panel just sits over the dashboard until
+     dismissed. The celebration panel takes its faint background
+     from the winning team's colour (set inline by JS). */
+  #celebration-overlay { position:fixed; inset:0; z-index:80; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.55); padding:12px; pointer-events:none; }
+  #celebration-overlay.hidden { display:none; }
+  #celebration-panel { max-width:560px; width:100%; text-align:center; border:2px solid #1f6feb; border-radius:14px; padding:28px 20px; box-shadow:0 8px 32px rgba(0,0,0,.6); pointer-events:none; }
+  #celebration-panel button { pointer-events:auto; }
+  #celebration-panel h2 { margin:0 0 6px; font-size:26px; }
+  #celebration-panel p { margin:8px 0; font-size:17px; }
+  #song-popup { position:fixed; right:12px; bottom:12px; z-index:75; max-width:min(340px, 86vw); background:#21262d; border:1px solid #1f6feb; color:#e6edf3; border-radius:10px; padding:10px 12px; box-shadow:0 4px 16px rgba(0,0,0,.5); font-size:14px; }
+  #song-popup.hidden { display:none; }
+  #song-popup button { margin:4px 0 0; min-height:30px; padding:3px 10px; font-size:13px; }
+  /* v0.8.2: the hidden YouTube player — audio only. Kept 1×1 and
+     off-screen (never display:none, which some browsers refuse to
+     play audio from) and pointer-events off so it can never be
+     tapped. */
+  #music-player { position:fixed; width:1px; height:1px; left:-10px; top:-10px; opacity:0; pointer-events:none; }
+  .music-hint { display:block; margin-top:4px; }
+  .music-hint.hidden { display:none; }
   /* v0.3 race history grid: seasons as rows, R1..R12 as columns, top-3
      initials stacked in each cell (Matthew's PyCharm layout).
      v0.4.3: the grid is as wide as the dashboard — fixed layout with
@@ -182,7 +210,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.1 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.2 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -207,6 +235,14 @@
       </div>
       <label><input type="checkbox" id="set-chart" checked> Performance bar chart ON by default
       <span class="note">(the host can change this in the lobby; when OFF, nobody sees perf numbers)</span></label>
+      <!-- v0.8.2: background music volume — the same setting as the
+           dashboard Settings tab (both stay in sync). 0 = mute,
+           50 = default, 100 = maximum. Music starts after your
+           first click or tap — browsers block audio until then. -->
+      <p style="margin:10px 0 0"><label>🎵 Music volume
+        <input type="range" id="music-volume-home" min="0" max="100" value="50" style="width:180px; vertical-align:middle">
+        <b id="music-volume-home-val">50</b></label>
+        <span class="note music-hint" id="music-hint-home">Music starts after your first click or tap on the page.</span></p>
       <p class="note">Seasons: 2026 only in v0. 2027 / 2028 come later.</p>
     </div>
     <div id="home-exit-note" class="note hidden" style="margin-top:10px">
@@ -357,6 +393,7 @@
       </div></div>
       <div class="tab-group" style="background:#1b2b22"><div class="tab-group-title">System</div><div class="tab-group-btns">
         <button data-tab="saves">Saves</button>
+        <button data-tab="settings">Settings</button>
       </div></div>
     </div>
     <div id="tab-research" class="tab">
@@ -409,6 +446,19 @@
       <div id="saves-list-game"></div>
       <p><label class="note">Import a save file: <input type="file" id="import-file-game" accept=".json,application/json"></label></p>
     </div>
+    <!-- v0.8.2: Settings tab (SYSTEM group) — background music volume.
+         The same setting as the main-menu slider; both stay in sync
+         through localStorage. -->
+    <div id="tab-settings" class="tab hidden">
+      <h3>Settings</h3>
+      <p><label>🎵 Music volume
+        <input type="range" id="music-volume-settings" min="0" max="100" value="50" style="width:200px; vertical-align:middle">
+        <b id="music-volume-settings-val">50</b></label>
+        <br><span class="note">0 = mute, 50 = default, 100 = maximum. The same setting is on the main menu too.</span>
+        <span class="note music-hint" id="music-hint-settings">Music starts after your first click or tap on the page.</span></p>
+      <p class="note" id="music-now-playing"></p>
+      <p class="note">Music plays from YouTube (the F1 Theme on results screens, a shuffled playlist everywhere else). When a new song starts, a pop-up shows its title and artist for 7 seconds.</p>
+    </div>
   </div>
   <p><button id="btn-leave" class="secondary">Leave room</button>
   <span class="note">Your team becomes AI-driven while you are away — rejoin with the same room code to take it back.</span></p>
@@ -432,9 +482,26 @@
   <p><button id="btn-results-leave" class="secondary">Leave room</button></p>
 </div>
 
+<!-- ================= CELEBRATION (v0.8.2) ================= -->
+<div id="celebration-overlay" class="hidden">
+  <div id="celebration-panel">
+    <div id="celebration-body"></div>
+    <p><button id="btn-celebration-close">🏁 Continue</button></p>
+  </div>
+</div>
+
+<!-- ================= MUSIC (v0.8.2) ================= -->
+<div id="music-player"></div>
+<div id="song-popup" class="hidden">
+  <div><b>🎵 Now playing</b></div>
+  <div id="song-popup-title"></div>
+  <div class="note" id="song-popup-artist"></div>
+  <button id="btn-song-close" class="secondary">Close</button>
+</div>
+
 <!-- ================= MENU (v0.7.4) ================= -->
 <div id="screen-cheats" class="hidden">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.1 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.2 beta</span></h1>
   <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
   <p><label><input type="checkbox" id="cheat-custom-retirements"> Custom retirements</label> <span class="note">When ON, only drivers you toggle retire at season end — normal retirements are off. Turning it OFF clears every driver toggle.</span></p>
   <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
@@ -601,7 +668,7 @@ function renderOverlayBody(p){
     // null), and the live table it then renders is correct.
     const snapMap = snapshotTeamMap(r.year);
     const tables = (r.qual && r.race)
-      ? `<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {teams: snapMap})}<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true, teams: snapMap })}`
+      ? `<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true, teams: snapMap })}<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {teams: snapMap})}`
       : `<p class="note">Full qualifying / race tables were not recorded for this Grand Prix (it was played under v0).</p>`;
     html = `${tables}<p><button class="secondary" id="btn-gp-back">← Back to history</button></p>`;
   } else if(p.id === "sign"){
@@ -835,6 +902,8 @@ function syncOverlays(){
 }
 document.addEventListener("keydown", e => {
   if(e.key === "Escape"){
+    const cel = $("celebration-overlay");
+    if(cel && !cel.classList.contains("hidden")){ dismissCelebration(); e.preventDefault(); return; }
     const top = topPopup();
     if(top){ closePopup(top.id); e.preventDefault(); }
   }
@@ -1052,10 +1121,15 @@ function styleNames(text){
   }
   if(!subs.length) return esc(text);
   subs.sort((a, b) => b.name.length - a.name.length);
+  // v0.8.2: case-INSENSITIVE matching — rumour text uppercases team
+  // names ("WILLIAMS") while the data has "Williams", so an exact
+  // lookup never matched and the name stayed white. The lookup is
+  // keyed lowercase, so any casing of a team/driver name gets
+  // styled with the team colour.
   const byName = {};
-  for(const s of subs) if(!(s.name in byName)) byName[s.name] = s.html;
-  const re = new RegExp("(" + subs.map(s => s.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "g");
-  return esc(text).replace(re, m => byName[m] || esc(m));
+  for(const s of subs){ const k = s.name.toLowerCase(); if(!(k in byName)) byName[k] = s.html; }
+  const re = new RegExp("(" + subs.map(s => s.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "gi");
+  return esc(text).replace(re, m => byName[m.toLowerCase()] || esc(m));
 }
 /* v0.7.2 — HISTORY TEAM RESOLUTION. Every view that shows a PAST
    season or round must render the team relationships as of THAT
@@ -1130,8 +1204,250 @@ function classificationTable(rows, opts){
   }).join("");
   return `<div class="table-scroll"><table>${head}${body}</table></div>`;
 }
+/* v0.8.2: CHAMPIONSHIP CELEBRATION — the server sets
+   career.celebration at race end when a title is JUST clinched.
+   The overlay appears on the dashboard (after the race-results
+   NEXT vote), to everyone in the room, with the panel faintly
+   coloured by the winning team's colour. Dismissing stores the
+   celebration's signature in localStorage, so a reload never
+   re-shows the same celebration — a new clinch has a new signature
+   and shows again. */
+function celebrationSignature(cel){
+  if(!cel) return "";
+  return JSON.stringify([cel.year, cel.round,
+    cel.driver ? cel.driver.name : null,
+    cel.team ? cel.team.name : null]);
+}
+// The celebration currently on screen (if any) — dismissCelebration
+// stores THIS one's signature, not whatever the room happens to
+// carry, so dismissing always records the celebration that was shown.
+let celebrationShown = null;
+function hexWithAlpha(colour, alpha){
+  // "#RRGGBB" + two hex digits -> 8-digit hex (faint background).
+  // Anything else passes through unchanged.
+  return /^#[0-9a-fA-F]{6}$/.test(colour || "") ? colour + alpha : (colour || "#161b22");
+}
+function celebrationHtml(cel){
+  let html = "";
+  if(cel.driver){
+    html += `<h2>🏆 ${esc(cel.driver.name)} — WORLD CHAMPION ${cel.year}!</h2>` +
+      `<p>${esc(cel.driver.team)} · 🏆 x${cel.driver.trophies} career championship${cel.driver.trophies === 1 ? "" : "s"}</p>`;
+  }
+  if(cel.team){
+    html += `<h2>🏆 ${esc(cel.team.name)} — CONSTRUCTORS' CHAMPIONS ${cel.year}!</h2>`;
+  }
+  return html;
+}
+function syncCelebration(screen, cel){
+  const ov = $("celebration-overlay");
+  if(!ov) return;
+  const sig = celebrationSignature(cel);
+  let dismissed = "";
+  try{ dismissed = localStorage.getItem("f1-celebration-dismissed") || ""; }catch(e){}
+  if(screen === "game" && cel && sig && sig !== dismissed){
+    celebrationShown = cel;
+    const col = (cel.driver && cel.driver.colour) || (cel.team && cel.team.colour) || "#1f6feb";
+    const panel = $("celebration-panel");
+    panel.style.background = hexWithAlpha(col, "2e");
+    panel.style.borderColor = col;
+    $("celebration-body").innerHTML = celebrationHtml(cel);
+    ov.classList.remove("hidden");
+  } else {
+    celebrationShown = null;
+    ov.classList.add("hidden");
+  }
+}
+function dismissCelebration(){
+  const cel = celebrationShown
+    || (room && room.career ? room.career.celebration : null);
+  if(cel){
+    try{ localStorage.setItem("f1-celebration-dismissed", celebrationSignature(cel)); }catch(e){}
+  }
+  celebrationShown = null;
+  const ov = $("celebration-overlay");
+  if(ov) ov.classList.add("hidden");
+}
+
+/* v0.8.2: BACKGROUND MUSIC — YouTube IFrame API, hidden audio-only
+   player. No audio files in the repo (a public GitHub repo must not
+   carry copyrighted MP3s); the game already needs internet, so
+   YouTube is fine. The playlist runs on the lobby + dashboard; the
+   official F1 Theme (Brian Tyler) takes over on the qualifying /
+   race results screens. Browsers block audio until the user
+   interacts — music starts after the first click/tap, never on page
+   load; the YouTube API script is only loaded after that first
+   interaction, so it never slows the page down. Volume is one
+   per-player setting (localStorage), 0-100, 50 = default, 0 = mute,
+   100 = maximum; each track carries a gain (default 1.0) so loud
+   and quiet masters play at a consistent level — an approximation,
+   not a true loudness measurement. Effective volume = slider x gain,
+   clamped to 0-100. */
+const F1_THEME = { title: "Formula 1 Theme", artist: "Brian Tyler", id: "KTETwgQnbsQ", gain: 0.9 };
+const MUSIC_PLAYLIST = [
+  { title: "You're The Best", artist: "Joe Esposito", id: "jeS3wzOt0fQ", gain: 1.15 },
+  { title: "Move Your Body", artist: "Öwnboss & Sevek", id: "UfiYPq7-M3E", gain: 0.85 },
+  { title: "Drugs from Amsterdam", artist: "Mau P", id: "juuIhW8V1Xw", gain: 0.85 },
+  { title: "Levitate", artist: "Maduk", id: "y8ooi9tBI4I", gain: 0.9 },
+  { title: "Kings & Queens", artist: "Maduk", id: "Fr4QKiyBnwA", gain: 0.9 },
+  { title: "Eye of the Tiger", artist: "Survivor", id: "btPJPFnesV4", gain: 1.0 },
+  { title: "We Are the Champions", artist: "Queen", id: "04854XqcfCY", gain: 1.05 },
+  { title: "Don't Stop Me Now", artist: "Queen", id: "HgzGwKwLmgM", gain: 1.05 },
+  { title: "Uptown Funk", artist: "Mark Ronson ft. Bruno Mars", id: "OPf0YbXqDm0", gain: 0.9 },
+  { title: "Can't Stop the Feeling!", artist: "Justin Timberlake", id: "ru0K8uYEZWw", gain: 0.9 },
+  { title: "Happy", artist: "Pharrell Williams", id: "ZbZSe6N_BXs", gain: 0.95 },
+  { title: "Shut Up and Dance", artist: "WALK THE MOON", id: "6JCLY0Rlx6Q", gain: 0.9 },
+  { title: "September", artist: "Earth, Wind & Fire", id: "Gs069dndIYk", gain: 1.05 },
+  { title: "Lose Yourself", artist: "Eminem", id: "7YuAzR2XVAM", gain: 1.0 },
+  { title: "Stronger", artist: "Kanye West", id: "PsO6ZnUZI0g", gain: 0.9 },
+];
+const MUSIC_VOLUME_KEY = "f1-music-volume";
+const MUSIC_DEFAULT_VOLUME = 50;
+const SONG_POPUP_MS = 7000;
+function musicEffectiveVolume(slider, gain){
+  const g = (gain === undefined || gain === null) ? 1.0 : gain;
+  return Math.max(0, Math.min(100, Math.round(slider * g)));
+}
+function musicShuffleOrder(ids, lastPlayedId){
+  // Fisher-Yates over a copy; if the just-played song lands first,
+  // swap it with the next one so the user never hears the same song
+  // twice in a row across a reshuffle.
+  const order = ids.slice();
+  for(let i = order.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+  }
+  if(order.length > 1 && lastPlayedId !== undefined && lastPlayedId !== null && order[0] === lastPlayedId){
+    const tmp = order[0]; order[0] = order[1]; order[1] = tmp;
+  }
+  return order;
+}
+function songPopupDurationMs(){ return SONG_POPUP_MS; }
+let musicPlayer = null, musicApiReady = false, musicApiLoading = false,
+    musicMode = null, musicQueue = [], musicIdx = 0,
+    musicInteracted = false, musicCurrent = null,
+    songPopupTimer = null;
+function musicVolume(){
+  let v = MUSIC_DEFAULT_VOLUME;
+  try{ v = parseInt(localStorage.getItem(MUSIC_VOLUME_KEY) || "", 10); }catch(e){}
+  return isNaN(v) ? MUSIC_DEFAULT_VOLUME : Math.max(0, Math.min(100, v));
+}
+function applyMusicVolume(){
+  // Sync both sliders + labels to the stored setting, and push the
+  // effective volume (slider x current track gain) to the player.
+  const v = musicVolume();
+  [["music-volume-home", "music-volume-home-val"], ["music-volume-settings", "music-volume-settings-val"]].forEach(pair => {
+    const el = $(pair[0]); if(el) el.value = v;
+    const lb = $(pair[1]); if(lb) lb.textContent = v;
+  });
+  if(musicPlayer && musicCurrent){
+    try{ musicPlayer.setVolume(musicEffectiveVolume(v, musicCurrent.gain)); }catch(e){}
+  }
+}
+function setMusicVolume(v){
+  v = Math.max(0, Math.min(100, Math.round(v)));
+  try{ localStorage.setItem(MUSIC_VOLUME_KEY, String(v)); }catch(e){}
+  applyMusicVolume();
+}
+function musicTrackById(id){
+  if(id === F1_THEME.id) return F1_THEME;
+  return MUSIC_PLAYLIST.find(t => t.id === id) || null;
+}
+function showSongPopup(track){
+  const pop = $("song-popup");
+  if(!pop || !track) return;
+  $("song-popup-title").textContent = track.title;
+  $("song-popup-artist").textContent = track.artist;
+  pop.classList.remove("hidden");
+  if(songPopupTimer) clearTimeout(songPopupTimer);
+  songPopupTimer = setTimeout(() => { pop.classList.add("hidden"); songPopupTimer = null; }, SONG_POPUP_MS);
+}
+function hideSongPopup(){
+  const pop = $("song-popup");
+  if(songPopupTimer){ clearTimeout(songPopupTimer); songPopupTimer = null; }
+  if(pop) pop.classList.add("hidden");
+}
+function musicPlayTrack(track){
+  musicCurrent = track;
+  if(!musicPlayer) return;
+  try{
+    musicPlayer.setVolume(musicEffectiveVolume(musicVolume(), track.gain));
+    if(musicInteracted){
+      musicPlayer.loadVideoById(track.id);
+      const np = $("music-now-playing");
+      if(np) np.textContent = `♪ Now playing: ${track.title} — ${track.artist}`;
+      showSongPopup(track);
+    } else {
+      musicPlayer.cueVideoById(track.id);
+    }
+  }catch(e){}
+}
+function musicNextTrack(){
+  if(musicMode === "theme"){ musicPlayTrack(F1_THEME); return; }
+  if(!musicQueue.length || musicIdx >= musicQueue.length){
+    const lastId = musicQueue.length ? musicQueue[musicQueue.length - 1] : null;
+    musicQueue = musicShuffleOrder(MUSIC_PLAYLIST.map(t => t.id), lastId);
+    musicIdx = 0;
+  }
+  const track = musicTrackById(musicQueue[musicIdx]);
+  musicIdx++;
+  if(track) musicPlayTrack(track);
+}
+function musicSyncScreen(screen){
+  // Results screens get the F1 Theme; everything else gets the
+  // playlist. A mode change switches the track; staying on the same
+  // screen never restarts the song (renderAll runs on every
+  // broadcast). Returning to the playlist after results advances
+  // to the next song in the queue (a fresh shuffle if it ran out)
+  // rather than resuming the interrupted song mid-way.
+  const mode = screen === "results" ? "theme" : "playlist";
+  if(mode === musicMode) return;
+  musicMode = mode;
+  if(mode === "theme") musicPlayTrack(F1_THEME);
+  else musicNextTrack();
+}
+function musicCreatePlayer(){
+  if(musicPlayer || !musicApiReady || typeof YT === "undefined" || !YT.Player) return;
+  try{
+    musicPlayer = new YT.Player("music-player", {
+      height: "1", width: "1",
+      videoId: (musicCurrent || F1_THEME).id,
+      playerVars: { autoplay: 0, controls: 0, disablekb: 1, fs: 0, modestbranding: 1, rel: 0, playsinline: 1 },
+      events: {
+        onReady: () => { if(musicInteracted && musicCurrent) musicPlayTrack(musicCurrent); },
+        onStateChange: e => {
+          if(e && e.data === YT.PlayerState.ENDED){
+            if(musicMode === "theme") musicPlayTrack(F1_THEME);
+            else musicNextTrack();
+          }
+        },
+      },
+    });
+  }catch(e){ musicPlayer = null; }
+}
+window.onYouTubeIframeAPIReady = () => { musicApiReady = true; musicCreatePlayer(); };
+function musicLoadApi(){
+  if(musicApiLoading || musicApiReady) return;
+  musicApiLoading = true;
+  const s = document.createElement("script");
+  s.src = "https://www.youtube.com/iframe_api";
+  s.async = true;
+  document.head.appendChild(s);
+}
+function musicFirstInteract(){
+  if(musicInteracted) return;
+  musicInteracted = true;
+  document.querySelectorAll(".music-hint").forEach(el => el.classList.add("hidden"));
+  musicLoadApi();
+  if(musicPlayer && musicCurrent) musicPlayTrack(musicCurrent);
+  else if(musicApiReady) musicCreatePlayer();
+}
+document.addEventListener("pointerdown", musicFirstInteract);
+document.addEventListener("keydown", musicFirstInteract);
+
 /* Exposed for the automated markup tests (see tests/test_f1.py). */
-window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor, driverInitials };
+window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor, driverInitials, styleNames,
+  musicPlaylist: MUSIC_PLAYLIST, f1Theme: F1_THEME, musicEffectiveVolume, musicShuffleOrder, songPopupDurationMs,
+  setMusicVolume, musicVolume, showSongPopup, hideSongPopup, syncCelebration, celebrationSignature, celebrationHtml };
 
 function colourPicker(elId, current, onPick){
   const el = $(elId); el.innerHTML = "";
@@ -1272,6 +1588,11 @@ function renderAll(){
   // game screen (results, lobby, picker) closes it for good.
   if(screen !== "game" && screen !== "cheats") cheatsOpen = false;
   if(screen !== currentScreen){ closeAllPopups({silent:true}); currentScreen = screen; }
+  // v0.8.2: music follows the screen (F1 Theme on results, playlist
+  // everywhere else) and the championship celebration shows on the
+  // dashboard once the race-results NEXT vote has been passed.
+  musicSyncScreen(screen);
+  syncCelebration(screen, room.career && room.career.celebration);
   $("screen-home").classList.toggle("hidden", true);
   $("screen-lobby").classList.toggle("hidden", inGame);
   $("screen-picker").classList.toggle("hidden", screen !== "picker");
@@ -1894,11 +2215,12 @@ function renderDriversTab(){
     : "";
   // v0.8.0: team notices (e.g. a driver poached away) and the
   // happy-driver messages — the dashboard shows the latest two,
-  // the Drivers tab shows them all.
+  // the Drivers tab shows the newest 5 (v0.8.2: they used to pile
+  // up all season with no limit at all).
   const notices = (myTeam && myTeam.notices) || [];
   const noticesHtml = notices.length ? `<h3>Team notices</h3>` + notices.slice().reverse().map(n => `<div>📣 ${esc(n.text)} <span class="note">(R${n.round} ${n.year})</span></div>`).join("") : "";
   const msgs = (myTeam && myTeam.driver_messages) || [];
-  const msgsHtml = msgs.length ? `<h3>Driver messages</h3>` + msgs.slice().reverse().map(m => `<div>💬 <b>${esc(m.driver)}</b>: &ldquo;${esc(m.text)}&rdquo; <span class="note">(R${m.round} ${m.year})</span></div>`).join("") : "";
+  const msgsHtml = msgs.length ? `<h3>Driver messages</h3>` + msgs.slice(-5).reverse().map(m => `<div>💬 <b>${esc(m.driver)}</b>: &ldquo;${esc(m.text)}&rdquo; <span class="note">(R${m.round} ${m.year})</span></div>`).join("") : "";
   box.innerHTML = `<p class="note">Your full roster — main drivers, Test &amp; Reserve, and academy juniors. Make lineup decisions here: swap or promote a T&R driver, drop a driver (break fee), or release an academy junior (free).</p>` +
     noticesHtml + msgsHtml +
     `<h3>Main drivers</h3>${mainHtml}<h3>Test &amp; Reserve</h3>${trHtml}<h3>🎓 Driver Academy</h3>${acHtml}${expiredHtml}`;
@@ -2652,7 +2974,9 @@ function renderTabs(){
   const yearClickable = y => (y >= 2010 && y <= 2025) || (y >= 2026 && hasSeasonSnap(y));
   const champs = (c.champion_history || []).length
     ? `<div class="table-scroll"><table><tr><th>Year</th><th>Driver</th><th>Age</th><th>Car</th><th>Pts</th><th>Trophies</th><th>Winning team</th></tr>` +
-      (c.champion_history || []).map(h => {
+      // v0.8.2: newest first (current year → 2010) — the stored order
+      // stays oldest-first, only the render is reversed.
+      [...(c.champion_history || [])].reverse().map(h => {
         // v0.7.2: the Car and Winning-team columns render that YEAR's
         // relationships from its season snapshot — a 2028 Cadillac
         // shows Ferrari (as it was then), not today's supplier, and
@@ -2694,7 +3018,8 @@ function renderTabs(){
   // old saves still carry plain strings, which render without a
   // round label. Names are styled like the standings (bold
   // uppercase coloured surnames, coloured team names).
-  const transfersHtml = (c.transfers || []).map(t => {
+  // v0.8.2: newest first, like Media Rumours above.
+  const transfersHtml = [...(c.transfers || [])].reverse().map(t => {
     const text = typeof t === "string" ? t : (t.text || "");
     const label = typeof t === "string" ? "" : (t.label || "");
     return `<div>${styleNames(text)}${label ? ` <span class="note">(${esc(label)})</span>` : ""}</div>`;
@@ -2725,6 +3050,12 @@ $("btn-settings").onclick = () => toggleInlinePopup("settings", "Settings");
 $("btn-settings-min").onclick = () => minimizePopup("settings");
 $("btn-settings-close").onclick = () => closePopup("settings");
 $("set-chart").onchange = e => { chartDefault = e.target.checked; };
+// v0.8.2: the two music volume sliders control the SAME setting —
+// either one updates the stored value and both stay in sync.
+$("music-volume-home").oninput = e => setMusicVolume(parseInt(e.target.value, 10));
+$("music-volume-settings").oninput = e => setMusicVolume(parseInt(e.target.value, 10));
+$("btn-celebration-close").onclick = dismissCelebration;
+$("btn-song-close").onclick = hideSongPopup;
 $("btn-exit").onclick = () => { $("home-exit-note").classList.remove("hidden"); };
 $("btn-copy-link").onclick = () => { const url = location.origin + "/?code=" + room.code;
   if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(() => showOk("lobby-err", "Join link copied."), () => showOk("lobby-err", "Join link: " + url)); }
@@ -2769,8 +3100,13 @@ $("import-file-game").onchange = e => { if(e.target.files[0]) importFile(e.targe
 // Auto-join from ?code= or rejoin from a reload. v0.1.1: connect on page
 // load, so the handshake is usually done before the player even clicks.
 // v0.4: also load the home "Continue a saved career" list.
+// v0.8.2: the playlist is cued on the home screen (it only starts
+// playing after the first click/tap) and the volume sliders pick up
+// the stored setting.
 connect();
 refreshHomeSaves();
+musicSyncScreen("lobby");
+applyMusicVolume();
 (function(){
   const q = new URLSearchParams(location.search);
   const code = (q.get("code") || "").toUpperCase();
