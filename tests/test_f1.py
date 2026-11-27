@@ -452,7 +452,7 @@ def test_save_load_round_trip_preserves_state():
             assert abs(t["perf"] - perf) < 1e-9
         # The save document is plain JSON (Firestore/Supabase compatible shape).
         json.dumps(loaded)
-        assert loaded["version"] == 18  # v0.8.1 save format
+        assert loaded["version"] == 19  # v0.8.3 save format
         assert loaded["circuit"] == "Saudi Arabian Grand Prix"
         assert len(loaded["race_history"]) == 1
         assert loaded["race_history"][0]["circuit"] == "Bahrain Grand Prix"
@@ -2437,7 +2437,7 @@ def test_save_v5_migration_prefills_champion_history():
     with tempfile.TemporaryDirectory() as tmp:
         meta = save_career(career, "v5 test", tmp)
         loaded = load_save(tmp, meta["save_id"])
-        assert loaded["version"] == 18
+        assert loaded["version"] == 19
         assert len(loaded["champion_history"]) == 16
         assert loaded["champion_history"][0]["year"] == 2010
 
@@ -2551,14 +2551,14 @@ def test_v03_market_compact_no_rep_history_grid():
 
 
 def test_health_reports_v082():
-    """The live version string is v0.8.2 everywhere it is shown."""
+    """The live version string is v0.8.3 everywhere it is shown."""
     from fastapi.testclient import TestClient
     from server import app
     client = TestClient(app)
-    assert client.get("/api/health").json()["version"] == "v0.8.2"
+    assert client.get("/api/health").json()["version"] == "v0.8.3"
     html = client.get("/").text
-    assert "<title>F1 Team Manager Online — v0.8.2</title>" in html
-    assert "Online · v0.8.2 beta" in html
+    assert "<title>F1 Team Manager Online — v0.8.3</title>" in html
+    assert "Online · v0.8.3 beta" in html
 
 
 # ---------------------------------------------------------------------------
@@ -3175,7 +3175,7 @@ def test_save_v7_migration_and_season3_save_enters_winter_break():
     into the new 3-round winter-break flow with its last season
     reconstructed."""
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 18
+    assert SAVE_VERSION == 19
     doc = {"version": 6, "phase": "round", "round": 3, "year": 2026,
            "teams": [{"id": "t1", "name": "McLaren", "points": 10}],
            "drivers": [{"id": "d1", "name": "Lando Norris", "status": "f1",
@@ -4978,7 +4978,7 @@ def test_migration_v8_to_v12():
     # A v9 save round-trips (migrating twice changes nothing), and a
     # v9 save carrying the removed research-cap fields loads without
     # them.
-    assert SAVE_VERSION == 18
+    assert SAVE_VERSION == 19
     migrated2 = migrate_save(json.loads(json.dumps(migrated)))
     assert team_by_name(migrated2, "McLaren")["relation_years"] == 2
     doc9 = json.loads(json.dumps(migrated))
@@ -5356,7 +5356,7 @@ def test_v080_donation_requests_removed():
          "target_team_id": "t-y", "amount": 2.0}]
     career2["version"] = 16
     migrated = migrate_save(career2)
-    assert migrated["version"] == 18
+    assert migrated["version"] == 19
     assert "donation_requests" not in migrated
 
 
@@ -7339,7 +7339,7 @@ def test_v14_migration_adds_f2_tr_f1_tally_and_gender_fields():
     v0.7.1 F2 fields are dropped. The real Season 3 save loads with
     them (its file is never modified by loading it)."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save
-    assert SAVE_VERSION == 18
+    assert SAVE_VERSION == 19
     career = game.build_new_career("Test", "Matthew")
     doc = json.loads(json.dumps(career))
     doc["version"] = 13
@@ -7620,14 +7620,14 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
     real Season 3 save (v10) and the Season 4 Round 2 export (v12)
     migrate cleanly, and their files are never modified."""
     from f1.saves import SAVE_VERSION, load_save
-    assert SAVE_VERSION == 18
+    assert SAVE_VERSION == 19
     path = Path(__file__).parent.parent / "saves" / "matthew-max-wugynr-s3-complete.json"
     if not path.exists():
         pytest.skip("Season 3 save not present in this checkout")
     before = path.read_bytes()
     loaded = _load_s3_save()
     assert loaded is not None
-    assert loaded["version"] == 18
+    assert loaded["version"] == 19
     assert loaded["phase"] == "winter_break" and loaded["year"] == 2029
     snaps = {s["year"]: s for s in loaded["season_snapshots"]}
     assert {2026, 2027, 2028} <= set(snaps)
@@ -7658,7 +7658,7 @@ def test_v13_migration_backfills_2026_snapshot_relationships():
         before4 = path4.read_bytes()
         loaded4 = load_save(str(path4.parent), "matthew-max-wugynr-s4-round2")
         assert loaded4 is not None
-        assert loaded4["version"] == 18
+        assert loaded4["version"] == 19
         assert loaded4["year"] == 2029 and loaded4["round"] == 2
         assert loaded4["phase"] == "round"
         rb = team_by_name(loaded4, "Red Bull")
@@ -8339,7 +8339,7 @@ def test_v074_notes_privacy_and_migration():
         t.pop("notes", None)
     career2["version"] = 14
     migrated = migrate_save(career2)
-    assert migrated["version"] == 18
+    assert migrated["version"] == 19
     assert all(t["notes"] == [] for t in migrated["teams"])
 
 
@@ -8918,7 +8918,7 @@ def test_v075_retirement_toggles_migration():
         d.pop("retire_at_season_end", None)
     career["version"] = 15
     migrated = migrate_save(career)
-    assert migrated["version"] == 18
+    assert migrated["version"] == 19
     assert migrated["custom_retirements"] is False
     assert all(d["retire_at_season_end"] is False
                for d in migrated["drivers"])
@@ -9363,15 +9363,19 @@ def test_v081_activity_any_level_with_declines():
     ok, why = game.do_activity(career, mclaren["id"], d["id"], "team_dinner")
     assert not ok and "already did an activity" in why
     # Unhappy: a 0.5 roll declines (60%), a 0.7 roll accepts — and
-    # the decline costs nothing and leaves the slot free.
+    # the decline costs nothing and leaves the slot free. (v0.8.3:
+    # golf, not the simulator — d already used the simulator this
+    # season, and each activity is once per season per team. Golf
+    # matches the simulator's $0.3M / +0.15 happiness, so the money
+    # and happiness assertions below are unchanged.)
     _set_relation(d2, mclaren["id"], 2.0, 3.0)
     ok, why = game.do_activity(career, mclaren["id"], d2["id"],
-                               "simulator", rng=_SeqRng([0.5]))
+                               "golf", rng=_SeqRng([0.5]))
     assert not ok and "turned the activity down" in why
     assert mclaren["money"] == pytest.approx(99.7)
     assert d2.get("activity_round") is None
     ok, why = game.do_activity(career, mclaren["id"], d2["id"],
-                               "simulator", rng=_SeqRng([0.7]))
+                               "golf", rng=_SeqRng([0.7]))
     assert ok, why
     assert mclaren["money"] == pytest.approx(99.4)
     assert d2["happiness"] == pytest.approx(2.15)
@@ -9888,8 +9892,8 @@ def test_v080_s4_save_migrates_to_v18():
     career = load_save(str(path.parent), "matthew-max-wugynr-s4-round2")
     assert career is not None
     from f1.saves import SAVE_VERSION
-    assert SAVE_VERSION == 18
-    assert career["version"] == 18
+    assert SAVE_VERSION == 19
+    assert career["version"] == 19
     assert "donation_requests" not in career
     for key in ("meetings", "meeting_cooldowns", "media_rumours",
                 "driver_messages", "team_notices"):
@@ -10377,7 +10381,7 @@ def test_v081_transfers_structured_with_labels_and_migration():
     are wrapped (no label known) and junior-share payment lines are
     dropped. Save version 18."""
     from f1.saves import SAVE_VERSION, migrate_save
-    assert SAVE_VERSION == 18
+    assert SAVE_VERSION == 19
     # Live entries: dicts with labels.
     career = game.build_new_career("Test", "Matthew")
     game.log_transfer(career, "Test move in round 1")
@@ -10404,7 +10408,7 @@ def test_v081_transfers_structured_with_labels_and_migration():
         "Max Verstappen signed for Red Bull",
     ]
     migrated = migrate_save(doc)
-    assert migrated["version"] == 18
+    assert migrated["version"] == 19
     assert len(migrated["transfers"]) == 2
     assert all(isinstance(t, dict) for t in migrated["transfers"])
     assert migrated["transfers"][0]["text"].startswith("Lewis Hamilton")
@@ -10568,11 +10572,12 @@ def test_v082_clinch_fires_after_final_race_votes():
 
 
 def test_v082_celebration_never_saved(tmp_path):
-    """SAVE_VERSION stays 18: the celebration is transient — a save
-    written mid-dashboard carries no celebration key, and an old
-    doc carrying one migrates cleanly without it."""
+    """SAVE_VERSION is 19 in v0.8.3 (once-per-season activity uses):
+    the celebration is transient — a save written mid-dashboard
+    carries no celebration key, and an old doc carrying one migrates
+    cleanly without it."""
     from f1.saves import SAVE_VERSION, load_save, migrate_save, save_career
-    assert SAVE_VERSION == 18
+    assert SAVE_VERSION == 19
     career = game.build_new_career("Test", "Matthew")
     career["celebration"] = {
         "year": 2026, "round": 11,
@@ -10583,7 +10588,7 @@ def test_v082_celebration_never_saved(tmp_path):
     with open(tmp_path / f"{meta['save_id']}.json", encoding="utf-8") as f:
         doc = json.load(f)
     assert "celebration" not in doc
-    assert doc["version"] == 18
+    assert doc["version"] == 19
     assert "celebration" not in load_save(str(tmp_path), meta["save_id"])
     doc["celebration"] = {"year": 2026, "round": 11,
                           "driver": None, "team": None}
@@ -10833,7 +10838,11 @@ def test_v082_music_playlist_data_shuffle_and_volume():
                 playlist: window.F1UI.musicPlaylist,
                 theme: window.F1UI.f1Theme,
             })""")
-            assert data["theme"]["id"] == "KTETwgQnbsQ"  # F1 Theme
+            assert data["theme"]["id"] == "52khlKOl1do"  # F1 Theme
+            # v0.8.3: the v0.8.2 theme video is dead (oEmbed 403) —
+            # the ID is the same theme on the official FORMULA 1
+            # channel, with Brian Tyler's own upload as fallback.
+            assert data["theme"]["fallbackId"] == "U4AfqxGJl00"
             pl = data["playlist"]
             assert len(pl) == 15
             import re as _re
@@ -11062,6 +11071,519 @@ def test_v082_celebration_overlay_shows_dismisses_and_stays_dismissed():
                 "document.querySelector('#celebration-body').innerText")
             assert "Lando Norris" in body2
             assert "CONSTRUCTORS" not in body2
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# v0.8.3 — Matthew's third playtest: F1 Theme fix, trophy count, activities
+# once per season, dominance tints (standings / results / history), historic
+# team colours.
+# ---------------------------------------------------------------------------
+
+def test_v083_clinch_trophies_use_cha():
+    """The trophy count comes from the driver's own cumulative count
+    (d["cha"]) + this title — never by counting champion_history
+    rows, which start at 2010. Hamilton (cha 7) shows 8 after
+    winning in 2026; Alonso (cha 2) shows 3; a first-time champion
+    (Piastri, cha 0) shows 1. The history column itself was already
+    right (Hamilton's 2020 row is x7) and needs no change."""
+    career = two_human_career()
+    career["round"] = 10
+    for t in career["teams"]:
+        t["points"] = 300 if t["name"] == "Red Bull" else 280
+    leader, _ = _v082_rig_points(
+        career, "Lewis Hamilton", 230, "Max Verstappen", 150, 25, 0)
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"]["name"] == "Lewis Hamilton"
+    assert cel["driver"]["trophies"] == 8  # 7 real + this one
+    # Reset the previous leader before rigging the next fight.
+    leader["points"] = 100
+    _v082_rig_points(career, "Fernando Alonso", 230,
+                     "Max Verstappen", 150, 25, 0)
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"]["trophies"] == 3  # 2005, 2006 + this one
+    next(d for d in career["drivers"]
+         if d["name"] == "Fernando Alonso")["points"] = 100
+    _v082_rig_points(career, "Oscar Piastri", 230,
+                     "Max Verstappen", 150, 25, 0)
+    cel = game.detect_championship_clinch(career)
+    assert cel is not None
+    assert cel["driver"]["trophies"] == 1
+    row2020 = next(h for h in career["champion_history"]
+                   if h["year"] == 2020)
+    assert row2020["driver"] == "Lewis Hamilton"
+    assert row2020["trophies"] == 7
+
+
+def test_v083_activity_once_per_season_per_team():
+    """Each activity may be used only once per season per team. A
+    second use by another driver on the SAME team is refused; the
+    OTHER team's copy is still usable; a declined activity marks
+    nothing; the one-per-driver-per-round rule still holds; the used
+    set resets at the season rollover. A winter-break use counts
+    toward the outgoing season's set, which the rollover wipes."""
+    career = game.build_new_career("Test", "Matthew")
+    mclaren = team_by_name(career, "McLaren")
+    merc = team_by_name(career, "Mercedes")
+    d1 = game.get_driver(career, mclaren["driver1_id"])
+    d2 = game.get_driver(career, mclaren["driver2_id"])
+    md1 = game.get_driver(career, merc["driver1_id"])
+    mclaren["money"] = 100.0
+    merc["money"] = 100.0
+    ok, why = game.do_activity(career, mclaren["id"], d1["id"], "simulator")
+    assert ok, why
+    assert "simulator" in mclaren.get("activities_used", [])
+    # Same activity, another driver, same team, same season: refused.
+    ok, why = game.do_activity(career, mclaren["id"], d2["id"], "simulator")
+    assert not ok and "already used this season" in why
+    # A different activity on the same team still works.
+    ok, why = game.do_activity(career, mclaren["id"], d2["id"], "team_dinner")
+    assert ok, why
+    # The other team's copy is untouched.
+    ok, why = game.do_activity(career, merc["id"], md1["id"], "simulator")
+    assert ok, why
+    assert "simulator" in merc.get("activities_used", [])
+    # One-per-driver-per-round still holds.
+    ok, why = game.do_activity(career, mclaren["id"], d1["id"], "media_day")
+    assert not ok and "already did an activity" in why
+    # A declined activity marks nothing: unhappy, 0.5 roll declines.
+    career["round"] = 2
+    _set_relation(d2, mclaren["id"], 2.0, 3.0)
+    ok, why = game.do_activity(career, mclaren["id"], d2["id"], "karting",
+                               rng=_SeqRng([0.5]))
+    assert not ok and "turned the activity down" in why
+    assert "karting" not in mclaren.get("activities_used", [])
+    ok, why = game.do_activity(career, mclaren["id"], d2["id"], "karting",
+                               rng=_SeqRng([0.7]))
+    assert ok, why
+    assert "karting" in mclaren.get("activities_used", [])
+    # Winter break: a use counts toward the outgoing season's set.
+    career["phase"] = "winter_break"
+    career["wb_round"] = 1
+    ok, why = game.do_activity(career, mclaren["id"], d1["id"], "media_day")
+    assert ok, why
+    assert "media_day" in mclaren.get("activities_used", [])
+    # The rollover wipes the set — every activity is available again.
+    career["wb_done"] = True
+    ok, why = game.start_next_season(career, rng=seeded(1))
+    assert ok, why
+    assert mclaren.get("activities_used") == []
+    ok, why = game.do_activity(career, mclaren["id"], d1["id"], "simulator")
+    assert ok, why
+
+
+def test_v083_activity_migration_v18_to_v19():
+    """A v18 save (no activities_used) migrates to v19 with every
+    team starting empty; a doc that already carries uses keeps them."""
+    from f1.saves import SAVE_VERSION, migrate_save
+    assert SAVE_VERSION == 19
+    career = game.build_new_career("Test", "Matthew")
+    doc = json.loads(json.dumps(career))
+    for t in doc["teams"]:
+        t.pop("activities_used", None)
+    doc["version"] = 18
+    migrated = migrate_save(doc)
+    assert migrated["version"] == 19
+    assert all(t.get("activities_used") == [] for t in migrated["teams"])
+    doc["teams"][0]["activities_used"] = ["karting"]
+    migrated = migrate_save(doc)
+    assert migrated["teams"][0]["activities_used"] == ["karting"]
+
+
+def test_v083_dominance_helpers_and_historic_colours():
+    """The gap→intensity mapping (below start 0, at start 0, linear
+    between, at full max, above full max), the tint (pop-up faint
+    level "2e" at full, half of that halfway, null with no gap or no
+    colour), the two-sided gradient (middle is the natural blend;
+    a side below its threshold contributes its colour at alpha 00),
+    season-final gaps, the full historic colour list, and the music
+    error-fallback decisions (pure function, no YouTube needed)."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/")
+            assert page.evaluate("""() => {
+                const f = window.F1UI.dominanceIntensity;
+                return [f(19, 20, 60), f(20, 20, 60), f(40, 20, 60),
+                        f(60, 20, 60), f(100, 20, 60), f(39, 40, 80),
+                        f(60, 40, 80), f(80, 40, 80), f(0, 20, 60)];
+            }""") == [0, 0, 0.5, 1, 1, 0, 0.5, 1, 0]
+            assert page.evaluate("""() => {
+                const t = window.F1UI.dominanceTint;
+                return [t("#75F1D3", 60, 20, 60), t("#75F1D3", 40, 20, 60),
+                        t("#75F1D3", 10, 20, 60), t(null, 60, 20, 60),
+                        t("#D52F38", 80, 40, 80)];
+            }""") == ["#75F1D32e", "#75F1D317", None, None, "#D52F382e"]
+            assert page.evaluate("""() => {
+                const g = window.F1UI.dominanceGradient;
+                return [g(60, "#D52F38", 80, "#75F1D3"),
+                        g(10, "#D52F38", 10, "#75F1D3"),
+                        g(60, "#D52F38", 10, "#75F1D3"),
+                        g(10, "#D52F38", 80, "#75F1D3")];
+            }""") == ["linear-gradient(90deg, #D52F382e, #75F1D32e)", None,
+                      "linear-gradient(90deg, #D52F382e, #75F1D300)",
+                      "linear-gradient(90deg, #D52F3800, #75F1D32e)"]
+            assert page.evaluate("""() => window.F1UI.seasonFinalGaps({
+                drivers: [{points: 400}, {points: 320}],
+                constructors: [{points: 700}, {points: 600}]})""") == {
+                "drvGap": 80, "conGap": 100}
+            colours = page.evaluate("window.F1UI.historicTeamColours")
+            for name, want in {
+                    "Renault": "#FFF500", "Alfa Romeo": "#9B0000",
+                    "AlphaTauri": "#8B949E", "Racing Point": "#F596C8",
+                    "Force India": "#F596C8", "Toro Rosso": "#1B2A6B",
+                    "Lotus": "#C8A951", "Lotus F1": "#C8A951",
+                    "Caterham": "#006B3F", "Marussia": "#D21034",
+                    "Manor Marussia": "#D21034", "HRT": "#FFC300",
+                    "Virgin": "#D00000", "Sauber": "#52E252",
+                    "RB F1 Team": "#7091F8", "Alpine F1 Team": "#479FE2",
+                    "Haas F1 Team": "#D5D7D8", "Mercedes": "#75F1D3",
+                    "Ferrari": "#D52F38", "McLaren": "#EF9B33",
+                    "Red Bull": "#145984", "Williams": "#3267D4",
+                    "Aston Martin": "#4B9774"}.items():
+                assert colours[name] == want, name
+            assert page.evaluate(
+                "window.F1UI.historicTeamColour('Renault')") == "#FFF500"
+            assert page.evaluate(
+                "window.F1UI.historicTeamColour('No Such Team')") is None
+            # Live title races from a synthetic career: Hamilton
+            # (Ferrari) leads by 80, Mercedes leads constructors by
+            # 100, an F2 leader with a Ferrari academy leads by 80.
+            page.evaluate("""(career) => { room = {career: career}; }""", {
+                "year": 2026, "round": 5, "phase": "round",
+                "drivers": [
+                    {"id": "d-ham", "name": "Lewis Hamilton", "status": "f1",
+                     "team_id": "t-fer", "last_team_id": None, "points": 230,
+                     "season_wins": 5},
+                    {"id": "d-ver", "name": "Max Verstappen", "status": "f1",
+                     "team_id": "t-rb", "last_team_id": None, "points": 150,
+                     "season_wins": 2},
+                    {"id": "d-f2a", "name": "Alex Dunne", "status": "f2",
+                     "team_id": None, "last_team_id": None, "points": 120,
+                     "season_wins": 3, "academy_team_id": "t-fer"},
+                    {"id": "d-f2b", "name": "Dino Beganovic", "status": "f2",
+                     "team_id": None, "last_team_id": None, "points": 40,
+                     "season_wins": 0, "academy_team_id": None}],
+                "teams": [
+                    {"id": "t-fer", "name": "Ferrari", "colour": "#D52F38",
+                     "points": 300, "season_wins": 5},
+                    {"id": "t-mer", "name": "Mercedes", "colour": "#75F1D3",
+                     "points": 400, "season_wins": 6},
+                    {"id": "t-rb", "name": "Red Bull", "colour": "#145984",
+                     "points": 200, "season_wins": 2}],
+            })
+            gaps = page.evaluate(
+                "() => window.F1UI.championshipGaps(room.career)")
+            assert gaps == {"drvGap": 80, "drvColour": "#D52F38",
+                            "conGap": 100, "conColour": "#75F1D3",
+                            "f2Gap": 80, "f2Colour": "#D52F38"}
+            # Same F2 fight, but the leader has no academy: no tint.
+            page.evaluate("""() => {
+                room.career.drivers.find(d => d.id === "d-f2a")
+                    .academy_team_id = null; }""")
+            gaps = page.evaluate(
+                "() => window.F1UI.championshipGaps(room.career)")
+            assert gaps["f2Gap"] == 80 and gaps["f2Colour"] is None
+            # Cumulative gaps after a race, from race_history rows.
+            page.evaluate("""(hist) => { room.career.race_history = hist; }""", [
+                {"race": [{"driver_id": "d-ham", "team_id": "t-fer",
+                           "points": 25},
+                          {"driver_id": "d-ver", "team_id": "t-rb",
+                           "points": 18}]},
+                {"race": [{"driver_id": "d-ham", "team_id": "t-fer",
+                           "points": 25},
+                          {"driver_id": "d-ver", "team_id": "t-rb",
+                           "points": 0}]},
+            ])
+            after1 = page.evaluate(
+                "() => window.F1UI.raceGapsAfter(room.career.race_history, 0)")
+            assert after1 == {"drvGap": 7, "drvColour": "#D52F38",
+                              "conGap": 7, "conColour": "#D52F38"}
+            after2 = page.evaluate(
+                "() => window.F1UI.raceGapsAfter(room.career.race_history, 1)")
+            assert after2 == {"drvGap": 32, "drvColour": "#D52F38",
+                              "conGap": 32, "conColour": "#D52F38"}
+            # Music error fallback: theme error tries the fallback
+            # upload first, then the playlist; a playlist error just
+            # skips to the next song; no track, no action.
+            assert page.evaluate("""() => {
+                const f = window.F1UI.musicErrorFallback;
+                const theme = window.F1UI.f1Theme;
+                const track = window.F1UI.musicPlaylist[0];
+                return [f(theme, "theme", false), f(theme, "theme", true),
+                        f(track, "playlist", false),
+                        f(track, "theme", false),
+                        f(null, "theme", false)];
+            }""") == ["theme-fallback", "playlist", "next", "next", None]
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def _v083_rigged_career():
+    """A real career, rigged for the tint renders: Hamilton
+    (Ferrari) leads the drivers by 80, Mercedes leads the
+    constructors by 100, an F2 leader with a Ferrari academy leads
+    by 80; two races of history (a small-gap R1, then big-gap
+    races). Serialised for injection into the browser page."""
+    career = game.build_new_career("Tint Test", "Matthew")
+    drv = {d["name"]: d for d in career["drivers"]}
+    teams = {t["name"]: t for t in career["teams"]}
+    drv["Lewis Hamilton"]["points"] = 230
+    drv["Max Verstappen"]["points"] = 150
+    teams["Mercedes"]["points"] = 400
+    teams["Ferrari"]["points"] = 300
+    for t in career["teams"]:
+        if t["name"] not in ("Mercedes", "Ferrari"):
+            t["points"] = 200
+    f2 = [d for d in career["drivers"] if d["status"] == "f2"]
+    f2.sort(key=lambda d: -d["points"])
+    f2[0]["points"] = 120
+    f2[0]["academy_team_id"] = teams["Ferrari"]["id"]
+    for d in f2[1:]:
+        d["points"] = min(d["points"], 40)
+    ham, ves = drv["Lewis Hamilton"], drv["Max Verstappen"]
+    rus = drv["George Russell"]
+    ant = drv["Kimi Antonelli"]
+    fer, mer, rb = teams["Ferrari"], teams["Mercedes"], teams["Red Bull"]
+    lec = drv["Charles Leclerc"]
+
+    def race_row(d, tm, pts):
+        return {"pos": 1, "driver": d["name"], "team": tm["name"],
+                "team_id": tm["id"], "driver_id": d["id"],
+                "points": pts, "gap": "—"}
+
+    career["race_history"] = [
+        # R1: small gaps on both sides (drivers 7, constructors 3).
+        {"year": 2026, "round": 1, "circuit": "Bahrain Grand Prix",
+         "laps": 57,
+         "qual": [race_row(ham, fer, 0)],
+         "race": [race_row(ham, fer, 25), race_row(ves, rb, 18),
+                  race_row(rus, mer, 25), race_row(ant, mer, 18),
+                  race_row(lec, fer, 15)],
+         "top3": [{"driver": "Lewis Hamilton", "team": "Ferrari",
+                   "team_id": fer["id"]}]},
+        # R2–R5: Hamilton 25/race, Verstappen 0; Mercedes 43/race,
+        # Ferrari 25/race — after R5 the cumulative gaps are big on
+        # both sides, with different leaders (Ferrari drivers',
+        # Mercedes constructors').
+    ] + [{"year": 2026, "round": r, "circuit": f"Grand Prix {r}",
+          "laps": 50,
+          "qual": [race_row(ham, fer, 0)],
+          "race": [race_row(ham, fer, 25), race_row(ves, rb, 0),
+                   race_row(rus, mer, 25), race_row(ant, mer, 18),
+                   race_row(lec, fer, 0)],
+          "top3": [{"driver": "Lewis Hamilton" if r < 5 else
+                    "George Russell",
+                    "team": "Ferrari" if r < 5 else "Mercedes",
+                    "team_id": fer["id"] if r < 5 else mer["id"]}]}
+         for r in (2, 3, 4, 5)]
+    return career
+
+
+def test_v083_standings_tint_and_results_gradient_render():
+    """The standings boxes wash into the leader's colour at the
+    pop-up's faint level when the gap is at full (drivers 80,
+    constructors 100, F2 80); the results screen shows the
+    two-sided gradient (Ferrari red left, Mercedes cyan right);
+    with small gaps everywhere there is no tint at all."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.on("pageerror", lambda e: (_ for _ in ()).throw(
+                AssertionError(f"page error: {e}")))
+            page.goto(f"http://127.0.0.1:{port}/")
+            career = _v083_rigged_career()
+            page.evaluate(
+                "(c) => { room = {career: c, players: [], is_host: false}; }",
+                json.loads(json.dumps(career)))
+            page.evaluate("renderTabs()")
+            box = page.evaluate(
+                "document.querySelector('#standings-box').innerHTML")
+            assert box.count('class="dom-tint"') == 3
+            # All three tables at full faint: drivers' + F2 in
+            # Ferrari red, constructors' in Mercedes cyan.
+            assert box.count("background:#D52F382e") == 2
+            assert box.count("background:#75F1D32e") == 1
+            # The results screen: two-sided gradient.
+            career["phase"] = "race_results"
+            career["last_race"] = []
+            career["last_qual"] = []
+            career["results_vote"] = []
+            career["circuit"] = "Bahrain Grand Prix"
+            career["circuit_laps"] = 57
+            page.evaluate(
+                "(c) => { room.career = c; }",
+                json.loads(json.dumps(career)))
+            page.evaluate("renderResults()")
+            bg = page.evaluate(
+                "document.querySelector('#screen-results').style.background")
+            assert "linear-gradient" in bg
+            assert "213, 47, 56" in bg  # Ferrari red, left
+            assert "117, 241, 211" in bg  # Mercedes cyan, right
+            # Small gaps: no tint anywhere.
+            for d in career["drivers"]:
+                d["points"] = min(d["points"], 10)
+            for t in career["teams"]:
+                t["points"] = min(t["points"], 10)
+            page.evaluate(
+                "(c) => { room.career = c; }",
+                json.loads(json.dumps(career)))
+            page.evaluate("renderTabs()")
+            box = page.evaluate(
+                "document.querySelector('#standings-box').innerHTML")
+            # No tint wrapper carries a background now (the team
+            # colour-dots inside the rows still do — those are not tints).
+            assert 'class="dom-tint" style=' not in box
+            page.evaluate("renderResults()")
+            assert page.evaluate(
+                "document.querySelector('#screen-results')"
+                ".style.background") == ""
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_v083_history_tints_overlays_and_picker():
+    """Race history: the year row takes the most updated
+    constructors' gap (Mercedes cyan, full faint); each podium
+    cover takes its race winner's colour at the faint level. The
+    GP overlay shows the two-sided gradient from the gaps after
+    that race (nothing when both gaps are below their start). The
+    season-detail overlay tints each table from that season's
+    final gaps and colours historic teams (Renault yellow). The
+    activity picker greys out an activity already used this season."""
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+    server, thread, port = _v082_start_live_server()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            errs = []
+            page.on("pageerror", lambda e: errs.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/")
+            career = _v083_rigged_career()
+            page.evaluate(
+                "(c) => { room = {career: c, players: [], is_host: false}; }",
+                json.loads(json.dumps(career)))
+            page.evaluate("renderTabs()")
+            hist = page.evaluate(
+                "document.querySelector('#history-box').innerHTML")
+            assert '<tr style="background:#75F1D32e">' in hist
+            cell_r1 = page.evaluate(
+                "document.querySelector('.hist-cell[data-gp=\"0\"]')"
+                ".outerHTML")
+            assert 'style="background:#D52F382e"' in cell_r1  # Hamilton won R1
+            cell_r5 = page.evaluate(
+                "document.querySelector('.hist-cell[data-gp=\"4\"]')"
+                ".outerHTML")
+            assert 'style="background:#75F1D32e"' in cell_r5  # Russell won R5
+            # GP overlay: R1's gaps are below both starts — no gradient.
+            page.evaluate("() => { viewingGP = 0; openOverlay('gp', 'R1'); }")
+            assert page.evaluate(
+                "document.querySelector('[data-overlay=\"gp\"]')"
+                ".style.background") == ""
+            # R5: big gaps both sides — a two-sided gradient.
+            page.evaluate("() => { viewingGP = 4; openOverlay('gp', 'R5'); }")
+            gp_bg = page.evaluate(
+                "document.querySelector('[data-overlay=\"gp\"]')"
+                ".style.background")
+            assert "linear-gradient" in gp_bg
+            assert "213, 47, 56" in gp_bg  # Ferrari red
+            assert "117, 241, 211" in gp_bg  # Mercedes cyan
+            # Season detail, real 2010: drivers' gap 4 (no tint),
+            # constructors' gap 44 (Red Bull, just past the start);
+            # Renault yellow and Toro Rosso navy colour the rows.
+            detail = {"year": 2010, "source": "real", "has_relations": False,
+                      "drivers": [
+                          {"pos": 1, "name": "Sebastian Vettel",
+                           "team": "Red Bull", "team_id": None,
+                           "points": 256, "wins": 5},
+                          {"pos": 2, "name": "Fernando Alonso",
+                           "team": "Ferrari", "team_id": None,
+                           "points": 252, "wins": 5},
+                          {"pos": 8, "name": "Robert Kubica",
+                           "team": "Renault", "team_id": None,
+                           "points": 136, "wins": 0},
+                          {"pos": 16, "name": "Sébastien Buemi",
+                           "team": "Toro Rosso", "team_id": None,
+                           "points": 8, "wins": 0}],
+                      "constructors": [
+                          {"pos": 1, "name": "Red Bull",
+                           "points": 498, "wins": 9},
+                          {"pos": 2, "name": "McLaren",
+                           "points": 454, "wins": 5},
+                          {"pos": 5, "name": "Renault",
+                           "points": 163, "wins": 0},
+                          {"pos": 9, "name": "Toro Rosso",
+                           "points": 13, "wins": 0}]}
+            page.evaluate(
+                "(d) => { viewingSeason = 2010; seasonDetail = d;"
+                " openOverlay('season', 'Season 2010 standings'); }",
+                detail)
+            scrolls = page.evaluate(
+                "[...document.querySelectorAll("
+                "'[data-overlay=\"season\"] .table-scroll')]"
+                ".map(el => el.style.background)")
+            assert scrolls[0] == ""  # drivers' gap 4: no tint
+            assert "20, 89, 132" in scrolls[1]  # Red Bull, faint
+            shtml = page.evaluate(
+                "document.querySelector('[data-overlay=\"season\"] .ov-body')"
+                ".innerHTML")
+            assert "#FFF500" in shtml  # Renault yellow
+            assert "#1B2A6B" in shtml  # Toro Rosso navy
+            # Activity picker: karting already used this season renders
+            # greyed out (disabled); the simulator stays available.
+            page.evaluate("""() => {
+                room.career.phase = "round"; room.career.round = 3;
+                myTeam = {id: "t-fer", name: "Ferrari", colour: "#D52F38",
+                    money: 100, driver1_id: "d-ham", driver2_id: "d-lec",
+                    drivers: [
+                        {id: "d-ham", name: "Lewis Hamilton", happiness: 3.0,
+                         happiness_word: "Neutral", loyalty: 3.0,
+                         salary: 6.7, break_fee: 0, activity_round: null,
+                         points: 0, wins: 0, season_wins: 0,
+                         team_id: "t-fer", status: "f1"},
+                        {id: "d-lec", name: "Charles Leclerc", happiness: 3.0,
+                         happiness_word: "Neutral", loyalty: 3.0,
+                         salary: 5.0, break_fee: 0, activity_round: null,
+                         points: 0, wins: 0, season_wins: 0,
+                         team_id: "t-fer", status: "f1"}],
+                    tr_drivers: [], academy_drivers: [], empty_seats: [],
+                    activities: [
+                        {id: "simulator", name: "Simulator session",
+                         cost: 0.3, happiness: 0.15, loyalty: 0.05},
+                        {id: "karting", name: "Karting day",
+                         cost: 0.3, happiness: 0.15, loyalty: 0.05}],
+                    activities_used: ["karting"]};
+                renderDriversTab();
+            }""")
+            picker = page.evaluate(
+                "document.querySelector('#drivers-box').innerHTML")
+            assert "Karting day — used this season" in picker
+            # Both drivers' pickers grey out karting; the simulator
+            # stays available in both.
+            assert page.evaluate(
+                "[...document.querySelectorAll('#drivers-box option')]"
+                ".map(o => o.value + ':' + o.disabled).join(',')") == \
+                "simulator:false,karting:true,simulator:false,karting:true"
+            assert not errs, errs[:3]
             browser.close()
     finally:
         server.should_exit = True
