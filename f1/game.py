@@ -4570,9 +4570,96 @@ def run_race_weekend(career, rng=None):
     # was just appended above).
     update_driver_happiness(career, rng=rng)
     generate_media_rumours(career, rng=rng)
+    # v0.8.2: championship clinch — did a driver or team JUST become
+    # mathematically uncatchable at the end of THIS race? Transient:
+    # stored on the career so the clients can celebrate after the
+    # race-results NEXT vote, and stripped before any save.
+    career["celebration"] = detect_championship_clinch(career)
     career["phase"] = "qual_results"
     career["results_stage"] = "qual"
     career["results_vote"] = []
+
+
+def detect_championship_clinch(career):
+    """v0.8.2: the championship celebration trigger. A title is
+    clinched at the end of THIS race when the leader's gap over P2
+    now exceeds the maximum points still available in the remaining
+    races, AND it did not already exceed the maximum available
+    before this race. The final race always decides the title if it
+    was not decided before it. Driver max is 25/race, team max is
+    43/race (25+18). Pre-race points are the current points minus
+    what last_race awarded. Because a decided gap can only stay
+    decided (the pre-race gap next race is this race's post-race
+    gap, against a smaller maximum), a clinch can never fire twice.
+    Returns the celebration dict, or None. The trophy count is the
+    driver's titles already in champion_history (real 2010-2025 +
+    game seasons) PLUS this one — the history row for this season is
+    only written at end_of_season."""
+    race_rows = career.get("last_race") or []
+    race_pts = {}
+    team_race_pts = {}
+    for r in race_rows:
+        pts = r.get("points") or 0
+        if r.get("driver_id"):
+            race_pts[r["driver_id"]] = pts
+        if r.get("team_id"):
+            team_race_pts[r["team_id"]] = team_race_pts.get(r["team_id"], 0) + pts
+    rounds_left_after = SEASON_LENGTH - career["round"]
+    rounds_left_before = rounds_left_after + 1
+    is_final = career["round"] >= SEASON_LENGTH
+
+    def _clinch(order, now_pts, pre_pts, max_per_race):
+        """order: ids in post-race standing order. Returns the
+        clinching id, or None."""
+        if len(order) < 2:
+            return None
+        first, second = order[0], order[1]
+        gap_now = now_pts[first] - now_pts[second]
+        if gap_now <= max_per_race * rounds_left_after and not is_final:
+            return None
+        # Pre-race order: same drivers sorted by pre-race points
+        # (post-race order breaks ties — a tie on pre-race points is
+        # a 0 gap, which can never have been "decided before").
+        pre_order = sorted(order, key=lambda i: (-pre_pts.get(i, 0), order.index(i)))
+        pfirst, psecond = pre_order[0], pre_order[1]
+        gap_before = pre_pts.get(pfirst, 0) - pre_pts.get(psecond, 0)
+        if gap_before > max_per_race * rounds_left_before:
+            return None
+        return first
+
+    drv = race_mod.driver_standings(career)
+    drv_ids = [d["id"] for d in drv]
+    now_d = {d["id"]: d["points"] for d in drv}
+    pre_d = {d["id"]: now_d[d["id"]] - race_pts.get(d["id"], 0) for d in drv}
+    drv_champ_id = _clinch(drv_ids, now_d, pre_d, 25)
+    con = race_mod.constructor_standings(career)
+    con_ids = [t["id"] for t in con]
+    now_t = {t["id"]: t["points"] for t in con}
+    pre_t = {t["id"]: now_t[t["id"]] - team_race_pts.get(t["id"], 0) for t in con}
+    team_champ_id = _clinch(con_ids, now_t, pre_t, 43)
+    if drv_champ_id is None and team_champ_id is None:
+        return None
+    cel = {"year": career["year"], "round": career["round"],
+           "driver": None, "team": None}
+    if drv_champ_id is not None:
+        d = get_driver(career, drv_champ_id)
+        tm = get_team(career, d["team_id"]) if d and d.get("team_id") else None
+        if not tm and d and d.get("last_team_id"):
+            tm = get_team(career, d["last_team_id"])
+        past = sum(1 for h in (career.get("champion_history") or [])
+                   if h.get("driver") == d["name"])
+        cel["driver"] = {
+            "name": d["name"],
+            "team": tm["name"] if tm else "",
+            "team_id": tm["id"] if tm else None,
+            "colour": tm["colour"] if tm else None,
+            "trophies": past + 1,
+        }
+    if team_champ_id is not None:
+        tm = get_team(career, team_champ_id)
+        cel["team"] = {"name": tm["name"], "team_id": tm["id"],
+                       "colour": tm["colour"]}
+    return cel
 
 
 # ---------------------------------------------------------------------------

@@ -372,6 +372,11 @@ def migrate_save(doc):
         team.setdefault("junior_share_received_season", 0.0)
     doc.setdefault("relation_proposals", [])
     # v0.6.6: pending donation requests between supplied teams.
+    # v0.8.2: the championship celebration is transient (derived at
+    # race end, shown once on the dashboard) — it is never saved.
+    # An old save carrying one (e.g. exported mid-dashboard) imports
+    # cleanly without it.
+    doc.pop("celebration", None)
     # v0.8.0: donation requests are REMOVED entirely (the cousin
     # drained the Mercedes bot dry) — an old save carrying pending
     # requests imports cleanly, the field is dropped.
@@ -528,6 +533,9 @@ def save_career(career, name, saves_dir):
     """Write the career to saves/{save_id}.json. Returns the save meta."""
     os.makedirs(saves_dir, exist_ok=True)
     doc = copy.deepcopy(career)
+    # v0.8.2: the championship celebration is transient — never
+    # persisted (it is re-derived at the next race end).
+    doc.pop("celebration", None)
     save_id = doc.get("save_id") or uuid.uuid4().hex[:12]
     doc["save_id"] = save_id
     doc["version"] = SAVE_VERSION
