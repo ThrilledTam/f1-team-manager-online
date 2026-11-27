@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.8.3</title>
+<title>F1 Team Manager Online — v0.8.4</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -214,7 +214,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.3 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.4 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -505,7 +505,7 @@
 
 <!-- ================= MENU (v0.7.4) ================= -->
 <div id="screen-cheats" class="hidden">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.3 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.4 beta</span></h1>
   <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
   <p><label><input type="checkbox" id="cheat-custom-retirements"> Custom retirements</label> <span class="note">When ON, only drivers you toggle retire at season end — normal retirements are off. Turning it OFF clears every driver toggle.</span></p>
   <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
@@ -766,9 +766,11 @@ function renderOverlayBody(p){
     // v0.8.3: each standings table takes its own tint from that
     // season's FINAL gaps — drivers' table from the drivers' final
     // gap (20→60), constructors' from the constructors' final gap
-    // (40→80). The gaps come from the detail itself: the baked-in
-    // real standings for 2010–2025, the season snapshots for game
-    // years (get_season_detail builds the detail from either).
+    // (30→90, v0.8.4: was 40→80). The gaps come from the detail
+    // itself: the baked-in real standings for 2010–2025, the season
+    // snapshots for game years (get_season_detail builds the detail
+    // from either). v0.8.4: the tints are one-sided GRADIENTS
+    // (drivers' from the left, constructors' from the right).
     const fin = seasonFinalGaps(d);
     const drvLead = d.drivers.length ? d.drivers[0] : null;
     const conLead = d.constructors.length ? d.constructors[0] : null;
@@ -777,8 +779,8 @@ function renderOverlayBody(p){
     const drvLeadColour = drvLeadTm ? drvLeadTm.colour : (drvLead ? historicTeamColour(drvLead.team) : null);
     const conLeadTm = conLead ? snapTeam(conLead) : null;
     const conLeadColour = conLeadTm ? conLeadTm.colour : (conLead ? historicTeamColour(conLead.name) : null);
-    const drvTint = dominanceTint(drvLeadColour, fin.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
-    const conTint = dominanceTint(conLeadColour, fin.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
+    const drvTint = dominanceSideGradient(drvLeadColour, fin.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL, "left");
+    const conTint = dominanceSideGradient(conLeadColour, fin.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL, "right");
     html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${drvTint ? ` style="background:${drvTint}"` : ""}><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
       `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${conTint ? ` style="background:${conTint}"` : ""}><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>${relNote}`;
   } else if(p.id === "cheat-team"){
@@ -1309,10 +1311,20 @@ function dismissCelebration(){
    exactly the pop-up's faintness. Text stays legible at full tint
    (a faint wash over the dark background, light text on top).
    Thresholds: drivers (F1 + F2) start 20 / full 60; constructors
-   start 40 / full 80. Gap = the leader's points over P2. */
+   start 30 / full 90 (v0.8.4: was 40 / 80). Gap = the leader's
+   points over P2.
+   v0.8.4: GRADIENTS EVERYWHERE — a solid colour makes every other
+   colour dull and unsharp, so no tint is ever a solid wash any
+   more: a one-gap tint is a gradient (drivers' colour from the
+   LEFT, constructors' from the RIGHT, both gaps = both sides as
+   in dominanceGradient). A single-gap gradient fades to the SAME
+   colour at alpha 00 on the other side — never "transparent",
+   which would blend through black — so the fade lands on the
+   panel's own dark background. The celebration pop-up stays a
+   solid faint background (the reference level, not in the list). */
 const DOMINANCE_MAX_ALPHA = "2e";
 const DOMINANCE_DRV_START = 20, DOMINANCE_DRV_FULL = 60;
-const DOMINANCE_CON_START = 40, DOMINANCE_CON_FULL = 80;
+const DOMINANCE_CON_START = 30, DOMINANCE_CON_FULL = 90;
 /* v0.8.3: HISTORIC TEAM COLOURS — the standard real-world colour
    for every team that appears in the real 2010–2025 standings, so
    old standings show coloured drivers/teams instead of plain text.
@@ -1376,6 +1388,32 @@ function dominanceGradient(drvGap, drvColour, conGap, conColour){
   const leftStop = left || (drvColour ? hexWithAlpha(drvColour, "00") : "transparent");
   const rightStop = right || (conColour ? hexWithAlpha(conColour, "00") : "transparent");
   return `linear-gradient(90deg, ${leftStop}, ${rightStop})`;
+}
+function dominanceSideGradient(colour, gap, start, full, side){
+  // v0.8.4: ONE gap's colour as a gradient — the colour at the
+  // gradual intensity on its side (drivers' from the LEFT,
+  // constructors' from the RIGHT), fading to the SAME colour at
+  // alpha 00 on the other side. The far end is fully transparent,
+  // so the fade lands on the panel's own dark background, and the
+  // hue never drifts through black the way "transparent" would.
+  const tint = dominanceTint(colour, gap, start, full);
+  if(!tint) return null;
+  const clear = hexWithAlpha(colour, "00");
+  return side === "right"
+    ? `linear-gradient(90deg, ${clear}, ${tint})`
+    : `linear-gradient(90deg, ${tint}, ${clear})`;
+}
+function dominanceSideGradientFull(colour, side){
+  // v0.8.4: the same one-sided gradient at the FULL faint level
+  // ("2e") — for winner-based covers, which are not gap-ramped:
+  // a podium cover takes its race winner's colour from the LEFT
+  // (the winner is a driver), fading to dark on the right.
+  if(!colour) return null;
+  const tint = hexWithAlpha(colour, DOMINANCE_MAX_ALPHA);
+  const clear = hexWithAlpha(colour, "00");
+  return side === "right"
+    ? `linear-gradient(90deg, ${clear}, ${tint})`
+    : `linear-gradient(90deg, ${tint}, ${clear})`;
 }
 function championshipGaps(c){
   // The live title races from the career state: each leader's gap
@@ -1679,7 +1717,9 @@ document.addEventListener("keydown", musicFirstInteract);
 /* Exposed for the automated markup tests (see tests/test_f1.py). */
 window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor, driverInitials, styleNames,
   musicPlaylist: MUSIC_PLAYLIST, f1Theme: F1_THEME, musicEffectiveVolume, musicShuffleOrder, songPopupDurationMs,
-  musicErrorFallback, dominanceIntensity, dominanceTint, dominanceGradient, championshipGaps, historicTeamColours,
+  musicErrorFallback, dominanceIntensity, dominanceTint, dominanceGradient, dominanceSideGradient, dominanceSideGradientFull,
+  dominanceDrvStart: DOMINANCE_DRV_START, dominanceDrvFull: DOMINANCE_DRV_FULL,
+  dominanceConStart: DOMINANCE_CON_START, dominanceConFull: DOMINANCE_CON_FULL, championshipGaps, historicTeamColours,
   historicTeamColour, raceGapsAfter, seasonFinalGaps,
   setMusicVolume, musicVolume, showSongPopup, hideSongPopup, syncCelebration, celebrationSignature, celebrationHtml };
 
@@ -3171,11 +3211,14 @@ function renderTabs(){
   // team's colour instead, with a small T&R badge.
   // v0.8.3: DOMINANCE TINTS — each standings table washes faintly
   // into its leader's team colour (whole table, true gradual with
-  // the gap: drivers 20→60, constructors 40→80, F2 like drivers).
+  // the gap: drivers 20→60, constructors 30→90, F2 like drivers).
+  // v0.8.4: the washes are one-sided GRADIENTS, not solid tints —
+  // drivers' (and F2) colour from the left, constructors' from the
+  // right, fading to the panel's dark background.
   const gaps = championshipGaps(c);
-  const drvTint = dominanceTint(gaps.drvColour, gaps.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
-  const conTint = dominanceTint(gaps.conColour, gaps.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
-  const f2Tint = dominanceTint(gaps.f2Colour, gaps.f2Gap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
+  const drvTint = dominanceSideGradient(gaps.drvColour, gaps.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL, "left");
+  const conTint = dominanceSideGradient(gaps.conColour, gaps.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL, "right");
+  const f2Tint = dominanceSideGradient(gaps.f2Colour, gaps.f2Gap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL, "left");
   const tintWrap = (tint, inner) => `<div class="dom-tint"${tint ? ` style="background:${tint}"` : ""}>${inner}</div>`;
   $("standings-box").innerHTML = tintWrap(drvTint, `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; const v = f1Val(d); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") + "</table></div>") +
@@ -3212,6 +3255,9 @@ function renderTabs(){
   // season (from the live teams). Each race's podium cover rests
   // on that tinted row with its own background: the race winner's
   // team colour at the pop-up's faint level.
+  // v0.8.4: both are GRADIENTS now — the row's constructors'
+  // colour from the RIGHT, each cover's winner colour from the
+  // LEFT at the full faint level (winner-based, not gap-ramped).
   const conForYear = y => {
     const sorted = arr => [...arr].sort((a, b) => (b.points || 0) - (a.points || 0));
     const snap = y === c.year ? null : snapshotForYear(y);
@@ -3224,7 +3270,7 @@ function renderTabs(){
   };
   const gridRows = seasons.map(y => {
     const yCon = conForYear(y);
-    const rowTint = dominanceTint(yCon.colour, yCon.gap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
+    const rowTint = dominanceSideGradient(yCon.colour, yCon.gap, DOMINANCE_CON_START, DOMINANCE_CON_FULL, "right");
     const cells = Array.from({length: 12}, (_, i) => {
       const idx = histByKey[y + "-" + (i + 1)];
       if(idx === undefined) return `<td><div class="hist-cell empty">—</div></td>`;
@@ -3236,7 +3282,7 @@ function renderTabs(){
       }).join("");
       const win = (r.top3 || [])[0];
       const winTm = win ? (win.team_id ? teamById(win.team_id) : c.teams.find(t => t.name === win.team)) : null;
-      const winTint = winTm ? hexWithAlpha(winTm.colour, DOMINANCE_MAX_ALPHA) : null;
+      const winTint = winTm ? dominanceSideGradientFull(winTm.colour, "left") : null;
       return `<td><div class="hist-cell" data-gp="${idx}"${winTint ? ` style="background:${winTint}"` : ""} title="${esc(r.circuit || "")} — click for the full GP">${tops}</div></td>`;
     }).join("");
     return `<tr${rowTint ? ` style="background:${rowTint}"` : ""}><td>${y}</td>${cells}</tr>`;
