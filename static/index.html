@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>F1 Team Manager Online — v0.8.4</title>
+<title>F1 Team Manager Online — v0.8.5</title>
 <style>
   * { box-sizing: border-box; }
   html, body { overflow-x: hidden; }
@@ -148,6 +148,15 @@
   #music-player { position:fixed; width:1px; height:1px; left:-10px; top:-10px; opacity:0; pointer-events:none; }
   .music-hint { display:block; margin-top:4px; }
   .music-hint.hidden { display:none; }
+  /* v0.8.5 (12): the dashboard background — the viewing player's
+     OWN team colour, very faint, top to bottom. A fixed layer at
+     z-index -1, so it sits strictly BEHIND every dashboard element
+     (tabs, panels, pop-ups, modals all paint above it) and can never
+     tint their colours: every card keeps its own opaque background.
+     Dashboard only — the lobby has no team yet, so the layer stays
+     hidden there. pointer-events off so it can never be tapped. */
+  #dash-bg { position:fixed; inset:0; z-index:-1; pointer-events:none; }
+  #dash-bg.hidden { display:none; }
   /* v0.3 race history grid: seasons as rows, R1..R12 as columns, top-3
      initials stacked in each cell (Matthew's PyCharm layout).
      v0.4.3: the grid is as wide as the dashboard — fixed layout with
@@ -214,7 +223,7 @@
 
 <!-- ================= HOME ================= -->
 <div id="screen-home">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.4 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.5 beta</span></h1>
   <p class="note">A clean online rebuild of the PyCharm F1 team-manager game. Create a room,
   pick a team, manage it through the season — and race your friends at the same time.</p>
   <div class="card">
@@ -377,6 +386,11 @@
     </div>
   </div>
 
+  <!-- v0.8.5: the manager assistant's suggestions live here (a card
+       of their own, above the tabs) — filled by renderMyTeam when
+       the toggle is on, empty otherwise. -->
+  <div id="assistant-box"></div>
+
   <div class="card">
     <div class="tab-groups">
       <div class="tab-group" style="background:#1b2530"><div class="tab-group-title">Team</div><div class="tab-group-btns">
@@ -397,6 +411,7 @@
       </div></div>
       <div class="tab-group" style="background:#1b2b22"><div class="tab-group-title">System</div><div class="tab-group-btns">
         <button data-tab="saves">Saves</button>
+        <button data-tab="music">Music</button>
         <button data-tab="settings">Settings</button>
       </div></div>
     </div>
@@ -450,18 +465,39 @@
       <div id="saves-list-game"></div>
       <p><label class="note">Import a save file: <input type="file" id="import-file-game" accept=".json,application/json"></label></p>
     </div>
-    <!-- v0.8.2: Settings tab (SYSTEM group) — background music volume.
-         The same setting as the main-menu slider; both stay in sync
-         through localStorage. -->
+    <!-- v0.8.5: Music tab (SYSTEM group, between Save and Settings)
+         — the volume slider (moved from the Settings tab) and the
+         Skip vote button. Everyone in the room hears the same song
+         at the same time (the server picks the order); the F1 Theme
+         takes over on results screens. The lobby keeps its own
+         slider on the main menu (the only volume control before
+         joining a room). -->
+    <div id="tab-music" class="tab hidden">
+      <h3>Music</h3>
+      <p><label>🎵 Music volume
+        <input type="range" id="music-volume-music" min="0" max="100" value="50" style="width:200px; vertical-align:middle">
+        <b id="music-volume-music-val">50</b></label>
+        <br><span class="note">0 = mute, 50 = default, 100 = maximum. The same setting is on the main menu too.</span>
+        <span class="note music-hint" id="music-hint-music">Music starts after your first click or tap on the page.</span></p>
+      <p class="note" id="music-now-playing"></p>
+      <p><button id="btn-music-skip">⏭ Skip song</button>
+        <span class="note" id="music-skip-status">Skip needs every player in the room to vote within 30 seconds.</span></p>
+      <p class="note">Music plays from YouTube (the F1 Theme on results screens, a shared shuffled playlist everywhere else — the server advances it, so the whole room hears the same song). When a new song starts, a pop-up shows its title and artist for 7 seconds (turn it off in Settings).</p>
+    </div>
+    <!-- v0.8.5: Settings tab — two toggles. The volume slider moved
+         to the Music tab. (1) The "now playing" song pop-up toggle:
+         per-player, stored in localStorage; when off the pop-up
+         never shows (the music still plays). (2) The manager
+         assistant toggle: per-team, saved with the career; when on,
+         part of the team's bot manages the Driver Academy
+         (hiring/firing) and suggests its three best next moves each
+         round, for $0.2M per race. -->
     <div id="tab-settings" class="tab hidden">
       <h3>Settings</h3>
-      <p><label>🎵 Music volume
-        <input type="range" id="music-volume-settings" min="0" max="100" value="50" style="width:200px; vertical-align:middle">
-        <b id="music-volume-settings-val">50</b></label>
-        <br><span class="note">0 = mute, 50 = default, 100 = maximum. The same setting is on the main menu too.</span>
-        <span class="note music-hint" id="music-hint-settings">Music starts after your first click or tap on the page.</span></p>
-      <p class="note" id="music-now-playing"></p>
-      <p class="note">Music plays from YouTube (the F1 Theme on results screens, a shuffled playlist everywhere else). When a new song starts, a pop-up shows its title and artist for 7 seconds.</p>
+      <p><label><input type="checkbox" id="set-song-popup" checked> Show the "now playing" song pop-up</label>
+        <br><span class="note">When off, the pop-up never shows — the music still plays.</span></p>
+      <p><label><input type="checkbox" id="set-assistant"> Manager assistant</label>
+        <br><span class="note">When on, the team's bot manages your Driver Academy (hiring/firing) and suggests its three best next moves each round — shown on the dashboard. Costs $0.2M per race. It never touches main seats or T&amp;R.</span></p>
     </div>
   </div>
   <p><button id="btn-leave" class="secondary">Leave room</button>
@@ -495,6 +531,7 @@
 </div>
 
 <!-- ================= MUSIC (v0.8.2) ================= -->
+<div id="dash-bg" class="hidden"></div>
 <div id="music-player"></div>
 <div id="song-popup" class="hidden">
   <div><b>🎵 Now playing</b></div>
@@ -505,7 +542,7 @@
 
 <!-- ================= MENU (v0.7.4) ================= -->
 <div id="screen-cheats" class="hidden">
-  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.4 beta</span></h1>
+  <h1>🏎️ F1 Team Manager <span class="note">Online · v0.8.5 beta</span></h1>
   <p><button id="btn-cheats-back" class="secondary">← Back</button></p>
   <p><label><input type="checkbox" id="cheat-custom-retirements"> Custom retirements</label> <span class="note">When ON, only drivers you toggle retire at season end — normal retirements are off. Turning it OFF clears every driver toggle.</span></p>
   <div class="card"><h2>Car performance</h2><div id="cheats-perf"></div></div>
@@ -672,11 +709,12 @@ function renderOverlayBody(p){
     // null), and the live table it then renders is correct.
     const snapMap = snapshotTeamMap(r.year);
     // v0.8.3: DOMINANCE GRADIENT — the same gradient as the
-    // results screens, from the title races as they stood right
-    // after THIS race (Q3). The panel takes the gradient; with no
-    // gap on either side it clears back to its default #161b22.
+    // results screens, from the constructors' title race as it
+    // stood right after THIS race (Q3). v0.8.5: constructors'-only,
+    // right-to-left. The panel takes the gradient; with no gap it
+    // clears back to its default #161b22.
     const gg = raceGapsAfter(room.career.race_history, viewingGP);
-    const ggrad = dominanceGradient(gg.drvGap, gg.drvColour, gg.conGap, gg.conColour);
+    const ggrad = dominanceGradient(gg.conGap, gg.conColour);
     p.el.style.background = ggrad || "";
     const tables = (r.qual && r.race)
       ? `<h3>Race — ${esc(r.circuit || "")}</h3>${classificationTable(r.race, { showGL: true, teams: snapMap })}<h3>Qualifying — ${esc(r.circuit || "")}</h3>${classificationTable(r.qual, {teams: snapMap})}`
@@ -763,25 +801,19 @@ function renderOverlayBody(p){
     const relNote = d.source === "game" && !d.has_relations
       ? `<p class="note">Team relationships were not recorded for this season (snapshots from before v0.7.2 carry none) — so no supplier is shown, rather than today's.</p>` : "";
     const realTag = d.source === "real" ? " (real F1)" : "";
-    // v0.8.3: each standings table takes its own tint from that
-    // season's FINAL gaps — drivers' table from the drivers' final
-    // gap (20→60), constructors' from the constructors' final gap
-    // (30→90, v0.8.4: was 40→80). The gaps come from the detail
-    // itself: the baked-in real standings for 2010–2025, the season
-    // snapshots for game years (get_season_detail builds the detail
-    // from either). v0.8.4: the tints are one-sided GRADIENTS
-    // (drivers' from the left, constructors' from the right).
+    // v0.8.3: each standings table takes its tint from that
+    // season's FINAL constructors' gap (25→100, v0.8.5: was
+    // 30→90) — both tables, from the right. The gap comes from
+    // the detail itself: the baked-in real standings for 2010–2025,
+    // the season snapshots for game years (get_season_detail builds
+    // the detail from either). v0.8.5: the drivers' table no longer
+    // takes a drivers' gap (the drivers' ramp is gone).
     const fin = seasonFinalGaps(d);
-    const drvLead = d.drivers.length ? d.drivers[0] : null;
     const conLead = d.constructors.length ? d.constructors[0] : null;
-    const drvLeadEntry = drvLead ? ((drvLead.team_id && snapById[drvLead.team_id]) || snapByName[drvLead.team] || null) : null;
-    const drvLeadTm = drvLeadEntry ? snapTeam(drvLeadEntry) : null;
-    const drvLeadColour = drvLeadTm ? drvLeadTm.colour : (drvLead ? historicTeamColour(drvLead.team) : null);
     const conLeadTm = conLead ? snapTeam(conLead) : null;
     const conLeadColour = conLeadTm ? conLeadTm.colour : (conLead ? historicTeamColour(conLead.name) : null);
-    const drvTint = dominanceSideGradient(drvLeadColour, fin.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL, "left");
     const conTint = dominanceSideGradient(conLeadColour, fin.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL, "right");
-    html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${drvTint ? ` style="background:${drvTint}"` : ""}><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
+    html = `<h3>Drivers' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${conTint ? ` style="background:${conTint}"` : ""}><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${drvRows}</table></div>` +
       `<h3>Constructors' Championship — ${d.year}${realTag}</h3><div class="table-scroll"${conTint ? ` style="background:${conTint}"` : ""}><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>${teamRows}</table></div>${relNote}`;
   } else if(p.id === "cheat-team"){
     // v0.7.4: the team pop-up — add/subtract perf and money. The
@@ -1267,6 +1299,15 @@ function celebrationHtml(cel){
   if(cel.team){
     html += `<h2>🏆 ${esc(cel.team.name)} — CONSTRUCTORS' CHAMPIONS ${cel.year}!</h2>`;
   }
+  // v0.8.5: how many rounds are left in the season after the race
+  // just raced (stored on the celebration at detection time, so the
+  // count cannot drift — a clinch in the final race reads 0 left,
+  // shown as "Final round").
+  if(cel.rounds_left !== undefined && cel.rounds_left !== null){
+    html += cel.rounds_left === 0
+      ? `<p>🏁 Final round — the season is decided at the chequered flag!</p>`
+      : `<p>${cel.rounds_left} round${cel.rounds_left === 1 ? "" : "s"} left in the season.</p>`;
+  }
   return html;
 }
 function syncCelebration(screen, cel){
@@ -1304,27 +1345,28 @@ function dismissCelebration(){
    qualifying / race results screens, the race-history recaps and
    the champion-history standings all wash faintly into the leading
    team's colour. The tint is TRUE GRADUAL: 0 below the start
-   threshold, a linear ramp to the champion pop-up's faint level at
-   the full threshold, clamped at max above it. The pop-up's faint
-   level is alpha "2e" (46/255 ≈ 18% — see syncCelebration), reused
-   here as DOMINANCE_MAX_ALPHA so every tint in the game peaks at
-   exactly the pop-up's faintness. Text stays legible at full tint
-   (a faint wash over the dark background, light text on top).
-   Thresholds: drivers (F1 + F2) start 20 / full 60; constructors
-   start 30 / full 90 (v0.8.4: was 40 / 80). Gap = the leader's
-   points over P2.
+   threshold, a linear ramp to the faint level at the full
+   threshold, clamped at max above it. The faint level is alpha
+   "17" (23/255 ≈ 9% — v0.8.5: halved from "2e", 18%). Text stays
+   legible at full tint (a faint wash over the dark background,
+   light text on top). Thresholds: constructors start 25 / full 100
+   (v0.8.5: was 30 / 90). Gap = the leader's points over P2.
+   v0.8.5: there is NO drivers' ramp any more — gradients are only
+   teams-based (the constructors' gap and the constructors'
+   leader's colour, from the RIGHT), except podium covers, which
+   are winner-based and keep the old full faint level "2e" as
+   PODIUM_MAX_ALPHA. F2 has no gradient at all (no constructors'
+   gap in F2). The celebration pop-up stays a solid faint
+   background at "2e" (the reference level, not in the list).
    v0.8.4: GRADIENTS EVERYWHERE — a solid colour makes every other
    colour dull and unsharp, so no tint is ever a solid wash any
-   more: a one-gap tint is a gradient (drivers' colour from the
-   LEFT, constructors' from the RIGHT, both gaps = both sides as
-   in dominanceGradient). A single-gap gradient fades to the SAME
-   colour at alpha 00 on the other side — never "transparent",
-   which would blend through black — so the fade lands on the
-   panel's own dark background. The celebration pop-up stays a
-   solid faint background (the reference level, not in the list). */
-const DOMINANCE_MAX_ALPHA = "2e";
-const DOMINANCE_DRV_START = 20, DOMINANCE_DRV_FULL = 60;
-const DOMINANCE_CON_START = 30, DOMINANCE_CON_FULL = 90;
+   more. A single-gap gradient fades to the SAME colour at alpha 00
+   on the other side — never "transparent", which would blend
+   through black — so the fade lands on the panel's own dark
+   background. */
+const DOMINANCE_MAX_ALPHA = "17";
+const PODIUM_MAX_ALPHA = "2e";
+const DOMINANCE_CON_START = 25, DOMINANCE_CON_FULL = 100;
 /* v0.8.3: HISTORIC TEAM COLOURS — the standard real-world colour
    for every team that appears in the real 2010–2025 standings, so
    old standings show coloured drivers/teams instead of plain text.
@@ -1373,29 +1415,36 @@ function dominanceTint(colour, gap, start, full){
     .toString(16).padStart(2, "0");
   return hexWithAlpha(colour, a);
 }
-function dominanceGradient(drvGap, drvColour, conGap, conColour){
-  // Left = drivers' leader at the drivers' intensity, right =
-  // constructors' leader at the constructors' intensity, the middle
-  // the natural blend of the two (a plain CSS two-stop gradient).
-  // A side below its threshold still contributes its colour at
-  // alpha 00 — never the "transparent" keyword, which would blend
-  // through black and muddy the middle.
-  const left = dominanceTint(drvColour, drvGap,
-    DOMINANCE_DRV_START, DOMINANCE_DRV_FULL);
-  const right = dominanceTint(conColour, conGap,
+function dominanceGradient(conGap, conColour){
+  // v0.8.5: constructors'-ONLY — the constructors' leader's colour
+  // at the constructors' intensity, from the RIGHT to the LEFT (the
+  // colour sits on the right, fading to the same colour at alpha 00
+  // on the left — never the "transparent" keyword, which would
+  // blend through black). Null when the gap is below the start
+  // threshold or there is no colour.
+  const tint = dominanceTint(conColour, conGap,
     DOMINANCE_CON_START, DOMINANCE_CON_FULL);
-  if(!left && !right) return null;
-  const leftStop = left || (drvColour ? hexWithAlpha(drvColour, "00") : "transparent");
-  const rightStop = right || (conColour ? hexWithAlpha(conColour, "00") : "transparent");
-  return `linear-gradient(90deg, ${leftStop}, ${rightStop})`;
+  if(!tint) return null;
+  const clear = hexWithAlpha(conColour, "00");
+  return `linear-gradient(90deg, ${clear}, ${tint})`;
+}
+function dominanceMiddleGradient(colour, gap, start, full){
+  // v0.8.5: the middle-out gradient for Race History year rows —
+  // the colour at the gradual intensity in the CENTRE, fading to
+  // the SAME colour at alpha 00 on BOTH sides (never "transparent").
+  const tint = dominanceTint(colour, gap, start, full);
+  if(!tint) return null;
+  const clear = hexWithAlpha(colour, "00");
+  return `linear-gradient(90deg, ${clear}, ${tint}, ${clear})`;
 }
 function dominanceSideGradient(colour, gap, start, full, side){
   // v0.8.4: ONE gap's colour as a gradient — the colour at the
-  // gradual intensity on its side (drivers' from the LEFT,
-  // constructors' from the RIGHT), fading to the SAME colour at
+  // gradual intensity on its side, fading to the SAME colour at
   // alpha 00 on the other side. The far end is fully transparent,
   // so the fade lands on the panel's own dark background, and the
   // hue never drifts through black the way "transparent" would.
+  // v0.8.5: only ever called with the constructors' gap, from the
+  // RIGHT (the drivers' ramp is gone).
   const tint = dominanceTint(colour, gap, start, full);
   if(!tint) return null;
   const clear = hexWithAlpha(colour, "00");
@@ -1408,69 +1457,66 @@ function dominanceSideGradientFull(colour, side){
   // ("2e") — for winner-based covers, which are not gap-ramped:
   // a podium cover takes its race winner's colour from the LEFT
   // (the winner is a driver), fading to dark on the right.
+  // v0.8.5: the covers are the ONLY gradient not halved — they
+  // keep "2e" via PODIUM_MAX_ALPHA (DOMINANCE_MAX_ALPHA is "17"
+  // now, and halving the constant alone would have dimmed them
+  // too).
   if(!colour) return null;
-  const tint = hexWithAlpha(colour, DOMINANCE_MAX_ALPHA);
+  const tint = hexWithAlpha(colour, PODIUM_MAX_ALPHA);
   const clear = hexWithAlpha(colour, "00");
   return side === "right"
     ? `linear-gradient(90deg, ${clear}, ${tint})`
     : `linear-gradient(90deg, ${tint}, ${clear})`;
 }
+// v0.8.5 (12): the dashboard background — the viewing player's OWN
+// team colour, very faint, top to bottom, as a two-stop wash: the
+// team colour at the halved max tint ("17", ~9%) at the top, fading
+// to the base dark background (#0d1117) at the bottom, so the bottom
+// of the screen looks unchanged. It lives on the fixed #dash-bg
+// layer (z-index -1), strictly BEHIND every dashboard element, and
+// only shows while the dashboard itself is visible — the lobby has
+// no team yet, and results/picker/cheats screens have their own
+// backgrounds. Called from renderAll (after the screen toggles) and
+// from renderMyTeam (my_team can arrive after room_state on join).
+const DASH_BG_ALPHA = "17";
+function syncDashBg(){
+  const el = $("dash-bg");
+  if(!el) return;
+  const show = myTeam && myTeam.colour &&
+    !$("screen-game").classList.contains("hidden");
+  el.classList.toggle("hidden", !show);
+  if(show) el.style.background =
+    `linear-gradient(180deg, ${hexWithAlpha(myTeam.colour, DASH_BG_ALPHA)}, #0d1117)`;
+}
 function championshipGaps(c){
-  // The live title races from the career state: each leader's gap
-  // over P2 and their team colour. Only the top two point totals
-  // matter for a gap (a tie is a 0 gap), so a plain points sort is
-  // enough — the standings' finer tie-breaks never change a gap.
-  // F2: the leader's colour is the colour their name is shown in
-  // (T&R team first, else academy); no affiliation, no tint.
-  const out = {drvGap: 0, drvColour: null, conGap: 0, conColour: null,
-               f2Gap: 0, f2Colour: null};
+  // The live constructors' title race from the career state: the
+  // leader's gap over P2 and their team colour. Only the top two
+  // point totals matter for a gap (a tie is a 0 gap), so a plain
+  // points sort is enough — the standings' finer tie-breaks never
+  // change a gap. v0.8.5: constructors'-ONLY (the drivers' ramp is
+  // gone, and F2 has no gradient at all — no constructors' gap in
+  // F2), so the drivers'/F2 computations are deleted, not left dead.
+  const out = {conGap: 0, conColour: null};
   if(!c) return out;
-  const f1Pts = d => d.f2_tr ? (d.f1_points || 0) : (d.points || 0);
-  const drv = [...(c.drivers || []).filter(d => d.status === "f1"
-    || (d.status === "free" && d.points > 0) || (d.f1_races || 0) > 0)]
-    .sort((a, b) => f1Pts(b) - f1Pts(a));
-  if(drv.length > 1) out.drvGap = f1Pts(drv[0]) - f1Pts(drv[1]);
-  if(drv.length){
-    const tm = standingTeamFor(drv[0]);
-    out.drvColour = (drv[0].team_id && tm) ? tm.colour : null;
-  }
   const teams = [...(c.teams || [])].sort((a, b) => (b.points || 0) - (a.points || 0));
   if(teams.length > 1) out.conGap = (teams[0].points || 0) - (teams[1].points || 0);
   if(teams.length) out.conColour = teams[0].colour || null;
-  const f2 = [...(c.drivers || []).filter(d => d.status === "f2" || d.f2_tr)]
-    .sort((a, b) => (b.points || 0) - (a.points || 0));
-  if(f2.length > 1) out.f2Gap = (f2[0].points || 0) - (f2[1].points || 0);
-  if(f2.length){
-    const d0 = f2[0];
-    const barTeam = (d0.f2_tr ? teamById(d0.team_id) : null)
-      || teamById(d0.academy_team_id);
-    out.f2Colour = barTeam ? barTeam.colour : null;
-  }
   return out;
 }
 function raceGapsAfter(history, uptoIdx){
-  // The title races as they stood right after race uptoIdx: the
-  // cumulative points per driver / team across race_history entries
-  // [0..uptoIdx]. Points follow the driver across teams; a team's
-  // points are the sum of its drivers' points that race.
-  const out = {drvGap: 0, drvColour: null, conGap: 0, conColour: null};
-  const dp = {}, tp = {}, dteam = {};
+  // The constructors' title race as it stood right after race
+  // uptoIdx: the cumulative points per team across race_history
+  // entries [0..uptoIdx]. A team's points are the sum of its
+  // drivers' points that race. v0.8.5: constructors'-ONLY (the
+  // drivers' gap is gone).
+  const out = {conGap: 0, conColour: null};
+  const tp = {};
   for(let i = 0; i <= uptoIdx && i < (history || []).length; i++){
     for(const r of (history[i].race || [])){
       if(!r) continue;
       const pts = r.points || 0;
-      if(r.driver_id){
-        dp[r.driver_id] = (dp[r.driver_id] || 0) + pts;
-        if(r.team_id) dteam[r.driver_id] = r.team_id;
-      }
       if(r.team_id) tp[r.team_id] = (tp[r.team_id] || 0) + pts;
     }
-  }
-  const dOrd = Object.keys(dp).sort((a, b) => dp[b] - dp[a]);
-  if(dOrd.length > 1) out.drvGap = dp[dOrd[0]] - dp[dOrd[1]];
-  if(dOrd.length){
-    const tm = teamById(dteam[dOrd[0]]);
-    out.drvColour = tm ? tm.colour : null;
   }
   const tOrd = Object.keys(tp).sort((a, b) => tp[b] - tp[a]);
   if(tOrd.length > 1) out.conGap = tp[tOrd[0]] - tp[tOrd[1]];
@@ -1481,11 +1527,11 @@ function raceGapsAfter(history, uptoIdx){
   return out;
 }
 function seasonFinalGaps(detail){
-  // A season detail's FINAL gaps (drivers' + constructors') from
-  // its standings arrays, which arrive in position order.
-  const drv = detail.drivers || [], con = detail.constructors || [];
+  // A season detail's FINAL constructors' gap from its standings
+  // array, which arrives in position order. v0.8.5: constructors'-
+  // ONLY (the drivers' gap is gone).
+  const con = detail.constructors || [];
   return {
-    drvGap: drv.length > 1 ? (drv[0].points || 0) - (drv[1].points || 0) : 0,
     conGap: con.length > 1 ? (con[0].points || 0) - (con[1].points || 0) : 0,
   };
 }
@@ -1562,10 +1608,12 @@ function musicVolume(){
   return isNaN(v) ? MUSIC_DEFAULT_VOLUME : Math.max(0, Math.min(100, v));
 }
 function applyMusicVolume(){
-  // Sync both sliders + labels to the stored setting, and push the
-  // effective volume (slider x current track gain) to the player.
+  // Sync all three sliders + labels to the stored setting, and push
+  // the effective volume (slider x current track gain) to the player.
+  // v0.8.5: the dashboard slider moved from the Settings tab to the
+  // Music tab (music-volume-music); the main-menu slider stays.
   const v = musicVolume();
-  [["music-volume-home", "music-volume-home-val"], ["music-volume-settings", "music-volume-settings-val"]].forEach(pair => {
+  [["music-volume-home", "music-volume-home-val"], ["music-volume-music", "music-volume-music-val"]].forEach(pair => {
     const el = $(pair[0]); if(el) el.value = v;
     const lb = $(pair[1]); if(lb) lb.textContent = v;
   });
@@ -1582,9 +1630,21 @@ function musicTrackById(id){
   if(id === F1_THEME.id) return F1_THEME;
   return MUSIC_PLAYLIST.find(t => t.id === id) || null;
 }
+// v0.8.5: the "now playing" song pop-up toggle (Settings tab) —
+// per-player, localStorage, default ON. When off, the pop-up never
+// shows; the music still plays.
+const SONG_POPUP_KEY = "f1-song-popup";
+function songPopupEnabled(){
+  try{ return localStorage.getItem(SONG_POPUP_KEY) !== "off"; }catch(e){ return true; }
+}
+function setSongPopupEnabled(on){
+  try{ localStorage.setItem(SONG_POPUP_KEY, on ? "on" : "off"); }catch(e){}
+}
 function showSongPopup(track){
   const pop = $("song-popup");
   if(!pop || !track) return;
+  // v0.8.5: the Settings toggle — off means never show the pop-up.
+  if(!songPopupEnabled()) return;
   $("song-popup-title").textContent = track.title;
   $("song-popup-artist").textContent = track.artist;
   pop.classList.remove("hidden");
@@ -1622,6 +1682,91 @@ function musicNextTrack(){
   musicIdx++;
   if(track) musicPlayTrack(track);
 }
+/* v0.8.5: SERVER-SCOPED ROOM MUSIC — in a room the server owns the
+   playlist (one shared shuffled queue per room, in room.music), so
+   every player hears the same song at the same time. The client
+   never advances its own queue in a room: it plays the server's
+   current track, seeking to the elapsed position (started_at is
+   epoch seconds, so elapsed = now − started_at — within a second
+   or two of the other players; sample-accurate sync is not
+   achievable over the web). A joining player seeks straight to the
+   elapsed position too. The F1 Theme still takes over on results
+   screens (musicSyncScreen) — returning to the playlist re-syncs
+   to the server track. The lobby (no room) keeps LOCAL playback
+   (musicNextTrack above). Music state is transient (room-only,
+   never in the save). */
+let musicRoomTrack = null, musicRoomTrackId = null;
+function musicPlayServerTrack(track){
+  musicCurrent = track;
+  if(!musicPlayer) return;
+  try{
+    musicPlayer.setVolume(musicEffectiveVolume(musicVolume(), track.gain));
+    // Seek to where the room already is (0 if the track just started).
+    const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - (track.started_at || Date.now() / 1000)));
+    if(musicInteracted){
+      musicPlayer.loadVideoById({videoId: track.id, startSeconds: elapsed});
+      const np = $("music-now-playing");
+      if(np) np.textContent = `♪ Now playing: ${track.title} — ${track.artist}`;
+      showSongPopup(track);
+    } else {
+      musicPlayer.cueVideoById({videoId: track.id, startSeconds: elapsed});
+    }
+  }catch(e){}
+}
+function musicSyncRoom(musicState){
+  // The room's music state from a room_state broadcast. If the
+  // server's current track differs from the one loaded, load it and
+  // seek to the elapsed position; if it is the same track, leave the
+  // player alone (no re-seek on every broadcast). While the theme
+  // owns the player (results screens) the server track waits.
+  if(!musicState || !musicState.track) return;
+  musicRoomTrack = musicState.track;
+  if(musicMode === "theme") return;
+  if(musicRoomTrackId === musicState.track.id) return;
+  musicRoomTrackId = musicState.track.id;
+  musicPlayServerTrack(musicState.track);
+}
+function musicSyncRoomTrack(){
+  // Re-sync to the server track now (e.g. returning to the playlist
+  // after the results theme) — force a reload + seek even if it is
+  // the same track id, since the theme interrupted it.
+  if(!musicRoomTrack) return;
+  musicRoomTrackId = null;
+  musicSyncRoom({track: musicRoomTrack});
+}
+function sendMusicEnded(){
+  // Tell the server this track is done (played to the end, or
+  // errored — a dead video is treated as ended so the room never
+  // sits stuck on it). The server advances the shared queue only
+  // if the track is still current; a stale report is ignored.
+  const id = musicRoomTrackId;
+  musicRoomTrackId = null;
+  if(!id) return;
+  try{ send({type: "music_ended", track_id: id}); }catch(e){}
+}
+function renderSkipVote(){
+  // v0.8.5: the skip-vote UI (Music tab) — the live countdown and
+  // the vote count from the broadcast. Called on every renderAll
+  // and once a second while the Music tab is open (see the tick
+  // below), so the countdown is live even between broadcasts.
+  const btn = $("btn-music-skip"), st = $("music-skip-status");
+  if(!btn || !st) return;
+  const vote = room && room.music && room.music.skip_vote;
+  if(!vote){
+    btn.disabled = false; btn.textContent = "⏭ Skip song";
+    st.textContent = "Skip needs every player in the room to vote within 30 seconds.";
+    return;
+  }
+  const left = Math.max(0, Math.ceil(vote.deadline - Date.now() / 1000));
+  if(left <= 0){
+    btn.disabled = false; btn.textContent = "⏭ Skip song";
+    st.textContent = "Vote expired — no skip. Start a new vote if you still want to skip.";
+    return;
+  }
+  btn.disabled = !!vote.you_voted;
+  btn.textContent = vote.you_voted ? "✓ Voted to skip" : "⏭ Vote to skip";
+  st.textContent = `Skip vote: ${vote.votes}/${vote.needed} voted — ${left}s left.`;
+}
 /* v0.8.3: a dead video must never fail silently again (the v0.8.2
    theme showed its pop-up but played nothing). The decision is a
    pure function so the automated tests can drive it without
@@ -1642,6 +1787,17 @@ function musicErrorFallback(track, mode, fallbackTried){
   return "next";
 }
 function musicHandlePlayerError(){
+  // v0.8.5: in a room, a playlist-track error is a dead song for
+  // the whole room — report it as ended so the server advances the
+  // shared queue (first report wins; the others are ignored because
+  // the track id no longer matches). A single player's transient
+  // error can skip the song for everyone — the trade-off against
+  // the room sitting stuck on a dead video for all. In the lobby
+  // the old local fallback applies.
+  if(musicMode === "playlist" && room && room.started && musicRoomTrackId){
+    sendMusicEnded();
+    return;
+  }
   const action = musicErrorFallback(musicCurrent, musicMode, themeFallbackTried);
   if(action === "theme-fallback"){
     themeFallbackTried = true;
@@ -1650,7 +1806,10 @@ function musicHandlePlayerError(){
     themeFallbackTried = false;
     themeBroken = true;
     musicMode = "playlist";
-    musicNextTrack();
+    // v0.8.5: a broken theme falls back to the ROOM track in a room,
+    // not the local queue.
+    if(room && room.started) musicSyncRoomTrack();
+    else musicNextTrack();
   } else if(action === "next"){
     musicNextTrack();
   }
@@ -1659,14 +1818,17 @@ function musicSyncScreen(screen){
   // Results screens get the F1 Theme; everything else gets the
   // playlist. A mode change switches the track; staying on the same
   // screen never restarts the song (renderAll runs on every
-  // broadcast). Returning to the playlist after results advances
-  // to the next song in the queue (a fresh shuffle if it ran out)
-  // rather than resuming the interrupted song mid-way.
+  // broadcast). Returning to the playlist after results re-syncs to
+  // the server track in a room (a fresh seek to the elapsed
+  // position) or advances to the next song in the local queue in
+  // the lobby (a fresh shuffle if it ran out) rather than resuming
+  // the interrupted song mid-way.
   // v0.8.3: a broken theme stays broken for the session (see above).
   const mode = screen === "results" && !themeBroken ? "theme" : "playlist";
   if(mode === musicMode) return;
   musicMode = mode;
   if(mode === "theme") musicPlayTrack(F1_THEME);
+  else if(room && room.started) musicSyncRoomTrack();
   else musicNextTrack();
 }
 function musicCreatePlayer(){
@@ -1685,6 +1847,11 @@ function musicCreatePlayer(){
           if(e.data === YT.PlayerState.PLAYING && musicCurrent === F1_THEME) themeFallbackTried = false;
           if(e.data === YT.PlayerState.ENDED){
             if(musicMode === "theme") musicPlayTrack(F1_THEME);
+            // v0.8.5: in a room the track ending tells the server to
+            // advance the shared queue (every player's player ends
+            // at about the same time; the server takes the first
+            // report). In the lobby the local queue advances.
+            else if(room && room.started) sendMusicEnded();
             else musicNextTrack();
           }
         },
@@ -1718,10 +1885,10 @@ document.addEventListener("keydown", musicFirstInteract);
 window.F1UI = { driverNameHtml, teamNameHtml, classificationTable, splitName, standingTeamFor, driverInitials, styleNames,
   musicPlaylist: MUSIC_PLAYLIST, f1Theme: F1_THEME, musicEffectiveVolume, musicShuffleOrder, songPopupDurationMs,
   musicErrorFallback, dominanceIntensity, dominanceTint, dominanceGradient, dominanceSideGradient, dominanceSideGradientFull,
-  dominanceDrvStart: DOMINANCE_DRV_START, dominanceDrvFull: DOMINANCE_DRV_FULL,
-  dominanceConStart: DOMINANCE_CON_START, dominanceConFull: DOMINANCE_CON_FULL, championshipGaps, historicTeamColours,
-  historicTeamColour, raceGapsAfter, seasonFinalGaps,
-  setMusicVolume, musicVolume, showSongPopup, hideSongPopup, syncCelebration, celebrationSignature, celebrationHtml };
+  dominanceMiddleGradient, dominanceConStart: DOMINANCE_CON_START, dominanceConFull: DOMINANCE_CON_FULL, championshipGaps, historicTeamColours,
+  historicTeamColour, raceGapsAfter, seasonFinalGaps, syncDashBg, dashBgAlpha: DASH_BG_ALPHA,
+  setMusicVolume, musicVolume, showSongPopup, hideSongPopup, syncCelebration, celebrationSignature, celebrationHtml,
+  musicSyncRoom, musicSyncScreen, renderSkipVote, songPopupEnabled, setSongPopupEnabled };
 
 function colourPicker(elId, current, onPick){
   const el = $(elId); el.innerHTML = "";
@@ -1790,7 +1957,12 @@ function connect(){
       myId = m.player_id; myCode = m.code; room = m.room;
       sessionStorage.setItem("f1code", myCode); sessionStorage.setItem("f1player", myId);
       renderAll();
-    } else if(m.type === "room_state"){ room = m.room; renderAll();
+    } else if(m.type === "room_state"){ room = m.room;
+      // v0.8.5: sync the room's music BEFORE renderAll — renderAll
+      // calls musicSyncScreen, which needs the fresh server track
+      // (not the previous broadcast's) when it re-syncs.
+      musicSyncRoom(m.room.music);
+      renderAll();
     } else if(m.type === "my_team"){ myTeam = m.team; renderMyTeam();
       // v0.4.1: the winter-break card (empty seats, offers) is
       // rendered from myTeam inside renderGame(), and the server
@@ -1873,6 +2045,12 @@ function renderAll(){
   $("screen-game").classList.toggle("hidden", !inGame || inResults || showPicker || cheatsOpen);
   $("screen-results").classList.toggle("hidden", !inResults);
   $("screen-cheats").classList.toggle("hidden", screen !== "cheats");
+  // v0.8.5 (12): the dashboard background follows the screen
+  // toggles above — it shows only while the dashboard is visible.
+  syncDashBg();
+  // v0.8.5 (10): the skip-vote UI follows every broadcast (the
+  // live countdown itself ticks once a second — see below).
+  renderSkipVote();
   if(!inGame) renderLobby();
   else if(inResults) renderResults();
   else if(showPicker) renderPicker();
@@ -1916,13 +2094,13 @@ function renderResults(){
     ? classificationTable(rows, { showGL: !isQual })
     : "<p class='note'>No results yet.</p>";
   // v0.8.3: DOMINANCE GRADIENT — the results screen washes into
-  // the era of domination: the drivers' leader's colour on the
-  // left, the constructors' leader's on the right, the blend in
-  // the middle. The screen takes the gradient and the results card
-  // goes transparent so the wash shows through the table; with no
-  // gap on either side both styles clear back to the defaults.
+  // the era of domination. v0.8.5: constructors'-ONLY — the
+  // constructors' leader's colour from the RIGHT to the LEFT. The
+  // screen takes the gradient and the results card goes transparent
+  // so the wash shows through the table; with no gap both styles
+  // clear back to the defaults.
   const gaps = championshipGaps(c);
-  const grad = dominanceGradient(gaps.drvGap, gaps.drvColour, gaps.conGap, gaps.conColour);
+  const grad = dominanceGradient(gaps.conGap, gaps.conColour);
   $("screen-results").style.background = grad || "";
   const resCard = $("results-table").parentElement;
   if(resCard) resCard.style.background = grad ? "transparent" : "";
@@ -2364,6 +2542,26 @@ function renderMyTeam(){
       <p>Per-race salary cost: ${money(f.salary_per_race)} (${f.driver_costs.map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")}${(f.tr_costs || []).length ? ` · T&R: ${(f.tr_costs || []).map(d => esc(d.driver) + " " + money(d.per_race)).join(", ")}` : ""})</p>
       ${extraLine}
       <p class="note">Per-race gains are paid after each race; salaries are paid after each race; the post-season injection is paid at the end of the season.</p>`;
+  }
+  // v0.8.5 (12): my_team can arrive after room_state on join, so
+  // the dashboard background is re-synced here too.
+  syncDashBg();
+  // v0.8.5 (11): the manager assistant toggle + suggestions. The
+  // Settings checkbox follows the server's per-team toggle; the
+  // suggestions box shows the assistant's top 3 next moves (pick
+  // highlighted) when the toggle is on, and stays empty otherwise.
+  const asToggle = $("set-assistant");
+  if(asToggle) asToggle.checked = !!t.manager_assistant;
+  const abox = $("assistant-box");
+  if(abox){
+    const as = t.assistant_suggestions;
+    if(!t.manager_assistant || !as || !(as.suggestions || []).length){
+      abox.innerHTML = "";
+    } else {
+      abox.innerHTML = `<div class="card"><h3 style="margin-top:0">🤖 Manager assistant — best next moves</h3>` +
+        as.suggestions.map((s, i) => `<p>${i === 0 ? "⭐ <b>Recommended:</b> " : `${i + 1}. `}${esc(s.text)}</p>`).join("") +
+        `<p class="note">Suggestions only — you make the moves. Costs $0.2M per race while the assistant is on (see Settings).</p></div>`;
+    }
   }
 }
 
@@ -3210,21 +3408,20 @@ function renderTabs(){
   // v0.8.0: a T&R driver still racing in F2 (f2_tr) takes their T&R
   // team's colour instead, with a small T&R badge.
   // v0.8.3: DOMINANCE TINTS — each standings table washes faintly
-  // into its leader's team colour (whole table, true gradual with
-  // the gap: drivers 20→60, constructors 30→90, F2 like drivers).
-  // v0.8.4: the washes are one-sided GRADIENTS, not solid tints —
-  // drivers' (and F2) colour from the left, constructors' from the
-  // right, fading to the panel's dark background.
+  // into the leaders' team colour (whole table, true gradual with
+  // the gap). v0.8.4: the washes are one-sided GRADIENTS, not solid
+  // tints. v0.8.5: BOTH F1 tables take the CONSTRUCTORS' gap, from
+  // the right — gradients are only teams-based now (the drivers'
+  // table keeps a gradient, but it is driven by the teams' gap).
+  // F2 has NO gradient at all (no constructors' gap in F2).
   const gaps = championshipGaps(c);
-  const drvTint = dominanceSideGradient(gaps.drvColour, gaps.drvGap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL, "left");
   const conTint = dominanceSideGradient(gaps.conColour, gaps.conGap, DOMINANCE_CON_START, DOMINANCE_CON_FULL, "right");
-  const f2Tint = dominanceSideGradient(gaps.f2Colour, gaps.f2Gap, DOMINANCE_DRV_START, DOMINANCE_DRV_FULL, "left");
   const tintWrap = (tint, inner) => `<div class="dom-tint"${tint ? ` style="background:${tint}"` : ""}>${inner}</div>`;
-  $("standings-box").innerHTML = tintWrap(drvTint, `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
+  $("standings-box").innerHTML = tintWrap(conTint, `<h3>Drivers' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     drv.map((d,i) => { const tm = standingTeamFor(d); const nameColour = (d.team_id && tm) ? tm.colour : null; const v = f1Val(d); return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, true, tm ? tm.colour : null)}</td><td>${tm ? teamNameHtml(tm) : ""}</td><td>${v.pts}</td><td>${v.wins}</td></tr>`; }).join("") + "</table></div>") +
     tintWrap(conTint, `<h3>Constructors' Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     teams.map((t,i) => `<tr><td>${i+1}</td><td><span class="team-bar" style="color:${t.colour}">|</span> <span class="colour-dot" style="background:${t.colour}"></span>${teamNameHtml(t)}</td><td>${t.points}</td><td>${t.season_wins || 0}</td></tr>`).join("") + "</table></div>") +
-    tintWrap(f2Tint, `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
+    tintWrap(null, `<h3>F2 Championship</h3><div class="table-scroll"><table><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Pts</th><th>Wins</th></tr>` +
     (f2.length ? f2.map((d,i) => { const atm = teamById(d.academy_team_id); const trTeam = d.f2_tr ? teamById(d.team_id) : null; const nameColour = trTeam ? trTeam.colour : (atm ? atm.colour : null); const barTeam = trTeam || atm; const trTag = d.f2_tr ? ` <span class="f2-tr-badge" title="Also holds an F1 Test & Reserve contract — still racing F2">T&R</span>` : ""; return `<tr><td>${i+1}</td><td>${driverNameHtml(d.name, nameColour, d.cha, !!barTeam, barTeam ? barTeam.colour : null)}${trTag}</td><td>${atm ? teamNameHtml(atm) : (trTeam ? teamNameHtml(trTeam) : "—")}</td><td>${d.points}</td><td>${d.season_wins || 0}</td></tr>`; }).join("") : `<tr><td colspan="5" class="note">No F2 drivers.</td></tr>`) + "</table></div>");
   // Chart
   if(room.chart_on){
@@ -3270,7 +3467,12 @@ function renderTabs(){
   };
   const gridRows = seasons.map(y => {
     const yCon = conForYear(y);
-    const rowTint = dominanceSideGradient(yCon.colour, yCon.gap, DOMINANCE_CON_START, DOMINANCE_CON_FULL, "right");
+    // v0.8.5: the year row is a MIDDLE-OUT gradient — the
+    // constructors' leader's colour at full intensity in the
+    // CENTRE, fading to the same colour at alpha 00 on both sides.
+    // The podium covers on the row stay dominanceSideGradientFull
+    // (winner's colour from the left), undimmed.
+    const rowTint = dominanceMiddleGradient(yCon.colour, yCon.gap, DOMINANCE_CON_START, DOMINANCE_CON_FULL);
     const cells = Array.from({length: 12}, (_, i) => {
       const idx = histByKey[y + "-" + (i + 1)];
       if(idx === undefined) return `<td><div class="hist-cell empty">—</div></td>`;
@@ -3385,9 +3587,25 @@ $("set-chart").onchange = e => { chartDefault = e.target.checked; };
 // v0.8.2: the two music volume sliders control the SAME setting —
 // either one updates the stored value and both stay in sync.
 $("music-volume-home").oninput = e => setMusicVolume(parseInt(e.target.value, 10));
-$("music-volume-settings").oninput = e => setMusicVolume(parseInt(e.target.value, 10));
+$("music-volume-music").oninput = e => setMusicVolume(parseInt(e.target.value, 10));
 $("btn-celebration-close").onclick = dismissCelebration;
 $("btn-song-close").onclick = hideSongPopup;
+// v0.8.5 (10): the Skip vote button — opens (or joins) the room's
+// 30-second skip vote; the server skips when every connected human
+// has voted. (11) The Settings toggles: the song pop-up toggle is
+// per-player localStorage (synced here at load); the manager
+// assistant toggle is per-team on the server (its checkbox follows
+// my_team in renderMyTeam).
+$("btn-music-skip").onclick = () => send({type: "music_skip_vote"});
+$("set-song-popup").onchange = e => setSongPopupEnabled(e.target.checked);
+$("set-song-popup").checked = songPopupEnabled();
+$("set-assistant").onchange = e => send({type: "assistant_toggle", on: e.target.checked});
+// v0.8.5 (10): the skip-vote countdown ticks once a second while
+// the Music tab is open, so it stays live between broadcasts.
+setInterval(() => {
+  const tab = $("tab-music");
+  if(tab && !tab.classList.contains("hidden")) renderSkipVote();
+}, 1000);
 $("btn-exit").onclick = () => { $("home-exit-note").classList.remove("hidden"); };
 $("btn-copy-link").onclick = () => { const url = location.origin + "/?code=" + room.code;
   if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(() => showOk("lobby-err", "Join link copied."), () => showOk("lobby-err", "Join link: " + url)); }
